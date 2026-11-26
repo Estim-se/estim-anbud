@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 class _Model(BaseModel):
@@ -98,6 +99,9 @@ class Flag(_Model):
     searches: list[str] = Field(default_factory=list, description="Searches run, required for an absence finding")
     reference_rule: str | None = Field(default=None, description="The rule an absence is measured against")
     contractual_exposure: bool = False
+    # Set by code for a focused check's flag (one per outlet item kind, space rule or zero-row post), never by a model:
+    # it keeps the submit_flags schema unchanged, and lens items lose it before validation.
+    check_key: SkipJsonSchema[str | None] = None
 
 
 class Verdict(_Model):

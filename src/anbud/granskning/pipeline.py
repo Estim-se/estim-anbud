@@ -19,12 +19,15 @@ from pathlib import Path
 from typing import Any
 
 from anbud.granskning.catalog import Catalog, with_calc_rate
+from anbud.granskning.check_loop import CHECK_ROLE, STOP_NAMES
+from anbud.granskning.checks import ChecksResult, not_run, run_checks
 from anbud.granskning.contracts import CalcPost, RunInputs
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.finish import Finished, finish
 from anbud.granskning.lenses import Lens
 from anbud.granskning.loop import LoopOutcome, SubmitOutcome, run_tool_loop
 from anbud.granskning.merge import STOP_ERRORS
+from anbud.granskning.outlet_recipe import RecipeError, load_recipe
 from anbud.granskning.page_cards import Cards, read_cards
 from anbud.granskning.prefix import system_blocks
 from anbud.granskning.report import write_reports
@@ -144,10 +147,85 @@ class PipelineResult:
     run_dir: Path
     files: dict[str, Path]
     cost_usd: float = 0.0  # what this pipeline spent, from the run budget: every call, merge and failures included
+    checks: ChecksResult | None = None
 
 
 def _write(store: RunStore, path: Path, value: Any) -> None:
     store.write_file(path, json.dumps(value, ensure_ascii=False, indent=1).encode() + b"\n")
+
+
+def stopped_by(result: GranskningResult) -> str | None:
+    """The stop error the map or a lens ended on (a budget, the spend cap, a stop, a replay miss, prefix drift), or
+    None. The checks would end the same way, so they don't start."""
+    errors = [result.map.outcome.error, *(lens.error for lens in result.lenses)]
+    return next((e for e in errors if e in STOP_NAMES), None)
+
+
+def _run_checks(
+    client: ModelClient,
+    corpus: Corpus,
+    calc: list[CalcPost],
+    toolbox: Toolbox,
+    result: GranskningResult,
+    concurrency: int,
+    say: Callable[[str], None],
+) -> ChecksResult:
+    try:
+        recipe = load_recipe(client.company_id)
+    except RecipeError as exc:  # a missing, unreadable, undecodable or invalid recipe: compare by hand
+        say(f"checks: the customer's outlet recipe can't be read ({type(exc).__name__}); comparing by hand instead")
+        recipe = None
+    return run_checks(
+        client,
+        corpus=corpus,
+        calc=calc,
+        system=system_blocks(corpus, calc),
+        toolbox=toolbox,
+        recipe=recipe,
+        lens_results=result.lenses,
+        concurrency=concurrency,
+        on_progress=say,
+    )
+
+
+def _checks(
+    client: ModelClient,
+    store: RunStore,
+    corpus: Corpus,
+    calc: list[CalcPost],
+    toolbox: Toolbox,
+    result: GranskningResult,
+    run_dir: Path,
+    summary_file: str,
+    concurrency: int,
+    say: Callable[[str], None],
+    enabled: bool = True,
+) -> ChecksResult:
+    """The focused checks after the lenses. Writes `checks.json` (their tables, for the report and for
+    `anbud recipe-extract`) and adds their statuses and costs to the run summary. Nothing here stops the run: a
+    check that fails, or checks that don't run, say so in the report's coverage, and the reports are still written."""
+    stop = stopped_by(result)
+    if not enabled:
+        checks = not_run("bara utvalda linser kördes (--lens); lägg till --checks för att köra kontrollerna")
+    elif stop is not None:
+        checks = not_run(f"körningen hade redan stoppats ({stop})")
+    else:
+        try:
+            checks = _run_checks(client, corpus, calc, toolbox, result, concurrency, say)
+        except Exception as exc:  # noqa: BLE001 - a bug in a check must not cost the run its reports
+            checks = not_run(f"kontrollerna avbröts av ett fel ({type(exc).__name__})")
+    if checks.report.skipped:
+        say(f"checks: not run: {checks.report.skipped}")
+    summary_path = store.run_dir(client.run_id) / summary_file
+    try:
+        _write(store, run_dir / "checks.json", {"summary": checks.summary(), **checks.report.model_dump(mode="json")})
+        summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+        summary["checks"] = checks.summary()
+        summary["checks_cost_usd"] = round(checks.cost_usd, 4)
+        store.write_file(summary_path, canonical(summary))
+    except (OSError, ValueError, StoreError):
+        client.persist_failures += 1
+    return checks
 
 
 def run_pipeline(
@@ -166,7 +244,9 @@ def run_pipeline(
     on_progress: Callable[[str], None] | None = None,
     summary_file: str = "granskning.json",
     code: dict[str, Any] | None = None,
+    checks: bool = True,
 ) -> PipelineResult:
+    """`checks=False` (a run of selected lenses without `--checks`) skips the focused checks; coverage says so."""
     settings = settings or load_settings()
     say = on_progress or (lambda _msg: None)
     spent_before = client.budget.spent
@@ -196,6 +276,8 @@ def run_pipeline(
         code=code,
     )
 
+    checked = _checks(client, store, corpus, calc, toolbox, result, run_dir, summary_file, concurrency, say, checks)
+
     if catalog is not None:
         catalog = with_calc_rate(catalog, calc)
     runs = VerifierRuns()
@@ -218,6 +300,8 @@ def run_pipeline(
         named_not_present=named,
         unread_tiles=sorted(read.failed),
         parallel=concurrency,
+        check_results=checked.lens_results(client.config.model_for(CHECK_ROLE)),
+        checks=checked.report,
     )
     cost = client.budget.spent - spent_before  # every call this pipeline made, merge and failed calls included
     finished.report = finished.report.model_copy(update={"cost_usd": round(cost, 4)})
@@ -234,4 +318,7 @@ def run_pipeline(
     _write(store, files["kronor"], {i.fingerprint: i.kronor.model_dump(mode="json") for i in ordered if i.kronor})
     files["items"] = run_dir / "items.json"
     _write(store, files["items"], [i.model_dump(mode="json") for i in ordered])
-    return PipelineResult(client.run_id, cards, read.failed, result, finished, runs, catalog, run_dir, files, cost)
+    files["checks"] = run_dir / "checks.json"
+    return PipelineResult(
+        client.run_id, cards, read.failed, result, finished, runs, catalog, run_dir, files, cost, checked
+    )

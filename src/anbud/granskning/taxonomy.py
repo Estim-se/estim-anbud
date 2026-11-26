@@ -32,5 +32,6 @@ CLAIM_TYPES: dict[str, tuple[int, str]] = {
     "unpriced_requirement": (15, "A requirement in the documents with no matching post, or a post at zero"),
     "quantity_realism": (16, "A calc quantity that the documents' own counts or areas don't support"),
     "hours_realism": (16, "Calc hours that ignore conditions the documents set (mounting, access, visits)"),
+    "outlet_recipe": (16, "The documents call up a standard for outlets or points per room type; cite that passage"),
     "generic_scope": (17, "Normal scope for this kind of job that the documents never mention"),
 }

@@ -172,9 +172,11 @@ def merge(
     step: str = "merge",
 ) -> list[Item]:
     """Every lens flag ends in exactly one item. Without a client, or when the model's merge fails a check, clusters
-    are left as their same-fingerprint items: code never merges different claims on its own."""
+    are left as their same-fingerprint items: code never merges different claims on its own. A check's flag (one with
+    a `check_key`) stays its own item, outside the model merge, so its money basis is always priced."""
     items = items_from_results(results)
-    groups = clusters(items)
+    checked = [i for i in items if i.flag.check_key is not None]
+    groups = clusters([i for i in items if i.flag.check_key is None])
     multi = [g for g in groups if len(g) > 1]
     if client is None or not multi:
         return items
@@ -209,7 +211,7 @@ def merge(
         accepted = None if n in broken else _accept(group, assigned.get(n, []), corpus)
         merged[n] = accepted if accepted is not None else group
     index = {id(g): n for n, g in enumerate(multi)}
-    out: list[Item] = []
+    out: list[Item] = list(checked)
     for group in groups:
         out.extend(merged[index[id(group)]] if id(group) in index else group)
     return out
