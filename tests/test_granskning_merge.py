@@ -126,4 +126,4 @@ def test_the_merge_goes_through_model_client_on_sonnet() -> None:
     assert len(merge(results, corpus(), client)) == 2
     (params,) = sdk.sent
     assert params["model"] == "claude-sonnet-5-5" and params["max_tokens"] == 8000
-    assert params["tool_choice"] == {"type": "auto"} and len(params["tools"]) == 9
+    assert params["tool_choice"] == {"type": "auto"} and len(params["tools"]) == 10

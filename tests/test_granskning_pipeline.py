@@ -133,6 +133,8 @@ def script(params: dict[str, Any]) -> Any:
             "would_be_wrong_if": "En annan handling flyttar omfattningen.",
         }
         return reply(("submit_verdict", verdict), use=usage(read=40_000))
+    if "set a count per space" in text:  # the per-space check; this tender has no such rule
+        return reply('```json\n{"rules": []}\n```', use=usage(read=40_000))
     lens = re.search(r"review lens `([a-z_]+)`", text).group(1)
     if lens == "regulation" and len(params["messages"]) == 1:
         return reply(("submit_flags", {"flags": [BAD_TYPE_FLAG]}), use=usage(read=40_000))
@@ -224,7 +226,9 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
 
     # The terminal shows ids, statuses, counts and costs only.
     assert "Etappvite" not in out and "närvaro" not in out.lower() and "Central A1" not in out
-    assert "verifier: 4 flags" in out and "2 shown, 1 generic" in out
+    assert "check_space_rules: submitted, 0 flags, 1 turns" in out and "check_zero_rows: skipped" in out
+    assert "<h2>Nollrader och ingår ej (0)</h2>" in page and "Nollrader och ingår ej" in wb.sheetnames
+    assert "verifier: 4 flags" in out and "2 shown, 0 shown unpriced, 1 generic" in out
 
     # The run's manifest and summary record the code it ran with, and the prefix as measured and as estimated.
     manifest = json.loads((RunStore("co-001").run_dir(RUN) / "run.json").read_text())
@@ -232,6 +236,8 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert paid_code["harness_sha"] == "a" * 40 and paid_code["dirty"] is False
     granskning = json.loads((RunStore("co-001").run_dir(RUN) / "granskning.json").read_text())
     assert granskning["code"] == paid_code
+    assert granskning["checks"]["check_space_rules"]["status"] == "submitted" and granskning["checks_cost_usd"] > 0
+    assert json.loads((run_dir / "checks.json").read_text())["recipe"]["status"] == "no_trigger"
     prefix = granskning["prefix"]
     assert prefix["measured_tokens"] == 40_000 and prefix["tier_from"] == "measured"  # the map's cache write
     assert prefix["estimated_tokens"] == int(prefix["chars"] / 1.6) and granskning["prefix_tokens"] == 40_000

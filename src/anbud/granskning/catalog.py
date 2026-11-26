@@ -46,6 +46,11 @@ def _key(text: str) -> str:
     return normalise(text).casefold()
 
 
+def tokens(text: str) -> set[str]:
+    """The words Catalog.search matches on: normalised, casefolded."""
+    return set(_TOKEN.findall(_key(text)))
+
+
 class Catalog(_Model):
     name: str
     label: str = Field(description="Shown next to every figure priced from it")
