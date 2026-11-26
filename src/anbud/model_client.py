@@ -108,6 +108,7 @@ def classify(exc: Exception) -> ModelError:
     message = getattr(exc, "message", None) or type(exc).__name__
     kinds: list[tuple[type[Exception], str]] = [
         (anthropic.EnforcedSpendLimitReachedError, "spend_cap"),
+        (anthropic.RampLimitExceededError, "rate_limited"),
         (anthropic.AuthenticationError, "auth"),
         (anthropic.PermissionDeniedError, "auth"),
         (anthropic.RateLimitError, "rate_limited"),
@@ -124,7 +125,13 @@ def classify(exc: Exception) -> ModelError:
         if isinstance(exc, cls):
             return ModelError(kind, status, request_id, message)
     if isinstance(exc, anthropic.BadRequestError):
-        kind = "schema_rejected" if "schema" in message.lower() else "bad_request"
+        lowered = message.lower()
+        if "usage limit" in lowered:  # a workspace cap arrives as a 400: pause the run, never retry it
+            kind = "spend_cap"
+        elif "schema" in lowered:
+            kind = "schema_rejected"
+        else:
+            kind = "bad_request"
         return ModelError(kind, status, request_id, message)
     return ModelError("status", status, request_id, message)
 
@@ -148,8 +155,9 @@ def keychain_key(service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUN
 def make_sdk_client(config: Config, api_key: str) -> Any:
     import anthropic
 
-    # The base URL comes from config, so ANTHROPIC_BASE_URL can't redirect the key elsewhere.
-    return anthropic.Anthropic(api_key=api_key, base_url=config.api_base, max_retries=2, timeout=600.0)
+    # The base URL comes from config, so ANTHROPIC_BASE_URL can't redirect the key elsewhere. The SDK retries once;
+    # further retries go through the harness's step cache, so a resumed run never pays twice for a finished call.
+    return anthropic.Anthropic(api_key=api_key, base_url=config.api_base, max_retries=1, timeout=600.0)
 
 
 def _digest(*parts: Any) -> str:

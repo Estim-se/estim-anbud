@@ -175,6 +175,11 @@ def test_a_failure_that_may_be_billed_keeps_the_reservation(messages: FakeMessag
         (_status_error(anthropic.AuthenticationError, 401, "bad key"), "auth"),
         (_status_error(anthropic.OverloadedError, 529, "overloaded"), "server"),
         (_status_error(anthropic.BadRequestError, 400, "messages: bad role"), "bad_request"),
+        (
+            _status_error(anthropic.BadRequestError, 400, "You have reached your specified workspace API usage limits"),
+            "spend_cap",
+        ),  # fmt: skip
+        (_status_error(anthropic.RampLimitExceededError, 429, "ramp limit"), "rate_limited"),
         (anthropic.APIConnectionError(request=REQUEST), "connection"),
         (anthropic.APITimeoutError(request=REQUEST), "timeout"),
     ],
@@ -265,3 +270,9 @@ def test_compile_check_reports_a_rejected_schema(monkeypatch, capsys: pytest.Cap
     monkeypatch.setattr(schema_check, "make_sdk_client", lambda config, key: rejecting)
     assert schema_check.main(["--compile"]) == schema_check.FAILED
     assert "too complex" in capsys.readouterr().out
+
+
+def test_the_sdk_retries_once_and_uses_the_configured_base_url() -> None:
+    client = model_client.make_sdk_client(load_config(), "sk-test-value")
+    assert client.max_retries == 1
+    assert str(client.base_url).rstrip("/") == "https://api.anthropic.com"
