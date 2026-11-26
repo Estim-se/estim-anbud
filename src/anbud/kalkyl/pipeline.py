@@ -15,7 +15,7 @@ from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
 from anbud.kalkyl.coverage import uncovered_lines
 from anbud.kalkyl.extract import ChunkResult, extract_all
-from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks
+from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks, not_included_line_ids
 from anbud.kalkyl.match import match_posts
 from anbud.kalkyl.object_list import ObjectList, choose, read_lists
 from anbud.kalkyl.price import (
@@ -54,6 +54,7 @@ class KalkylResult:
     repetition: Repetition | None = None
     rooms_from_rows: int = 0  # apartment rows whose rooms code read from the row's own descriptor
     object_lists: list[ObjectList] = field(default_factory=list)  # sheets that are object lists by the app's rule
+    not_included: set[str] = field(default_factory=set)  # lines that say something isn't part of the contract
 
     @property
     def counted_rows(self) -> set[str]:
@@ -117,6 +118,9 @@ class KalkylResult:
             "lines_not_handled": len(self.uncovered),
             "scope_lines_not_handled": sum(u.line == "scope" for u in self.uncovered),
             "lines_set_aside_by_model": sum(u.set_aside_by_model for u in self.uncovered),
+            "not_included_lines": len(self.not_included),
+            "not_included_set_aside_by_code": sum(u.set_aside_by_code for u in self.uncovered),
+            "posts_citing_not_included": sum(1 for p in self.posts if NOT_INCLUDED_NOTE in p.notes),
             "lines_unresolved": sum(u.unresolved for u in self.uncovered),
             "lines_set_aside_by_kind": dict(
                 sorted(Counter(u.set_aside_kind for u in self.uncovered if u.set_aside_kind).items())
@@ -188,6 +192,8 @@ def run_kalkyl(
     else:
         stats = match_posts(client, posts, catalog, kalkyl.roles[MATCH], kalkyl.match_batch)
     price_posts(posts, catalog, repetition)
+    not_included = not_included_line_ids(corpus, paths)
+    note_not_included(posts, not_included)
     return KalkylResult(
         chunks=chunks,
         chunk_results=results,
@@ -195,7 +201,7 @@ def run_kalkyl(
         rejected=[r for res in results for r in res.rejected],
         objects=objects,
         posts=posts,
-        uncovered=uncovered_lines(chunks, results, verified, _counted(lists)),
+        uncovered=uncovered_lines(chunks, results, verified, _counted(lists), not_included),
         totals=totals_of(posts),
         match_stats=stats,
         paths=paths,
@@ -203,7 +209,21 @@ def run_kalkyl(
         repetition=repetition,
         rooms_from_rows=filled,
         object_lists=lists,
+        not_included=not_included,
     )
+
+
+NOT_INCLUDED_NOTE = "Kontrollera: en citerad rad säger att något inte ingår i entreprenaden"
+
+
+def note_not_included(posts: list[Post], not_included: set[str]) -> None:
+    """A post in the calc that cites a line saying something isn't included gets a note to check it. Code doesn't
+    decide which part of the line is out, so the post keeps its scope and price."""
+    for post in posts:
+        if post.scope in ("excluded", "other_trade"):
+            continue
+        if any(b in not_included for ln in post.lines for b in ln.record.block_ids):
+            post.notes.append(NOT_INCLUDED_NOTE)
 
 
 def _counted(lists: list[ObjectList]) -> set[str]:
