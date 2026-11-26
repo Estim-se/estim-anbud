@@ -178,6 +178,7 @@ class ChunkResult:
     follow_up_ids: list[str] = field(default_factory=list)  # marked lines asked about again (`follow_up`)
     follow_up_error: str | None = None  # the follow-up's error kind; the first answer is kept
     follow_up_rejected: int = 0  # items of the follow-up that failed the checks; not counted as rejected records
+    follow_up_disputed: list[str] = field(default_factory=list)  # asked lines the readings decided differently
 
 
 def _content(message: Any) -> list[Any]:
@@ -246,16 +247,79 @@ FOLLOW_UP = (
 )
 
 
-def unresolved_ids(result: ChunkResult, chunk: Chunk, counted: frozenset[str] = frozenset()) -> list[str]:
+def unresolved_ids(result: ChunkResult, chunk: Chunk, covered: frozenset[str] = frozenset()) -> list[str]:
     """The chunk's marked lines (quantity and scope) the answer neither cited nor covered with a table nor set aside
-    with a definite kind, in chunk order. Rows the code-read object list counts are left out: code uses them anyway."""
+    with a definite kind, in chunk order. `covered` rows are left out: code reads them anyway (the object list's
+    counts, the rows a table is extended over)."""
     used = {c.block_id for record, _ in result.records for c in record.citations}
     for layout in result.tables:
         used.update(layout_rows(layout, chunk))
     definite = {b for s in result.set_aside if s.kind != "unclear" for b in s.block_ids}
     marked = set(chunk.quantity_ids) | set(chunk.scope_ids)
-    done = used | definite | counted
+    done = used | definite | covered
     return [b for b in chunk.block_ids if b in marked and b not in done]
+
+
+def rows_tables_cover(result: ChunkResult, chunk: Chunk, corpus: Corpus, cells: Cells) -> set[str]:
+    """The rows the accepted tables cover once code has extended them, as `apply_tables` will before reading."""
+    taken = {b for s in result.set_aside for b in s.block_ids}
+    taken |= {c.block_id for record, _ in result.records for c in record.citations}
+    rows: set[str] = set()
+    for layout in result.tables:
+        extended, _ = extend_layout(layout, chunk, corpus, cells, taken | rows)
+        rows.update(layout_rows(extended, chunk))
+    return rows
+
+
+READINGS = 2  # the follow-up is answered twice; a line's decision stands only where both readings agree
+DISPUTED = "Oklart: två läsningar av uppföljningen var oense ({kinds})"
+
+
+def decisions(reading: ChunkResult, chunk: Chunk, asked: set[str]) -> dict[str, str]:
+    """What one reading did with each asked line: "record" when a record cites it or a table covers it, otherwise its
+    set-aside kind. Lines the reading left alone are absent."""
+    out: dict[str, str] = {}
+    for item in reading.set_aside:
+        out.update((b, item.kind) for b in item.block_ids if b in asked)
+    for record, _ in reading.records:
+        out.update((c.block_id, "record") for c in record.citations if c.block_id in asked)
+    for layout in reading.tables:
+        out.update((b, "record") for b in layout_rows(layout, chunk) if b in asked)
+    return out
+
+
+def _disputed(block_id: str, seen: list[dict[str, str]], readings: list[ChunkResult]) -> SetAside:
+    kinds = " / ".join(d.get(block_id, "inget svar") for d in seen)
+    missing = next(
+        (s.reason for r in readings for s in r.set_aside if s.kind == "unclear" and block_id in s.block_ids), None
+    )
+    reason = DISPUTED.format(kinds=kinds) + (f". {missing}" if missing else "")
+    return SetAside(block_ids=[block_id], kind="unclear", reason=reason[:300])
+
+
+def _merge_agreed(result: ChunkResult, chunk: Chunk, ids: list[str], readings: list[ChunkResult]) -> None:
+    """Add the first reading's items for the asked lines both readings decided the same way. A line they disagree on
+    becomes unclear, naming both readings and what an unclear reading said is missing, so it is listed as not handled
+    instead of carrying a kind that changes from run to run."""
+    asked = set(ids)
+    seen = [decisions(r, chunk, asked) for r in readings]
+    agreed = {b for b in ids if b in seen[0] and all(d.get(b) == seen[0][b] for d in seen[1:])}
+    recorded = {b for b in agreed if seen[0][b] == "record"}
+    first = readings[0]
+    for record, level in first.records:
+        hits = {c.block_id for c in record.citations} & asked
+        if hits and hits <= recorded:
+            result.records.append((record, level))
+    for layout in first.tables:
+        hits = set(layout_rows(layout, chunk)) & asked
+        if hits and hits <= recorded:
+            result.tables.append(layout)
+    for item in first.set_aside:
+        keep = [b for b in item.block_ids if b in agreed and seen[0][b] == item.kind]
+        if keep:
+            result.set_aside.append(item.model_copy(update={"block_ids": keep}))
+    result.follow_up_disputed = [b for b in ids if b not in agreed and any(b in d for d in seen)]
+    result.set_aside += [_disputed(b, seen, readings) for b in result.follow_up_disputed]
 
 
 def follow_up(
@@ -272,52 +336,52 @@ def follow_up(
 ) -> None:
     """One more turn in the same conversation, only when marked lines are still unresolved: it names them and asks for
     a record or a definite set-aside. The first turns' requests are unchanged, so a rebuild answers them from the cache.
-    What the follow-up adds must be about the lines asked; the rest of it is dropped. Any error keeps the first answer;
-    a budget stop or a stop marker is noted for the caller to halt the run."""
-    ids = unresolved_ids(result, chunk, counted)
+    The turn is answered `READINGS` times (fresh samples of the same request) and only what the readings agree on is
+    kept (`_merge_agreed`); what a reading adds about other lines is dropped. Any error keeps the first answer; a
+    budget stop or a stop marker is noted for the caller to halt the run."""
+    ids = unresolved_ids(result, chunk, counted | rows_tables_cover(result, chunk, corpus, cells))
     if not ids:
         return
     result.follow_up_ids = ids
     messages = [*messages, {"role": "user", "content": FOLLOW_UP.format(n=len(ids), ids=", ".join(ids))}]
-    try:
-        call = client.call(
-            role=EXTRACT,
-            step=f"kalkyl.extract.{chunk.id}",
-            system=system,
-            messages=messages,
-            max_tokens=settings.max_tokens,
-            effort=settings.effort,
+    readings: list[ChunkResult] = []
+    for sample in range(READINGS):
+        try:
+            call = client.call(
+                role=EXTRACT,
+                step=f"kalkyl.extract.{chunk.id}",
+                system=system,
+                messages=messages,
+                max_tokens=settings.max_tokens,
+                effort=settings.effort,
+                sample=sample,
+            )
+        except BudgetExceeded:
+            result.follow_up_error = "budget"
+            return
+        except RunStopped:
+            result.follow_up_error = "stopped"
+            return
+        except ReplayMiss:
+            result.follow_up_error = "replay_miss"
+            return
+        except ModelError as exc:
+            result.follow_up_error = exc.kind
+            return
+        result.turns += 1
+        result.cost_usd += call.cost_usd
+        msg = call.message
+        submit = next(
+            (b for b in msg.content if getattr(b, "type", None) == "tool_use" and b.name == "submit_quantities"), None
         )
-    except BudgetExceeded:
-        result.follow_up_error = "budget"
-        return
-    except RunStopped:
-        result.follow_up_error = "stopped"
-        return
-    except ReplayMiss:
-        result.follow_up_error = "replay_miss"
-        return
-    except ModelError as exc:
-        result.follow_up_error = exc.kind
-        return
-    result.turns += 1
-    result.cost_usd += call.cost_usd
-    msg = call.message
-    submit = next(
-        (b for b in msg.content if getattr(b, "type", None) == "tool_use" and b.name == "submit_quantities"), None
-    )
-    if submit is None or msg.stop_reason == "max_tokens":
-        result.follow_up_error = "truncated" if msg.stop_reason == "max_tokens" else "no_submit"
-        return
-    asked = set(ids)
-    n_records, n_asides, n_tables = len(result.records), len(result.set_aside), len(result.tables)
-    # A failure here leaves the line as the first answer left it (its first rejection, if any, still shows).
-    result.follow_up_rejected = len(_review(submit.input, chunk, corpus, catalog_ids, result, cells))
-    new_records = result.records[n_records:]
-    kept = [(r, lv) for r, lv in new_records if {c.block_id for c in r.citations} & asked]
-    result.records[n_records:] = kept
-    result.set_aside[n_asides:] = [s for s in result.set_aside[n_asides:] if set(s.block_ids) <= asked]
-    result.tables[n_tables:] = [t for t in result.tables[n_tables:] if set(layout_rows(t, chunk)) & asked]
+        if submit is None or msg.stop_reason == "max_tokens":
+            result.follow_up_error = "truncated" if msg.stop_reason == "max_tokens" else "no_submit"
+            return
+        reading = ChunkResult(chunk.id, "submitted")
+        # A failure leaves the line as the first answer left it (its first rejection, if any, still shows).
+        result.follow_up_rejected += len(_review(submit.input, chunk, corpus, catalog_ids, reading, cells))
+        readings.append(reading)
+    _merge_agreed(result, chunk, ids, readings)
 
 
 def _accepted(uses: list[Any], answer: dict[str, str]) -> list[dict[str, Any]]:

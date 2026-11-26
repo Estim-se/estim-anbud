@@ -103,6 +103,7 @@ class KalkylResult:
             "follow_ups": sum(1 for r in self.chunk_results if r.follow_up_ids),
             "follow_up_lines": sum(len(r.follow_up_ids) for r in self.chunk_results),
             "follow_up_lines_resolved": self.follow_up_resolved(),
+            "follow_up_lines_disputed": sum(len(r.follow_up_disputed) for r in self.chunk_results),
             "follow_up_errors": dict(
                 sorted(Counter(r.follow_up_error for r in self.chunk_results if r.follow_up_error).items())
             ),

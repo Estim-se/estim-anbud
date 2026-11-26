@@ -1,7 +1,9 @@
-"""The follow-up turn: one more turn in the same R2 conversation, only for marked lines the answer left unresolved."""
+"""The follow-up turn: one more turn in the same R2 conversation, only for marked lines the answer left unresolved.
+It is answered twice, and a line's decision stands only where both readings agree."""
 
 from __future__ import annotations
 
+import itertools
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -9,16 +11,20 @@ from typing import Any
 
 import pytest
 from kalkyl_synthetic import (
+    BLOCKS,
     GOOD,
+    OUTLINE,
     cite,
     fake_sdk,
     first_block,
     good_handler,
     message,
     req,
+    sheet_cells,
     submit,
     text,
     write_catalog,
+    write_cells,
     write_prep,
 )
 
@@ -28,6 +34,7 @@ from anbud.kalkyl.lines import Chunk
 from anbud.kalkyl.records import SetAside
 from anbud.kalkyl.run import run_dev_tender
 from anbud.kalkyl.settings import EXTRACT, load_kalkyl_config
+from anbud.models import Block
 
 CENTRAL = "aaaaaa-000008"  # "Ny lägenhetscentral i varje lägenhet.": a scope line
 CENTRAL_RECORD = next(r for r in GOOD["aaaaaa-000001"]["records"] if r["what"] == "Lägenhetscentral")
@@ -51,14 +58,15 @@ def _extract_calls(sdk: Any) -> list[dict[str, Any]]:
     return [p for p in sdk.messages.sent if "tools" in p and p["tools"][0]["name"] == "submit_quantities"]
 
 
-def _handler(follow_up_answer: Any):
-    """The first chunk's answer leaves the central unclear; the follow-up answers with `follow_up_answer`."""
+def _handler(*follow_up_answers: Any):
+    """The first chunk's answer leaves the central unclear; the follow-up's readings get `follow_up_answers` in turn."""
+    readings = itertools.count()
 
     def handler(params: dict[str, Any]) -> Any:
         if "tools" in params and params["tools"][0]["name"] == "submit_quantities":
             if first_block(params) == "aaaaaa-000001":
                 if _is_follow_up(params):
-                    return follow_up_answer
+                    return follow_up_answers[next(readings) % len(follow_up_answers)]
                 records = [r for r in GOOD["aaaaaa-000001"]["records"] if r is not CENTRAL_RECORD]
                 return message([submit({"records": records, "set_aside": [UNCLEAR]})])
         return good_handler(params)
@@ -74,9 +82,10 @@ def test_an_unclear_line_gets_one_follow_up_that_resolves_it_and_the_first_turn_
     sdk = fake_sdk(_handler(message([submit({"records": [CENTRAL_RECORD], "set_aside": []}, tool_id="toolu_2")])))
     summary = _run(sdk)
     assert summary["follow_ups"] == 1 and summary["follow_up_lines"] == 1 and summary["follow_up_lines_resolved"] == 1
-    assert summary["lines_unresolved"] == 0
+    assert summary["lines_unresolved"] == 0 and summary["follow_up_lines_disputed"] == 0
     calls = [p for p in _extract_calls(sdk) if first_block(p) == "aaaaaa-000001"]
-    first, follow = calls
+    first, follow, again = calls
+    assert again["messages"] == follow["messages"]  # the second reading is a fresh sample of the same request
     assert f"1 marked line(s) are still unresolved: {CENTRAL}." in follow["messages"][-1]["content"]
     # The follow-up continues the same conversation: the first request is its unchanged prefix, so it stays cached.
     assert follow["messages"][0] == first["messages"][0] and follow["system"] == first["system"]
@@ -120,7 +129,7 @@ def test_a_rebuild_pays_only_for_the_follow_ups(tender: Path) -> None:
     sdk = fake_sdk(_handler(resolve))
     rebuilt = _run(sdk, run_id="kalkyl-rebuild", base_run="kalkyl-base")
     assert rebuilt["follow_ups"] == 1 and rebuilt["lines_unresolved"] == 0
-    assert [_is_follow_up(p) for p in _extract_calls(sdk)] == [True]  # every first turn came from the cache
+    assert [_is_follow_up(p) for p in _extract_calls(sdk)] == [True, True]  # every first turn came from the cache
 
 
 def test_rows_the_object_list_counts_are_never_asked_about() -> None:
@@ -130,3 +139,59 @@ def test_rows_the_object_list_counts_are_never_asked_about() -> None:
     assert unresolved_ids(result, chunk, frozenset({"b1", "b2"})) == ["b3", "b4"]
     result.set_aside.append(SetAside(block_ids=["b4"], kind="no_requirement", reason="a date"))
     assert unresolved_ids(result, chunk, frozenset({"b1", "b2"})) == ["b3"]
+
+
+def test_readings_that_disagree_leave_the_line_unclear_naming_both_instead_of_a_kind_that_flips(tender: Path) -> None:
+    record = message([submit({"records": [CENTRAL_RECORD], "set_aside": []}, tool_id="toolu_2")])
+    other = {"block_ids": [CENTRAL], "kind": "other_trade", "reason": "the client buys it"}
+    other_trade = message([submit({"records": [], "set_aside": [other]}, tool_id="toolu_2")])
+    summary = _run(fake_sdk(_handler(record, other_trade)))
+    assert summary["follow_up_lines_disputed"] == 1 and summary["follow_up_lines_resolved"] == 0
+    assert summary["lines_unresolved"] == 1
+    result = json.loads((tender / "kalkyl" / "kalkyl-fu" / "result.json").read_text())
+    assert "Lägenhetscentral" not in {p["name"] for p in result["posts"]}  # neither reading's item is kept
+    (central,) = [u for u in result["uncovered"] if u["block_id"] == CENTRAL]
+    assert central["set_aside_kind"] == "unclear" and "(record / other_trade)" in central["reason"]
+
+    # When a reading keeps it unclear, the line says what that reading found missing.
+    still = message([submit({"records": [], "set_aside": [{**UNCLEAR, "reason": "no type is named"}]})])
+    _run(fake_sdk(_handler(record, still)), run_id="kalkyl-fu2")
+    result = json.loads((tender / "kalkyl" / "kalkyl-fu2" / "result.json").read_text())
+    (central,) = [u for u in result["uncovered"] if u["block_id"] == CENTRAL]
+    assert "(record / unclear). no type is named" in central["reason"]
+
+    # Two readings that agree resolve it, even with a set-aside.
+    summary = _run(fake_sdk(_handler(other_trade)), run_id="kalkyl-fu3")
+    assert summary["follow_up_lines_resolved"] == 1 and summary["lines_unresolved"] == 0
+
+
+SCHEDULE = [
+    Block(id=f"eeeeee-{n:06d}", doc_id="eeeeeeeeeeee", kind="sheet_row", text=t, sheet="Mängder", row=n)
+    for n, t in enumerate(
+        ["Pos | Benämning | Antal | Enhet"] + [f"{n} | Uttag typ U{n} | {10 * n} | st" for n in range(1, 6)], 1
+    )
+]
+EARLY = {  # the model ends the schedule two rows early
+    "header_block_id": "eeeeee-000001",
+    "first_block_id": "eeeeee-000002",
+    "last_block_id": "eeeeee-000004",
+    "row_kind": "requirement",
+    "scope": "included",
+    "columns": [{"col": "B", "role": "description"}, {"col": "C", "role": "quantity"}, {"col": "D", "role": "unit"}],
+}
+
+
+def test_rows_a_table_will_be_extended_over_are_not_asked_about(data_root: Path) -> None:
+    tender = paths.dev_tender_dir("co-001", "t-0001")
+    write_prep(tender / "prep", [*BLOCKS, *SCHEDULE], OUTLINE)
+    write_cells(tender / "prep", sheet_cells([*BLOCKS, *SCHEDULE]))
+    write_catalog(data_root)
+
+    def handler(params: dict[str, Any]) -> Any:
+        if "tools" in params and params["tools"][0]["name"] == "submit_quantities":
+            if first_block(params) == SCHEDULE[0].id:
+                return message([submit({"records": [], "tables": [EARLY], "set_aside": []})])
+        return good_handler(params)
+
+    summary = _run(fake_sdk(handler))
+    assert summary["table_rows_extended"] == 2 and summary["follow_ups"] == 0
