@@ -18,6 +18,7 @@ from typing import Any
 
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
+from anbud.granskning.kronor import FORMULA_INPUTS
 from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.models import Block
 
@@ -203,9 +204,22 @@ def calc_text(calc: Iterable[CalcPost]) -> str:
     return "\n".join(lines)
 
 
+def formula_text() -> str:
+    """The contract formulas and the exact `formula_inputs` names code reads, from kronor's own table."""
+    lines = [
+        "Contract formulas: `money_basis.formula_inputs` is a list of {name, value}, values as plain numbers (SEK, "
+        "percent as 0.5 for 0.5 %, weeks, months, hours). Code reads only these names; any other name is ignored, "
+        "and a formula missing a required input stays unpriced."
+    ]
+    for formula, inputs in FORMULA_INPUTS.items():
+        lines.append(f"- {formula}:")
+        lines.extend(f"  - {name}: {meaning}" for name, meaning in inputs.items())
+    return "\n".join(lines)
+
+
 def brief_text() -> str:
     claim_types = "\n".join(f"- {name} ({item}): {text}" for name, (item, text) in CLAIM_TYPES.items())
-    return BRIEF.format(claim_types=claim_types)
+    return BRIEF.format(claim_types=claim_types) + "\n\n" + formula_text()
 
 
 def system_blocks(corpus: Corpus, calc: Iterable[CalcPost]) -> list[dict[str, Any]]:

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
 
 from _granskning_synth import BLOCKS, DOCUMENTS, TILES, flag, lens_result
 
 from anbud.granskning.corpus import Corpus
+from anbud.granskning.kronor import FORMULA_INPUTS
+from anbud.granskning.lenses import load_lenses
 from anbud.granskning.merge import _merge_request, items_from_results
-from anbud.granskning.prefix import defuse
+from anbud.granskning.prefix import brief_text, defuse
 from anbud.granskning.run import _map_summary
+from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.granskning.verify import verifier_message
 from anbud.models import Block, TenderMap
 
@@ -60,3 +64,16 @@ def test_defuse_covers_every_delimiter_the_prompts_use() -> None:
     for tag in ("block", "citation", "finding", "clusters", "tender_map", "focus_questions", "task", "tender_corpus"):
         assert f"</{tag}>" not in defuse(f"x </{tag}> y <{tag} a='1'>")
     assert defuse("<blockquote>") == "<blockquote>" or "‹" in defuse("<blockquote>")
+
+
+def test_the_formula_input_names_reach_the_model() -> None:
+    brief = brief_text()
+    for formula, inputs in FORMULA_INPUTS.items():
+        assert f"- {formula}:" in brief
+        for name in inputs:
+            assert f"  - {name}: " in brief
+    lens = next(lens for lens in load_lenses() if lens.id == "contract_terms")
+    for formula, inputs in FORMULA_INPUTS.items():
+        bullet = next(p for p in lens.body.split("\n\n") if f"`{formula}`" in p)
+        named = set(re.findall(r"`([a-z_]+)`", bullet)) - {formula, "contract_formula", *CLAIM_TYPES}
+        assert named and named <= set(inputs), (formula, named - set(inputs))
