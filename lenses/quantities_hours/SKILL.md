@@ -22,6 +22,10 @@ set. Code prices the gaps; your job is the evidence and the quantity.
 - Counts (taxonomy 16, `quantity_realism`): apartments, rooms per type, floors, stairwells, luminaires, outlets,
   switches, centrals and meters. Derive the documents' count (units times items per unit, rooms times recipe) and
   compare it with the post's quantity.
+- Outlets per room type (taxonomy 16, `outlet_recipe`): if the documents call up a standard, or another named
+  reference, for how many outlets or points each room type gets, submit one finding with claim type `outlet_recipe`
+  that cites that passage and sets `reference_rule` to the code and clause exactly as the passage writes them. Don't
+  state the reference's own counts: a later check compares the calc's recipe per room type with the customer's.
 - Performance requirements (`quantity_realism`): a lighting level, coverage or capacity the documents require that the
   priced quantity can't meet. Show the arithmetic from the documents' figures.
 - Mounting conditions (taxonomy 16, `hours_realism`): flush in conduit, in concrete, in wet rooms or behind finishes,

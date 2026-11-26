@@ -97,7 +97,11 @@ def run_tool_loop(
     effort: str = EFFORT,
     lens_id: str | None = None,
     allowed: frozenset[str] | None = None,
+    on_text: SubmitHandler | None = None,
 ) -> LoopOutcome:
+    """With `on_text`, the role answers in text instead of a submit tool: a turn without a tool call is its answer,
+    checked by `on_text` like a submission (one repair turn), and the closing notes ask for the answer."""
+    finish = f"Call {submit_tool} in it" if on_text is None else "Give your final answer in it"
     messages: list[dict[str, Any]] = [{"role": "user", "content": [{"type": "text", "text": first_message}]}]
     out = LoopOutcome(status="truncated")
     extra = 0  # turns granted past the cap for a repair or a nudge
@@ -132,6 +136,16 @@ def run_tool_loop(
             if result.message.stop_reason == "refusal":
                 out.status, out.error = "error", "refusal"
                 return out
+            if on_text is not None:
+                text = "\n".join(str(b.get("text", "")) for b in content if b.get("type") == "text")
+                answer = on_text(text, out.tool_log, repaired)
+                if answer.done:
+                    out.status = "submitted"
+                    return out
+                repaired = True
+                extra += 1
+                messages.append({"role": "user", "content": [{"type": "text", "text": answer.reply}]})
+                continue
             if nudged:
                 out.status = "no_submit"
                 return out
@@ -180,7 +194,7 @@ def run_tool_loop(
             return out
         remaining = max_turns + extra - out.turns
         if remaining <= 1 or out.cost_usd + last_cost >= max_usd:
-            note = f"Your next turn is your last. Call {submit_tool} in it with everything you have found so far."
+            note = f"Your next turn is your last. {finish} with everything you have found so far."
             results.append({"type": "text", "text": note})
         messages.append({"role": "user", "content": results})
 

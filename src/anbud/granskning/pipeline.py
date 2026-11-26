@@ -19,12 +19,15 @@ from pathlib import Path
 from typing import Any
 
 from anbud.granskning.catalog import Catalog, with_calc_rate
+from anbud.granskning.check_loop import CHECK_ROLE
+from anbud.granskning.checks import ChecksResult, run_checks
 from anbud.granskning.contracts import CalcPost, RunInputs
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.finish import Finished, finish
 from anbud.granskning.lenses import Lens
 from anbud.granskning.loop import LoopOutcome, SubmitOutcome, run_tool_loop
 from anbud.granskning.merge import STOP_ERRORS
+from anbud.granskning.outlet_recipe import RecipeError, load_recipe
 from anbud.granskning.page_cards import Cards, read_cards
 from anbud.granskning.prefix import system_blocks
 from anbud.granskning.report import write_reports
@@ -144,10 +147,53 @@ class PipelineResult:
     run_dir: Path
     files: dict[str, Path]
     cost_usd: float = 0.0  # what this pipeline spent, from the run budget: every call, merge and failures included
+    checks: ChecksResult | None = None
 
 
 def _write(store: RunStore, path: Path, value: Any) -> None:
     store.write_file(path, json.dumps(value, ensure_ascii=False, indent=1).encode() + b"\n")
+
+
+def _checks(
+    client: ModelClient,
+    store: RunStore,
+    corpus: Corpus,
+    calc: list[CalcPost],
+    toolbox: Toolbox,
+    result: GranskningResult,
+    run_dir: Path,
+    summary_file: str,
+    concurrency: int,
+    say: Callable[[str], None],
+) -> ChecksResult:
+    """The focused checks after the lenses. Writes `checks.json` (their tables, for the report and for
+    `anbud recipe-extract`) and adds their statuses and costs to the run summary."""
+    try:
+        recipe = load_recipe(client.company_id)
+    except (RecipeError, OSError) as exc:
+        say(f"checks: the customer's outlet recipe can't be read ({type(exc).__name__}); comparing by hand instead")
+        recipe = None
+    checks = run_checks(
+        client,
+        corpus=corpus,
+        calc=calc,
+        system=system_blocks(corpus, calc),
+        toolbox=toolbox,
+        recipe=recipe,
+        lens_results=result.lenses,
+        concurrency=concurrency,
+        on_progress=say,
+    )
+    _write(store, run_dir / "checks.json", {"summary": checks.summary(), **checks.report.model_dump(mode="json")})
+    summary_path = store.run_dir(client.run_id) / summary_file
+    try:
+        summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+        summary["checks"] = checks.summary()
+        summary["checks_cost_usd"] = round(checks.cost_usd, 4)
+        store.write_file(summary_path, canonical(summary))
+    except (OSError, ValueError, StoreError):
+        client.persist_failures += 1
+    return checks
 
 
 def run_pipeline(
@@ -196,6 +242,8 @@ def run_pipeline(
         code=code,
     )
 
+    checks = _checks(client, store, corpus, calc, toolbox, result, run_dir, summary_file, concurrency, say)
+
     if catalog is not None:
         catalog = with_calc_rate(catalog, calc)
     runs = VerifierRuns()
@@ -218,6 +266,8 @@ def run_pipeline(
         named_not_present=named,
         unread_tiles=sorted(read.failed),
         parallel=concurrency,
+        check_results=checks.lens_results(client.config.model_for(CHECK_ROLE)),
+        checks=checks.report,
     )
     cost = client.budget.spent - spent_before  # every call this pipeline made, merge and failed calls included
     finished.report = finished.report.model_copy(update={"cost_usd": round(cost, 4)})
@@ -234,4 +284,7 @@ def run_pipeline(
     _write(store, files["kronor"], {i.fingerprint: i.kronor.model_dump(mode="json") for i in ordered if i.kronor})
     files["items"] = run_dir / "items.json"
     _write(store, files["items"], [i.model_dump(mode="json") for i in ordered])
-    return PipelineResult(client.run_id, cards, read.failed, result, finished, runs, catalog, run_dir, files, cost)
+    files["checks"] = run_dir / "checks.json"
+    return PipelineResult(
+        client.run_id, cards, read.failed, result, finished, runs, catalog, run_dir, files, cost, checks
+    )

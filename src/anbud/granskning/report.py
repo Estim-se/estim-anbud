@@ -26,6 +26,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from pydantic import BaseModel, ConfigDict, Field
 
 from anbud.granskning.catalog import Catalog
+from anbud.granskning.checks import ChecksReport
+from anbud.granskning.checks_report import add_check_sheets, checks_coverage_html, checks_html
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
 from anbud.granskning.rank import Ranked, TenderCoverage, document_names
@@ -77,6 +79,7 @@ class Report(_Model):
     coverage: TenderCoverage
     sources: dict[str, str] = Field(default_factory=dict, description="block id -> where it is, for citations")
     cost_usd: float | None = None
+    checks: ChecksReport | None = Field(default=None, description="Zero rows, per-space rules, outlets per room type")
 
 
 def _where(block: Block, names: dict[str, str]) -> str:
@@ -238,6 +241,7 @@ def render_html(report: Report) -> str:
         parts.append(f"<h2>Generiska fynd ({len(report.generic)})</h2>")
         parts.append('<p class="muted">Normal omfattning som handlingarna inte nämner. Redovisas separat.</p>')
         parts += [_flag_html(n, item, report) for n, item in enumerate(report.generic, 1)]
+    parts += checks_html(report.checks)
     parts.append("<h2>Täckning</h2>")
     parts.append(f"<p><strong>{_e(cov.note)}</strong></p>")
     parts.append(f"<p>{cov.documents} dokument i underlaget.</p>")
@@ -268,6 +272,7 @@ def render_html(report: Report) -> str:
             parts += [f"<li>{_e(line)}</li>" for line in lens.not_checked]
             parts.append("</ul>")
         parts.append("</div>")
+    parts += checks_coverage_html(report.checks)
     if report.logged:
         parts.append(f"<h2>Loggade, visas inte ({len(report.logged)})</h2><table>")
         parts.append("<tr><th>Id</th><th>Varför</th><th>Påstående</th><th>Kronor</th><th>Verifiering</th></tr>")
@@ -402,6 +407,7 @@ def build_workbook(
                 value = "\n".join(value) if key == "not_checked" else "; ".join(value)
             _put(ws, row, col, value)
     keys.append(("Täckning", [k for k, _, _ in COVERAGE_COLUMNS]))
+    keys += add_check_sheets(wb, report.checks)
     about = wb.create_sheet("Om rapporten")
     rows = [
         ("Anbud", report.tender_id),
