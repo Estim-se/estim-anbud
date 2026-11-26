@@ -28,8 +28,32 @@ _ROK = re.compile(
     r"(?![^\W\d_])",
     re.IGNORECASE,
 )
-_WORDS = {"etta": 1, "tvåa": 2, "trea": 3, "fyra": 4, "femma": 5, "sexa": 6, "sjua": 7}
+# The app's ROOM_WORDS: number words ("tre rum") and apartment nouns ("trea").
+ROOM_WORDS = {
+    "en": 1,
+    "ett": 1,
+    "etta": 1,
+    "två": 2,
+    "tvåa": 2,
+    "tre": 3,
+    "trea": 3,
+    "fyra": 4,
+    "fem": 5,
+    "femma": 5,
+    "sex": 6,
+    "sexa": 6,
+    "sju": 7,
+    "sjua": 7,
+}
+_NOUNS = ("etta", "tvåa", "trea", "fyra", "femma", "sexa", "sjua")
+_WORDS = {w: ROOM_WORDS[w] for w in _NOUNS}
 _WORD = re.compile(rf"(?<![^\W\d_])({'|'.join(_WORDS)})(?![^\W\d_])", re.IGNORECASE)
+# roomCountFromLabel's patterns. JS `\d` is ASCII and `\p{L}` a letter: `[0-9]` and `[^\W\d_]` here.
+_LETTER = r"[^\W\d_]"
+_APP_DIGITS = re.compile(rf"(?<![0-9.,])([0-9]+(?:[.,]5)?)\s*(?:rok|r\.?\s*o\.?\s*k|rum|r\s*\+\s*k)(?!{_LETTER})")
+_APP_BARE = re.compile(r"^([0-9]+(?:[.,]5)?)(?:[ ,.]|\Z)")
+_APP_NUMBER_WORD = re.compile(rf"(?<!{_LETTER})(en|ett|två|tre|fyra|fem|sex|sju)\s+(?:rum|rok)(?!{_LETTER})")
+_APP_NOUN = re.compile(rf"(?<!{_LETTER})({'|'.join(_NOUNS)})(?!{_LETTER})")
 APARTMENT_ROOMS: tuple[ObjectKind, ...] = (
     "room",
     "living_room",
@@ -45,6 +69,20 @@ APARTMENT_ROOMS: tuple[ObjectKind, ...] = (
 def _value(raw: str) -> float:
     raw = re.sub(r"\s+", "", raw).replace("½", ".5").replace(",", ".")
     return float(raw)
+
+
+def room_count(label: str, bare: bool = True) -> float | None:
+    """Rooms excluding the kitchen from one cell's type label ("3 rok", "4 rum och kök", "Typ B 2 r.o.k", "trea"), or
+    None. A bare leading number counts only with `bare` (a dedicated room-count column). Half rooms are kept: "3,5
+    rok" and "3½ rum" are 3.5. The app's `roomCountFromLabel`, ported as is."""
+    s = re.sub(r"([0-9])\s*½", r"\1.5", re.sub(r"\s+", " ", label.lower())).strip()
+    if not s:
+        return None
+    m = _APP_DIGITS.search(s) or (_APP_BARE.search(s) if bare else None)
+    if m and float(m.group(1).replace(",", ".")) > 0:
+        return float(m.group(1).replace(",", "."))
+    word = _APP_NUMBER_WORD.search(s) or _APP_NOUN.search(s)
+    return float(ROOM_WORDS[word.group(1)]) if word else None
 
 
 def descriptor(text: str) -> list[Contained]:

@@ -3,6 +3,9 @@
 - A post whose count per object comes from a recipe says which recipe ("kundens recept" or Estim's default) in its
   notes and level, and lists the object rows it counts.
 
+- Översikt says what the object list read by code counted, and for which kinds the model's evidence disagrees with it;
+  Objektmodell says per kind whether code or the model counted it, and lists the blocks the model cited outside the
+  list.
 - Every sheet starts with the catalog's label, so a calc priced on Estim's default catalog says so on every page.
 - Every post shows its citation (block id and quote). Tender text and model output are always written as plain
   strings, never as formulas, and characters a worksheet can't hold are removed.
@@ -204,6 +207,8 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Omfattningsstycken i underlaget", c["scope_lines"], None),
         ("Ej omhändertagna rader och stycken", c["lines_not_handled"], None),
         ("varav omfattningsstycken", c["scope_lines_not_handled"], None),
+        ("Objekt lästa av kod ur objektlistan (som appen)", _code_objects(result), None),
+        ("Modellen avviker från objektlistan för", _disagree(result), None),
         ("Poster per objekt eller rumstyp", c["posts_per_object"], None),
         ("Poster med antal enligt recept", c["posts_from_recipe"], None),
         ("Poster med antaget antal per objekt (1)", c["posts_assumed_per_object"], None),
@@ -216,6 +221,28 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
     for i, (label, value, fmt) in enumerate(rows, FIRST_ROW + 2):
         _put(ws, i, 1, label)
         _put(ws, i, 2, value, fmt)
+
+
+CODE_KINDS = ("apartment", "premises", "stairwell", "stairwell_floor")
+
+
+def _code_objects(result: KalkylResult) -> str:
+    if not result.object_lists:
+        return "ingen objektlista hittades: antalen kommer från modellens rader"
+    parts = []
+    for kind in CODE_KINDS:
+        obj = result.objects.get(kind)
+        if obj is not None and obj.source == "code" and obj.count is not None:
+            parts.append(f"{format(obj.count.normalize(), 'f')} {OBJECT_LABELS[kind][1]}")
+    found = len(result.object_lists)
+    return ", ".join(parts) + (f" ({found} listor hittades, den största används)" if found > 1 else "")
+
+
+def _disagree(result: KalkylResult) -> str:
+    kinds = result.code_model_disagree()
+    if not result.object_lists:
+        return "-"
+    return ", ".join(OBJECT_LABELS[k][1] for k in kinds) if kinds else "ingen avvikelse"
 
 
 def _evidence_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str) -> None:
@@ -271,7 +298,16 @@ def _evidence_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, statu
 
 
 def _objects_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str) -> None:
-    columns = [("Objekt", 16), ("Antal", 10), ("Underlag", 50), ("Konflikt", 40), ("Anmärkning", 40), ("Rader", 40)]
+    columns = [
+        ("Objekt", 16),
+        ("Antal", 10),
+        ("Underlag", 50),
+        ("Konflikt", 40),
+        ("Anmärkning", 40),
+        ("Rader", 40),
+        ("Räknat av", 14),
+        ("Modellens källor utanför objektlistan", 40),
+    ]
     _header(ws, catalog, status, run, columns)
     for r, obj in enumerate(result.objects.values(), FIRST_ROW):
         _put(ws, r, 1, OBJECT_LABELS[obj.kind][1])
@@ -280,6 +316,8 @@ def _objects_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status
         _put(ws, r, 4, obj.conflict or "")
         _put(ws, r, 5, obj.note or "")
         _put(ws, r, 6, ", ".join(obj.rows))
+        _put(ws, r, 7, "kod (objektlistan)" if obj.source == "code" else "modellen")
+        _put(ws, r, 8, ", ".join(obj.model_rows))
 
 
 def _uncovered_sheet(

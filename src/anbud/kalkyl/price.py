@@ -7,6 +7,15 @@ says so, as #73 asks. An apartment row's rooms (`contains`, from the model, a ta
 descriptor) give room types per apartment (`rooms.room_types`), counted the same way with a breakdown per apartment
 type. Room types no row counts (a hall) come from the recipe's per-apartment figure, labelled.
 
+**Object list read by code.** When a sheet is an object list by the app's rule (`object_list`), that list is the
+primary source for apartments, premises (when it has premises rows), stairwells and stairwell floors (when it has an
+address and floor column) and the room types of its apartments' type labels, labelled "objektlistan läst av kod (som
+appens objektmodell)". The model's list rows and stated totals for those kinds stay in the basis; a model figure
+that differs is a conflict note (the list's count is used), and the blocks the model cited outside the list (rows it
+counted, stated totals) are kept with the count. Every other kind (buildings, kitchens and bathrooms a row states) is
+counted from the model's records as before. Stairwell floors are counted by code only: the model's object kinds don't
+name them.
+
 **Requirement quantities.** `stated` is the number written; `lump_sum` is 1; `missing` stays missing. `per_object` is
 the number per object times the object count. A count the quotes don't write is no count, even when the model gives
 one: then the recipe's count for that room type and catalog item (labelled with the recipe's source), else one per
@@ -39,8 +48,9 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from anbud.granskning.catalog import Catalog, CatalogItem
 from anbud.granskning.contracts import CalcPost
+from anbud.kalkyl.object_list import ObjectList, choose
 from anbud.kalkyl.recipe import BoundRecipe, Count
-from anbud.kalkyl.records import QuantityRecord, Scope, VerifiedRecord
+from anbud.kalkyl.records import Contained, QuantityRecord, Scope, VerifiedRecord
 from anbud.kalkyl.rooms import APARTMENT_ROOMS, room_types
 from anbud.kalkyl.rooms import label as rooms_label
 from anbud.kalkyl.verify import quantity_written
@@ -49,6 +59,7 @@ from anbud.models import Citation
 OBJECT_LABELS = {
     "building": ("byggnad", "byggnader"),
     "stairwell": ("trapphus", "trapphus"),
+    "stairwell_floor": ("trapphusplan", "trapphusplan"),
     "floor": ("våningsplan", "våningsplan"),
     "apartment": ("lägenhet", "lägenheter"),
     "premises": ("lokal", "lokaler"),
@@ -88,6 +99,7 @@ _UNIT_FAMILIES = {
     "mass": {"kg"},
 }
 ORE = Decimal("0.01")
+CODE_BASIS = "objektlistan läst av kod (som appens objektmodell)"
 
 
 def unit_family(unit: str) -> str:
@@ -124,6 +136,8 @@ class ObjectCount:
     record_ids: list[str] = field(default_factory=list)
     rows: list[str] = field(default_factory=list)  # the cited blocks counted: list rows, or the stated totals
     note: str | None = None  # how a derived count was reached, when it isn't plain rows or totals
+    source: str = "model"  # "code" when the object list read by code gave the count
+    model_rows: list[str] = field(default_factory=list)  # the model's cited blocks outside the code-read list
 
 
 def _held(r: QuantityRecord, n: Decimal) -> tuple[list[tuple[str, Decimal]], bool]:
@@ -137,7 +151,19 @@ def _held(r: QuantityRecord, n: Decimal) -> tuple[list[tuple[str, Decimal]], boo
     return [(kind, n * per) for kind, per in types.items()], True
 
 
-def count_objects(records: list[VerifiedRecord], recipe: BoundRecipe | None = None) -> dict[str, ObjectCount]:
+@dataclass
+class _Evidence:
+    """What the model's verified object records say about one kind: candidate counts with why, and their sources."""
+
+    candidates: list[tuple[Decimal, str]] = field(default_factory=list)
+    record_ids: list[str] = field(default_factory=list)
+    blocks: list[str] = field(default_factory=list)
+    by_type: dict[str, list[Decimal]] = field(default_factory=dict)  # row label -> per apartment
+
+
+def _model_evidence(records: list[VerifiedRecord]) -> tuple[dict[str, _Evidence], int]:
+    """Per kind, the model's list rows (each cited row once) and stated totals; and how many apartment rows had
+    implausible rooms."""
     rows: dict[str, dict[str, Decimal]] = defaultdict(dict)  # kind -> first cited block -> count
     totals: dict[str, dict[str, set[Decimal]]] = defaultdict(lambda: defaultdict(set))  # kind -> location -> values
     ids: dict[str, list[str]] = defaultdict(list)
@@ -166,7 +192,7 @@ def count_objects(records: list[VerifiedRecord], recipe: BoundRecipe | None = No
                 totals[kind][_norm(r.location)].add(count)
             ids[kind].append(v.id)
             blocks[kind].extend(b for b in v.block_ids if b not in blocks[kind])
-    out: dict[str, ObjectCount] = {}
+    out: dict[str, _Evidence] = {}
     for kind in sorted(set(rows) | set(totals)):
         candidates: list[tuple[Decimal, str]] = []
         if rows.get(kind):
@@ -178,17 +204,102 @@ def count_objects(records: list[VerifiedRecord], recipe: BoundRecipe | None = No
             )
         for value in sorted(totals.get(kind, {}).get("", set())):
             candidates.append((value, "angivet totalt antal"))
-        values = sorted({c for c, _ in candidates})
-        chosen = values[0]
-        basis = "; ".join(f"{_num(c)} ({why})" for c, why in candidates)
-        if by_type.get(kind):
-            parts = [f"{lbl}: {len(vals)} lgh × {_num(vals[0])}" for lbl, vals in sorted(by_type[kind].items())]
-            basis += " – per lägenhetstyp: " + "; ".join(parts)
-        conflict = None
-        if len(values) > 1:
-            conflict = f"Konflikt: {' / '.join(_num(v) for v in values)} – lägsta används"
-        out[kind] = ObjectCount(kind, chosen, basis, conflict, ids[kind], blocks[kind])
-    _apartment_notes(out, implausible)
+        out[kind] = _Evidence(candidates, ids[kind], blocks[kind], dict(by_type.get(kind, {})))
+    return out, implausible
+
+
+def _per_type(by_type: dict[str, list[Decimal]]) -> str:
+    if not by_type:
+        return ""
+    parts = [f"{lbl}: {len(vals)} lgh × {_num(vals[0])}" for lbl, vals in sorted(by_type.items())]
+    return " – per lägenhetstyp: " + "; ".join(parts)
+
+
+def _from_model(kind: str, ev: _Evidence) -> ObjectCount:
+    """The model's evidence alone: when the candidates disagree, the lowest is used and the conflict says so."""
+    values = sorted({c for c, _ in ev.candidates})
+    basis = "; ".join(f"{_num(c)} ({why})" for c, why in ev.candidates) + _per_type(ev.by_type)
+    conflict = f"Konflikt: {' / '.join(_num(v) for v in values)} – lägsta används" if len(values) > 1 else None
+    return ObjectCount(kind, values[0], basis, conflict, ev.record_ids, ev.blocks)
+
+
+@dataclass
+class _Code:
+    count: Decimal
+    rows: list[str]
+    how: str = ""
+    by_type: dict[str, list[Decimal]] = field(default_factory=dict)
+
+
+def _code_counts(lst: ObjectList) -> tuple[dict[str, _Code], int]:
+    """Kind -> what the code-read list counts: apartments, premises (when the list has any), stairwells and stairwell
+    floors (when it has an address and floor column), and room types from each apartment's type label. Also how
+    many apartments had implausible rooms (more than six bedrooms: no room types)."""
+    out = {"apartment": _Code(Decimal(len(lst.apartments)), [a.block_id for a in lst.apartments])}
+    if lst.premises_rows:
+        out["premises"] = _Code(Decimal(lst.premises), list(lst.premises_rows))
+    stairwells = lst.stairwells()
+    if stairwells:
+        rows = list(dict.fromkeys(b for bs in stairwells.values() for b in bs))
+        out["stairwell"] = _Code(Decimal(len(stairwells)), rows, f"unika adresser i kolumn {lst.address_column}")
+    floors = lst.stairwell_floors()
+    if floors:
+        rows = list(dict.fromkeys(b for bs in floors.values() for b in bs))
+        how = f"unika par av adress och plan i kolumn {lst.address_column} och {lst.floor_column}"
+        out["stairwell_floor"] = _Code(Decimal(len(floors)), rows, how)
+    implausible = 0
+    for a in lst.apartments:
+        rooms = [Contained(object_kind="room", quantity=a.rooms)]
+        types = room_types(rooms)
+        if not types:
+            implausible += 1
+            continue
+        for kind, per in types.items():
+            code = out.setdefault(kind, _Code(Decimal(0), [], f"rum per lägenhet ur typkolumn {lst.type_column}"))
+            code.count += per
+            code.rows.append(a.block_id)
+            code.by_type.setdefault(rooms_label(rooms), []).append(per)
+    return out, implausible
+
+
+def _from_code(kind: str, code: _Code, ev: _Evidence | None, lst: ObjectList, found: int) -> ObjectCount:
+    """The code-read list's count is used. The model's list rows and stated totals stay in the basis and its records
+    with the count; a model figure that differs is a conflict, and the blocks it cited outside the list are kept."""
+    where = f"{CODE_BASIS}: blad {lst.sheet}, typkolumn {lst.type_column}, rad {lst.first_row}–{lst.last_row}"
+    if found > 1:
+        where += f"; {found} listor hittades, den med flest lägenheter används som i appen, listor adderas inte"
+    if code.how:
+        where += f"; {code.how}"
+    basis = f"{_num(code.count)} ({where}){_per_type(code.by_type)}"
+    if ev is None:
+        return ObjectCount(kind, code.count, basis, None, [], code.rows, source="code")
+    basis += "; modellen: " + "; ".join(f"{_num(c)} ({why})" for c, why in ev.candidates) + _per_type(ev.by_type)
+    differ = sorted({c for c, _ in ev.candidates if c != code.count})
+    conflict = None
+    if differ:
+        model = " / ".join(_num(v) for v in differ)
+        conflict = f"Konflikt: {_num(code.count)} enligt objektlistan / {model} enligt modellen – objektlistan används"
+    listed = set(code.rows)
+    outside = [b for b in ev.blocks if b not in listed]
+    return ObjectCount(kind, code.count, basis, conflict, ev.record_ids, code.rows, source="code", model_rows=outside)
+
+
+def count_objects(
+    records: list[VerifiedRecord], recipe: BoundRecipe | None = None, lists: list[ObjectList] | None = None
+) -> dict[str, ObjectCount]:
+    """Object counts per kind. With object lists read by code (`object_list`), the chosen list counts apartments,
+    premises, stairwells, stairwell floors and room types; the model's evidence counts every other kind, and every
+    kind when there is no list."""
+    evidence, implausible = _model_evidence(records)
+    chosen = choose(lists or [])
+    code, code_implausible = _code_counts(chosen) if chosen else ({}, 0)
+    out: dict[str, ObjectCount] = {}
+    for kind in sorted(set(evidence) | set(code)):
+        if chosen is not None and kind in code:
+            out[kind] = _from_code(kind, code[kind], evidence.get(kind), chosen, len(lists or []))
+        else:
+            out[kind] = _from_model(kind, evidence[kind])
+    _apartment_notes(out, code_implausible if "room" in code else implausible)
     _per_apartment(out, recipe)
     return out
 

@@ -3,7 +3,8 @@ with a reason.
 
 Reasons, in order: set aside by the model (with its reason), not read (the chunk's call failed, ran out of budget or
 was stopped), not read to the end (the answer hit `max_tokens`), no answer, cited only by a rejected record, or
-nothing handled it. Nothing is silently dropped.
+nothing handled it. Nothing is silently dropped. A row the object list read by code counts (`object_list`) is used by
+the object model, cited by a record or not.
 """
 
 from __future__ import annotations
@@ -19,8 +20,13 @@ _NOT_READ = {
 }
 
 
-def uncovered_lines(chunks: list[Chunk], results: list[ChunkResult], verified: list[VerifiedRecord]) -> list[Uncovered]:
-    used = {b for v in verified for b in v.block_ids}
+def uncovered_lines(
+    chunks: list[Chunk],
+    results: list[ChunkResult],
+    verified: list[VerifiedRecord],
+    counted: set[str] | None = None,
+) -> list[Uncovered]:
+    used = {b for v in verified for b in v.block_ids} | (counted or set())
     out: list[Uncovered] = []
     for chunk, res in zip(chunks, results, strict=True):
         aside = {b: s.reason for s in res.set_aside for b in s.block_ids}
