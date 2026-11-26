@@ -2,7 +2,7 @@
 name: generic_scope
 description: Normal scope for an electrical renovation of an occupied residential building that the documents never mention and the calc doesn't carry. Reported separately as generic.
 role: lens_generic_scope
-tools: [search_blocks, read_blocks, outline, calc_posts, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, catalog_search, submit_flags]
 generic: true
 ---
 

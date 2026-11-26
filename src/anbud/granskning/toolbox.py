@@ -1,4 +1,5 @@
-"""The read tools, in process: search_blocks, read_blocks, outline, calc_posts, law_lookup and view_tile.
+"""The read tools, in process: search_blocks, read_blocks, outline, calc_posts, law_lookup, view_tile and
+catalog_search (ids, names, units and categories only: prompts never carry a catalog price).
 
 Each call returns the `tool_result` content, the ids it returned (for coverage) and an error, if any. Text that comes
 from the tender or the calc is wrapped in `<tender_corpus>` or `<calculation>` and defused, so the prefix's
@@ -15,15 +16,17 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from anbud.granskning.catalog import Catalog, CatalogItem, tokens
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.prefix import block_line, defuse, post_line, provenance
 from anbud.granskning.search import SearchIndex
 from anbud.tools import INPUT_MODELS
 
-READ_TOOLS = ("search_blocks", "read_blocks", "outline", "calc_posts", "law_lookup", "view_tile")
+READ_TOOLS = ("search_blocks", "read_blocks", "outline", "calc_posts", "law_lookup", "view_tile", "catalog_search")
 SEARCH_LIMIT = 20
 CALC_LIMIT = 150
+CATALOG_LIMIT = 25
 LAW_NOT_AVAILABLE = (
     "law_lookup is not available yet: the harness has no public-law corpus. Cite the statute and section in "
     "reference_rule as you know them, and say in the claim that the wording was not checked."
@@ -44,9 +47,11 @@ class Toolbox:
         calc: list[CalcPost],
         tile_loader: Callable[[str], bytes] | None = None,
         index: SearchIndex | None = None,
+        catalog: Catalog | None = None,
     ) -> None:
         self.corpus = corpus
         self.calc = calc
+        self.catalog = catalog
         self.tile_loader = tile_loader
         self.index = index or SearchIndex(corpus)
         self.doc_roles: dict[str, str] = {}  # doc_id -> role, from the tender map once it exists
@@ -163,6 +168,27 @@ class Toolbox:
         lines.append("</calculation>")
         return ToolOutput("\n".join(lines), [p.id for p in shown])
 
+    # Catalog
+
+    def _catalog_search(self, args: Any) -> ToolOutput:
+        if self.catalog is None or not self.catalog.items:
+            return ToolOutput(
+                "No catalog is loaded for this run. Name the item in money_basis.item and leave catalog_id out.",
+                error="no_catalog",
+            )
+        found = self.catalog.search(args.query)
+        if not found:  # every word didn't match: fall back to items that hold any of them
+            words = {w for w in tokens(args.query) if len(w) > 2}  # "el", "i", "av" would match half the catalog
+            found = [i for i in self.catalog.items if words & tokens(i.name)]
+        if not found:
+            return ToolOutput(
+                "No catalog item matches. Try other words; if nothing fits, name the item in money_basis.item and "
+                "leave catalog_id out: the finding stays unpriced and is still reported."
+            )
+        shown = found[:CATALOG_LIMIT]
+        lines = [f'<catalog matches="{len(found)}" shown="{len(shown)}">', *map(_catalog_line, shown), "</catalog>"]
+        return ToolOutput("\n".join(lines), [i.id for i in shown])
+
     # Law and tiles
 
     def _law_lookup(self, args: Any) -> ToolOutput:
@@ -200,3 +226,11 @@ class Toolbox:
             "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(data).decode()},
         }
         return ToolOutput([{"type": "text", "text": caption}, image], [tile.id])
+
+
+def _catalog_line(item: CatalogItem) -> str:
+    """Id, name, unit and category. Never hours or prices."""
+    parts = [f"id={item.id}", defuse(item.name), f"unit={defuse(item.unit)}"]
+    if item.category:
+        parts.append(f"category={defuse(item.category)}")
+    return " | ".join(parts)

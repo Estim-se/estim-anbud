@@ -123,6 +123,24 @@
     "strict": true
   },
   {
+    "name": "catalog_search",
+    "description": "Search the estimating catalog for the item a missing_post or quantity_gap names. Returns item ids, names, units and categories, never prices; put the id that fits in money_basis.catalog_id.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "description": "Words for the item, for example 'nödljusarmatur'.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
     "name": "submit_map",
     "description": "Submit the tender map. Call it once, at the end. Code checks it; if a check fails you get the reasons and one chance to fix them.",
     "input_schema": {
@@ -423,6 +441,18 @@
               "default": null,
               "description": "Catalog item or description for a missing post"
             },
+            "catalog_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The catalog item's id from catalog_search, for a missing_post or quantity_gap"
+            },
             "quantity": {
               "anyOf": [
                 {
@@ -559,6 +589,18 @@
               ],
               "default": null,
               "description": "Catalog item or description for a missing post"
+            },
+            "catalog_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The catalog item's id from catalog_search, for a missing_post or quantity_gap"
             },
             "quantity": {
               "anyOf": [

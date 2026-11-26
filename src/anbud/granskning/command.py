@@ -26,8 +26,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--concurrency", type=int, default=3, help="lenses in parallel (default 3)")
     parser.add_argument("--lens", action="append", default=None, help="run only this lens (repeatable)")
     parser.add_argument(
+        "--checks", action="store_true", help="with --lens, also run the focused checks (they run by default otherwise)"
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="build everything up to the first model call, print counts, call nothing"
     )
+
+
+def checks_wanted(args: argparse.Namespace) -> bool:
+    """The focused checks run by default; a run of selected lenses (`--lens`) runs them only with `--checks`."""
+    return not args.lens or bool(args.checks)
 
 
 def _dirs(args: argparse.Namespace, kind: str) -> tuple[Path, Path, Path]:
@@ -87,7 +95,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     state = provenance.git_state()
     code = provenance.code_block(state)
     if args.dry_run:
-        return dry_run(corpus, calc, lenses, catalog, config.budgets, code)
+        return dry_run(corpus, calc, lenses, catalog, config.budgets, code, args.company_id)
     store = RunStore(args.company_id)
     run_dir = runs_dir / run_id
     if args.replay:
@@ -124,6 +132,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             settings=settings,
             concurrency=args.concurrency,
             on_progress=lambda msg: print(f"  {msg}", flush=True),
+            checks=checks_wanted(args),
         )
     except IntakeStop as exc:
         print(f"anbud run: stopped: {exc}", file=sys.stderr)
@@ -142,9 +151,12 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     for outcome in result.verifier.outcomes.values():
         verdicts[outcome.status] = verdicts.get(outcome.status, 0) + 1
     print(f"  verifier: {len(result.verifier.outcomes)} flags {verdicts}, ${result.verifier.cost_usd:.2f}")
+    for name, check in (result.checks.summary() if result.checks else {}).items():
+        print(f"  {name}: {check['status']}, {check['flags']} flags, {check['turns']} turns, ${check['cost_usd']:.2f}")
     ranked = result.finished.ranked
     print(
-        f"  flags: {len(result.finished.items)} after merge; {len(ranked.shown)} shown, {len(ranked.generic)} generic"
+        f"  flags: {len(result.finished.items)} after merge; {len(ranked.shown)} shown, "
+        f"{len(ranked.unpriced)} shown unpriced, {len(ranked.generic)} generic"
     )
     if result.catalog is not None:
         print(f"  catalog: {result.catalog.name}, hourly rate {result.catalog.hourly_rate:g}")
@@ -209,7 +221,13 @@ def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_d
 
 
 def dry_run(
-    corpus: Any, calc: list[Any], lenses: list[Any], catalog: Any, budgets: dict[str, Any], code: dict[str, Any]
+    corpus: Any,
+    calc: list[Any],
+    lenses: list[Any],
+    catalog: Any,
+    budgets: dict[str, Any],
+    code: dict[str, Any],
+    company_id: str | None = None,
 ) -> int:
     """Counts for a run that makes no model call: the prefix as the map would send it before page cards add their
     blocks, the tiles the cards would read, and the lens tier the estimate picks. No key, no store writes."""
@@ -241,6 +259,9 @@ def dry_run(
     else:
         source = "calc" if rate is not None else "catalog"
         print(f"  catalog: {catalog.name}, {len(catalog.items)} items, hourly rate from the {source}")
+    from anbud.granskning.check_dry import checks_line
+
+    print(f"  checks: {checks_line(corpus, calc, company_id)}")
     print("  no model calls made")
     return 0
 

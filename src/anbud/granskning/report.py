@@ -26,6 +26,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from pydantic import BaseModel, ConfigDict, Field
 
 from anbud.granskning.catalog import Catalog
+from anbud.granskning.checks import ChecksReport
+from anbud.granskning.checks_report import add_check_sheets, checks_coverage_html, checks_html
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
 from anbud.granskning.rank import Ranked, TenderCoverage, document_names
@@ -43,11 +45,12 @@ VERIFICATION = {
 }
 PLACEMENTS = {
     "shown": "Visas",
+    "shown_unpriced": "Visas, utan prisuppgift",
     "generic": "Generisk",
     "minor": "Mindre (under väsentlighetsgränsen)",
     "refuted": "Motbevisad av verifieringen",
     "covered": "Täcks redan av kalkylen",
-    "capped": "Utanför taket för antal flaggor",
+    "capped": "Utanför taket för sin lista",
     "zero": "Noll i poäng",
 }
 STATUSES = {
@@ -71,12 +74,15 @@ class Report(_Model):
     default_catalog: bool = False
     materiality_sek: float = 20000.0
     max_shown: int = 15
+    max_unpriced_shown: int = 10
     shown: list[Item] = Field(default_factory=list)
+    unpriced: list[Item] = Field(default_factory=list, description="Krav utan prisuppgift: not refuted, not priced")
     generic: list[Item] = Field(default_factory=list)
     logged: list[Item] = Field(default_factory=list)
     coverage: TenderCoverage
     sources: dict[str, str] = Field(default_factory=dict, description="block id -> where it is, for citations")
     cost_usd: float | None = None
+    checks: ChecksReport | None = Field(default=None, description="Zero rows, per-space rules, outlets per room type")
 
 
 def _where(block: Block, names: dict[str, str]) -> str:
@@ -101,12 +107,13 @@ def build_report(
     catalog: Catalog | None,
     materiality_sek: float,
     max_shown: int = 15,
+    max_unpriced_shown: int = 10,
     cost_usd: float | None = None,
     created_at: datetime | None = None,
 ) -> Report:
     names = document_names(corpus)
     sources = {}
-    for item in ranked.shown + ranked.generic + ranked.logged:
+    for item in ranked.shown + ranked.unpriced + ranked.generic + ranked.logged:
         for c in item.flag.citations:
             block = corpus.get(c.block_id)
             sources[c.block_id] = _where(block, names) if block else c.block_id
@@ -119,7 +126,9 @@ def build_report(
         default_catalog=bool(catalog and catalog.default),
         materiality_sek=materiality_sek,
         max_shown=max_shown,
+        max_unpriced_shown=max_unpriced_shown,
         shown=ranked.shown,
+        unpriced=ranked.unpriced,
         generic=ranked.generic,
         logged=ranked.logged,
         coverage=coverage,
@@ -142,6 +151,12 @@ def kronor_text(item: Item) -> str:
     if k is None or not k.priced:
         return "Ej prissatt" + (f" ({k.reason})" if k and k.reason else "")
     return f"{sek(k.low)} – {sek(k.high)}" if k.low != k.high else sek(k.point)
+
+
+def not_refuted(report: Report) -> list[Item]:
+    """Every flag the verifier didn't refute, lists first, in report order: nothing is hidden from the XLSX."""
+    items = report.shown + report.unpriced + report.generic + report.logged
+    return [i for i in items if i.placement != "refuted"]
 
 
 def verdict_text(item: Item) -> str:
@@ -229,15 +244,30 @@ def render_html(report: Report) -> str:
         note = " Priserna är Estims standardvärden, inte företagets egna." if report.default_catalog else ""
         parts.append(f'<p class="meta">Kronor beräknade med {_e(report.catalog)}.{_e(note)}</p>')
     parts.append(
-        f'<p class="meta">Högst {report.max_shown} flaggor visas. Under {_e(sek(report.materiality_sek))} räknas en '
-        "flagga som mindre, om den inte har en avtalsrisk.</p>"
+        f'<p class="meta">Högst {report.max_shown} prissatta flaggor och {report.max_unpriced_shown} krav utan '
+        f"prisuppgift visas. Under {_e(sek(report.materiality_sek))} räknas en flagga som mindre, om den inte har en "
+        "avtalsrisk.</p>"
     )
     parts.append(f"<h2>Flaggor ({len(report.shown)})</h2>")
     parts += [_flag_html(n, item, report) for n, item in enumerate(report.shown, 1)] or ["<p>Inga flaggor visas.</p>"]
+    if report.unpriced:
+        parts.append(f"<h2>Krav utan prisuppgift ({len(report.unpriced)})</h2>")
+        parts.append(
+            f'<p class="muted">Fynd som inte motbevisats men som inte kunde prissättas. Högst '
+            f"{report.max_unpriced_shown} visas, ordnade efter verifieringens utfall och sedan allvar.</p>"
+        )
+        parts += [_flag_html(n, item, report) for n, item in enumerate(report.unpriced, 1)]
     if report.generic:
         parts.append(f"<h2>Generiska fynd ({len(report.generic)})</h2>")
         parts.append('<p class="muted">Normal omfattning som handlingarna inte nämner. Redovisas separat.</p>')
         parts += [_flag_html(n, item, report) for n, item in enumerate(report.generic, 1)]
+    capped = [i for i in report.logged if i.placement == "capped"]
+    if capped:
+        parts.append(
+            f'<p class="meta">{len(capped)} flaggor ryms inte i listorna ovan. Alla flaggor som inte motbevisats finns '
+            "på fliken Alla flaggor i XLSX-filen, med var de hamnade och varför.</p>"
+        )
+    parts += checks_html(report.checks)
     parts.append("<h2>Täckning</h2>")
     parts.append(f"<p><strong>{_e(cov.note)}</strong></p>")
     parts.append(f"<p>{cov.documents} dokument i underlaget.</p>")
@@ -255,7 +285,8 @@ def render_html(report: Report) -> str:
         )
         parts.append(
             f'<p class="muted">{lens.turns} varv · {lens.blocks_read} block lästa · {len(lens.searches)} sökningar · '
-            f"{lens.tiles_viewed} ritningsrutor · {lens.calc_calls} kalkyluppslag · {lens.law_lookups} lagrum</p>"
+            f"{lens.tiles_viewed} ritningsrutor · {lens.calc_calls} kalkyluppslag · {lens.law_lookups} lagrum · "
+            f"{lens.catalog_searches} katalogsökningar</p>"
         )
         if lens.documents_opened:
             parts.append(f"<p>Öppnade: {_e(', '.join(lens.documents_opened))}</p>")
@@ -268,6 +299,7 @@ def render_html(report: Report) -> str:
             parts += [f"<li>{_e(line)}</li>" for line in lens.not_checked]
             parts.append("</ul>")
         parts.append("</div>")
+    parts += checks_coverage_html(report.checks)
     if report.logged:
         parts.append(f"<h2>Loggade, visas inte ({len(report.logged)})</h2><table>")
         parts.append("<tr><th>Id</th><th>Varför</th><th>Påstående</th><th>Kronor</th><th>Verifiering</th></tr>")
@@ -344,6 +376,7 @@ COVERAGE_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("tiles_viewed", "Ritningsrutor", 10),
     ("calc_calls", "Kalkyluppslag", 10),
     ("law_lookups", "Lagrum", 8),
+    ("catalog_searches", "Katalogsökningar", 10),
     ("not_checked", "Inte kontrollerat", 70),
 )
 
@@ -388,9 +421,16 @@ def build_workbook(
     wb.remove(wb.active)
     cols = [*columns, *extra_columns]
     keys: list[tuple[str, list[str]]] = []
-    for title, items in (("Flaggor", report.shown), ("Generiska", report.generic), ("Loggade", report.logged)):
-        _flag_sheet(wb, title, items, report, cols)
-        keys.append((title, [c.key for c in cols]))
+    sheets = (
+        ("Flaggor", report.shown, cols),
+        ("Krav utan prisuppgift", report.unpriced, cols),
+        ("Generiska", report.generic, cols),
+        ("Loggade", report.logged, cols),
+        ("Alla flaggor", not_refuted(report), list(columns)),  # an index, not a labelling sheet: no review columns
+    )
+    for title, items, sheet_cols in sheets:
+        _flag_sheet(wb, title, items, report, sheet_cols)
+        keys.append((title, [c.key for c in sheet_cols]))
     ws = wb.create_sheet("Täckning")
     _header(ws, [(label, width) for _, label, width in COVERAGE_COLUMNS])
     for row, lens in enumerate(report.coverage.lenses, 2):
@@ -402,6 +442,7 @@ def build_workbook(
                 value = "\n".join(value) if key == "not_checked" else "; ".join(value)
             _put(ws, row, col, value)
     keys.append(("Täckning", [k for k, _, _ in COVERAGE_COLUMNS]))
+    keys += add_check_sheets(wb, report.checks)
     about = wb.create_sheet("Om rapporten")
     rows = [
         ("Anbud", report.tender_id),

@@ -2,7 +2,7 @@
 name: regulation
 description: Scope that public law requires for this kind of works - EV charging, broadband, fire safety, electrical safety - when the documents are silent or the calc leaves it out.
 role: lens
-tools: [search_blocks, read_blocks, outline, calc_posts, law_lookup, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, law_lookup, catalog_search, submit_flags]
 ---
 
 # Requirements triggered by regulation
