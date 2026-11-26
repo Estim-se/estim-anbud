@@ -24,7 +24,7 @@ from anbud.kalkyl.catalog import prompt_lines
 from anbud.kalkyl.lines import Chunk
 from anbud.kalkyl.records import Level, QuantityRecord, Rejected, SetAside, TableLayout
 from anbud.kalkyl.settings import EXTRACT, RoleSettings
-from anbud.kalkyl.tables import Cells, cols_attr, extend_layout, parse_layout, read_table
+from anbud.kalkyl.tables import Cells, cols_attr, extend_layout, layout_rows, parse_layout, read_table
 from anbud.kalkyl.verify import check_record, level_of, parse_record, parse_set_aside, without_unknown_catalog_id
 from anbud.model_client import BudgetExceeded, ModelClient, ModelError, ReplayMiss, RunStopped
 
@@ -175,6 +175,9 @@ class ChunkResult:
     turns: int = 0
     cost_usd: float = 0.0
     error: str | None = None  # a kind (ModelError.kind, budget, stopped), never an API message
+    follow_up_ids: list[str] = field(default_factory=list)  # marked lines asked about again (`follow_up`)
+    follow_up_error: str | None = None  # the follow-up's error kind; the first answer is kept
+    follow_up_rejected: int = 0  # items of the follow-up that failed the checks; not counted as rejected records
 
 
 def _content(message: Any) -> list[Any]:
@@ -233,6 +236,101 @@ def _tool_results(uses: list[Any], answer: dict[str, str]) -> list[dict[str, Any
     return out
 
 
+FOLLOW_UP = (
+    "{n} marked line(s) are still unresolved: {ids}. Look at each again. Record it if it asks for work: a scope line "
+    "gives one per_object requirement per item and object kind or room type it names, with a quantity only if one is "
+    "written. Otherwise set it aside with the kind that fits: heading_or_contents, total_or_repeat, other_trade, "
+    "not_this_contract or no_requirement. Keep unclear only when the text can't tell what is installed or who does "
+    "it, and then say in the reason what is missing. Call submit_quantities once with records and set_aside for these "
+    "lines only; everything you submitted before is kept."
+)
+
+
+def unresolved_ids(result: ChunkResult, chunk: Chunk, counted: frozenset[str] = frozenset()) -> list[str]:
+    """The chunk's marked lines (quantity and scope) the answer neither cited nor covered with a table nor set aside
+    with a definite kind, in chunk order. Rows the code-read object list counts are left out: code uses them anyway."""
+    used = {c.block_id for record, _ in result.records for c in record.citations}
+    for layout in result.tables:
+        used.update(layout_rows(layout, chunk))
+    definite = {b for s in result.set_aside if s.kind != "unclear" for b in s.block_ids}
+    marked = set(chunk.quantity_ids) | set(chunk.scope_ids)
+    done = used | definite | counted
+    return [b for b in chunk.block_ids if b in marked and b not in done]
+
+
+def follow_up(
+    client: ModelClient,
+    chunk: Chunk,
+    corpus: Corpus,
+    catalog_ids: set[str],
+    system: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    settings: RoleSettings,
+    result: ChunkResult,
+    cells: Cells,
+    counted: frozenset[str] = frozenset(),
+) -> None:
+    """One more turn in the same conversation, only when marked lines are still unresolved: it names them and asks for
+    a record or a definite set-aside. The first turns' requests are unchanged, so a rebuild answers them from the cache.
+    What the follow-up adds must be about the lines asked; the rest of it is dropped. Any error keeps the first answer;
+    a budget stop or a stop marker is noted for the caller to halt the run."""
+    ids = unresolved_ids(result, chunk, counted)
+    if not ids:
+        return
+    result.follow_up_ids = ids
+    messages = [*messages, {"role": "user", "content": FOLLOW_UP.format(n=len(ids), ids=", ".join(ids))}]
+    try:
+        call = client.call(
+            role=EXTRACT,
+            step=f"kalkyl.extract.{chunk.id}",
+            system=system,
+            messages=messages,
+            max_tokens=settings.max_tokens,
+            effort=settings.effort,
+        )
+    except BudgetExceeded:
+        result.follow_up_error = "budget"
+        return
+    except RunStopped:
+        result.follow_up_error = "stopped"
+        return
+    except ReplayMiss:
+        result.follow_up_error = "replay_miss"
+        return
+    except ModelError as exc:
+        result.follow_up_error = exc.kind
+        return
+    result.turns += 1
+    result.cost_usd += call.cost_usd
+    msg = call.message
+    submit = next(
+        (b for b in msg.content if getattr(b, "type", None) == "tool_use" and b.name == "submit_quantities"), None
+    )
+    if submit is None or msg.stop_reason == "max_tokens":
+        result.follow_up_error = "truncated" if msg.stop_reason == "max_tokens" else "no_submit"
+        return
+    asked = set(ids)
+    n_records, n_asides, n_tables = len(result.records), len(result.set_aside), len(result.tables)
+    # A failure here leaves the line as the first answer left it (its first rejection, if any, still shows).
+    result.follow_up_rejected = len(_review(submit.input, chunk, corpus, catalog_ids, result, cells))
+    new_records = result.records[n_records:]
+    kept = [(r, lv) for r, lv in new_records if {c.block_id for c in r.citations} & asked]
+    result.records[n_records:] = kept
+    result.set_aside[n_asides:] = [s for s in result.set_aside[n_asides:] if set(s.block_ids) <= asked]
+    result.tables[n_tables:] = [t for t in result.tables[n_tables:] if set(layout_rows(t, chunk)) & asked]
+
+
+def _accepted(uses: list[Any], answer: dict[str, str]) -> list[dict[str, Any]]:
+    """Tool results for a turn whose submission was accepted: that one is not an error, any other call is ignored."""
+    out = []
+    for use in uses:
+        if use.id in answer:
+            out.append({"type": "tool_result", "tool_use_id": use.id, "content": answer[use.id]})
+        else:
+            out.append({"type": "tool_result", "tool_use_id": use.id, "content": "ignored", "is_error": True})
+    return out
+
+
 def extract_chunk(
     client: ModelClient,
     chunk: Chunk,
@@ -242,6 +340,7 @@ def extract_chunk(
     message: str,
     settings: RoleSettings,
     cells: Cells | None = None,
+    counted: frozenset[str] = frozenset(),
 ) -> ChunkResult:
     result = ChunkResult(chunk.id, "no_submit")
     messages: list[dict[str, Any]] = [{"role": "user", "content": message}]
@@ -285,6 +384,14 @@ def extract_chunk(
         result.status = "submitted"
         if not failures or asked_again or turn + 1 >= settings.max_turns:
             result.rejected += [Rejected(chunk_id=chunk.id, reason=r, block_ids=ids) for r, ids in failures]
+            if settings.follow_up:
+                answered = {submit.id: "Accepted; the rest is kept as submitted."}
+                history = [
+                    *messages,
+                    {"role": "assistant", "content": _content(msg)},
+                    {"role": "user", "content": _accepted(uses, answered)},
+                ]
+                follow_up(client, chunk, corpus, catalog_ids, system, history, settings, result, cells or {}, counted)
             return result
         asked_again = True
         reasons = "\n".join(f"- {r}" for r, _ in failures)
@@ -336,6 +443,7 @@ def extract_all(
     concurrency: int,
     on_done: Callable[[ChunkResult], None] | None = None,
     cells: Cells | None = None,
+    counted: frozenset[str] = frozenset(),
 ) -> list[ChunkResult]:
     """Every chunk once: the first alone (it writes the cache), the rest in parallel. A budget stop or a stop marker
     ends the run's remaining chunks as not run; their quantity lines stay visible as not handled."""
@@ -349,7 +457,9 @@ def extract_all(
             return ChunkResult(chunk.id, "not_run", error=halted[0])
         try:
             message = chunk_message(chunk, corpus, paths, cells)
-            res = extract_chunk(client, chunk, corpus, ids, system, message, settings, cells)
+            res = extract_chunk(client, chunk, corpus, ids, system, message, settings, cells, counted)
+            if res.follow_up_error in ("budget", "stopped"):  # the first answer is kept; the remaining chunks halt
+                halted.append(res.follow_up_error)
             apply_tables(res, chunk, corpus, cells)
         except BudgetExceeded:
             halted.append("budget")

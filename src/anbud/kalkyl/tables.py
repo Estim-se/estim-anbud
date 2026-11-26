@@ -56,6 +56,11 @@ def number_and_unit(text: str) -> tuple[float | None, str | None]:
     return float(re.sub(r"[  ]", "", m.group(1)).replace(",", ".")), (m.group(2) or None)
 
 
+def layout_rows(layout: TableLayout, chunk: Chunk) -> list[str]:
+    """The rows a layout covers in this chunk, first to last; none if it doesn't fit the chunk."""
+    return _rows(layout, chunk) or []
+
+
 def _rows(layout: TableLayout, chunk: Chunk) -> list[str] | None:
     try:
         i, j = chunk.block_ids.index(layout.first_block_id), chunk.block_ids.index(layout.last_block_id)

@@ -12,6 +12,7 @@ max_quantity_lines = 30
 effort = "medium"
 max_tokens = 12000
 max_turns = 2 # the submission, then one repair turn or one nudge
+follow_up = true # then one more turn, only for marked lines the answer left unresolved
 concurrency = 4
 
 [match] # R3: posts R2 left without a usable catalog item, a constrained choice among catalog ids

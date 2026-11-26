@@ -77,6 +77,12 @@ class KalkylResult:
         """Kinds where the code-read list and the model's evidence give different counts."""
         return [kind for kind, o in self.objects.items() if o.source == "code" and o.conflict]
 
+    def follow_up_resolved(self) -> int:
+        """Lines asked about again that are no longer "Ej omhändertaget"."""
+        asked = {b for r in self.chunk_results for b in r.follow_up_ids}
+        unresolved = {u.block_id for u in self.uncovered if u.unresolved}
+        return len(asked - unresolved)
+
     def counts(self) -> dict[str, Any]:
         """Counts only: safe to print and log."""
         status: dict[str, int] = {}
@@ -93,6 +99,12 @@ class KalkylResult:
             "table_rows_read": sum(len(r.table_rows) for r in self.chunk_results),
             "table_rows_unread": sum(len(r.unread_rows) for r in self.chunk_results),
             "records_superseded_by_tables": sum(r.superseded for r in self.chunk_results),
+            "follow_ups": sum(1 for r in self.chunk_results if r.follow_up_ids),
+            "follow_up_lines": sum(len(r.follow_up_ids) for r in self.chunk_results),
+            "follow_up_lines_resolved": self.follow_up_resolved(),
+            "follow_up_errors": dict(
+                sorted(Counter(r.follow_up_error for r in self.chunk_results if r.follow_up_error).items())
+            ),
             "table_rows_extended": sum(r.extended_rows for r in self.chunk_results),
             "object_kinds": len(self.objects),
             "object_counts": self.object_counts(),
@@ -174,11 +186,20 @@ def run_kalkyl(
 ) -> KalkylResult:
     chunks = make_chunks(corpus, kalkyl.chunk_max_chars, kalkyl.chunk_max_quantity_lines)
     paths = heading_paths(corpus)
+    lists = read_lists(corpus, cells or {})  # before extraction: a follow-up never asks about rows code counts
     results = extract_all(
-        client, chunks, corpus, catalog, paths, kalkyl.roles[EXTRACT], kalkyl.concurrency, on_done=on_chunk, cells=cells
+        client,
+        chunks,
+        corpus,
+        catalog,
+        paths,
+        kalkyl.roles[EXTRACT],
+        kalkyl.concurrency,
+        on_done=on_chunk,
+        cells=cells,
+        counted=frozenset(_counted(lists)),
     )
     verified, filled = with_room_descriptors(verified_records(results), corpus)
-    lists = read_lists(corpus, cells or {})
     objects = count_objects(verified, recipe, lists)
     derived = common_spaces(verified, objects) if common_spaces else []
     posts = build_posts(verified, objects, catalog, recipe, derived)
