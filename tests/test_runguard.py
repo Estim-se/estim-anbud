@@ -121,3 +121,13 @@ def test_a_symlink_loop_refuses_instead_of_crashing(data_root: Path) -> None:
     (dev_parent / "t-0005").symlink_to(dev_parent / "t-0005")
     with pytest.raises(RunRefused):
         check_run_allowed("co-001", "t-0005")
+
+
+def test_only_the_eval_lane_may_start_the_exam_from_an_agent_session() -> None:
+    tty, pipe = _Stream(True), _Stream(False)
+    agent = {"CLAUDECODE": "1"}
+    assert held_out_refusal({**agent, "ANBUD_EVAL_LANE": "1"}, pipe, pipe) is None
+    assert held_out_refusal({"ANBUD_EVAL_LANE": "1"}, pipe, pipe) is None
+    for value in ("0", "", "yes", "true", " 1"):
+        assert held_out_refusal({**agent, "ANBUD_EVAL_LANE": value}, tty, tty)
+    assert "eval lane" in (held_out_refusal(agent, tty, tty) or "")
