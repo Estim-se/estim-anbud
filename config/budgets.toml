@@ -11,6 +11,15 @@ hard_stop = 3.00 # per Kalkyl run; about $1-2.5 expected at the dev tender's siz
 hard_stop = 10.00 # per old-engine baseline run; about $6 expected per dev tender (plan: Cross-engine baseline)
 timeout_minutes = 90
 
+[exam]
+# Estimates before a paid exam (anbud eval heldout|prospective), from the dev tender's measured runs (26 Nov):
+# Granskning $8.12 of model calls at a 124,831-token prefix; the old engine $1.77-1.87 at 83 pages. Each sealed
+# tender's estimate scales with its own prep size, times the margin, and never above the engine's hard stop. The worst
+# case is the sum of hard stops. Kalkyl's own dry run gives its estimate (its high end, times the margin).
+granskning_usd_per_mtok_prefix = 65.0
+baseline_usd_per_page = 0.022
+margin = 1.5
+
 [schema_check]
 hard_stop = 0.10
 
