@@ -78,7 +78,10 @@ LEVEL_LABELS = {
 }
 # A per-object requirement in a count unit that names no number ("kitchens get a stove outlet") is one per object.
 ASSUMED_PER_OBJECT = Decimal(1)
-ASSUMED_NOTE = "Antal per objekt antaget till 1: underlaget anger inget antal"
+ASSUMED_NOTE = (
+    "Antal per objekt antaget till 1: underlaget anger inget antal. Ersätts av ett antal i förfrågningsunderlaget, "
+    "kundens recept för rumstypen eller ett platsbesök"
+)
 _UNIT_FAMILIES = {
     "count": {"st", "styck", "stycken", "pcs", "lgh", "rum", "sats", "set", "pkt", "post"},
     "length": {"m", "meter", "lm", "löpmeter"},
@@ -303,6 +306,11 @@ class Post:
     total: Decimal | None = None
     category: str = ""
     catalog_name: str = ""
+
+    @property
+    def assumed(self) -> bool:
+        """Some of the quantity rests on an assumed count per object."""
+        return any(ln.assumed for ln in self.lines)
 
     @property
     def level(self) -> str:
@@ -567,7 +575,9 @@ class Totals:
     total: Decimal = Decimal(0)
     unclear_total: Decimal = Decimal(0)
     options_total: Decimal = Decimal(0)
+    assumed_total: Decimal = Decimal(0)  # the part of `total` resting on an assumed count per object
     priced: int = 0
+    assumed_priced: int = 0
     missing_price: int = 0
     missing_quantity: int = 0
 
@@ -591,6 +601,9 @@ def totals_of(posts: list[Post]) -> Totals:
         t.total += p.total
         if p.scope == "unclear":
             t.unclear_total += p.total
+        if p.assumed:
+            t.assumed_total += p.total
+            t.assumed_priced += 1
     return t
 
 

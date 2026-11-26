@@ -159,8 +159,12 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
                 _put(ws, r, col, value, fmt)
         if p.status in ("Saknar pris", "Saknar mängd"):
             ws.cell(row=r, column=16).fill = WARN_FILL
+        if p.assumed:
+            ws.cell(row=r, column=17).fill = WARN_FILL
         rows[p.id] = r
         r += 1
+    if result.posts:  # filter on Nivå, Status or Omfattning; the totals below stay outside the filter
+        ws.auto_filter.ref = f"A{FIRST_ROW - 1}:{ws.cell(row=r - 1, column=len(CALC_COLUMNS)).coordinate}"
     t = result.totals
     r += 1
     for label, value, fmt in (
@@ -169,6 +173,7 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
         ("Arbete", t.labour, KR),
         ("Summa (exkl. optioner)", t.total, KR),
         ("varav oklar entreprenadgräns", t.unclear_total, KR),
+        (f"varav antagna mängder ({t.assumed_priced} poster, filtrera Nivå = Antagande)", t.assumed_total, KR),
         ("Optioner (utanför summan)", t.options_total, KR),
     ):
         _put(ws, r, 3, label)
@@ -195,6 +200,8 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Arbete", t.labour, KR),
         ("Timmar", t.hours, HOURS),
         ("varav oklar entreprenadgräns", t.unclear_total, KR),
+        ("varav antagna mängder", t.assumed_total, KR),
+        ("Prissatta poster med antagen mängd", t.assumed_priced, None),
         ("Optioner (utanför summan)", t.options_total, KR),
         ("Poster", c["posts"], None),
         ("Prissatta poster", c["posts_priced"], None),
