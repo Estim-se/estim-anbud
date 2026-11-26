@@ -60,6 +60,23 @@ def _prep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _intake(args: argparse.Namespace) -> int:
+    from anbud.evals.split_heldout import SplitError
+    from anbud.intake import IntakeError, intake
+
+    try:
+        moved = intake(args.company_id, args.incoming.expanduser(), new_ledger=args.new_ledger)
+    except (IntakeError, SplitError, ValueError, OSError) as exc:
+        message = str(exc) if isinstance(exc, IntakeError | SplitError | ValueError) else type(exc).__name__
+        print(f"anbud intake: stopped: {message}", file=sys.stderr)
+        return REFUSED
+    print(
+        f"anbud intake: {moved['dev']} dev, {moved['heldout']} held-out, {moved['prospective']} prospective, "
+        f"{moved['burned']} burned"
+    )
+    return 0
+
+
 def _stop(args: argparse.Namespace) -> int:
     from anbud.store import StoreError, request_stop
 
@@ -119,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("split", help="assign new tenders to dev, held-out or prospective")
     sub.add_parser("split-status", help="counts per status, and the dev tender ids")
     sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
+    intake = sub.add_parser("intake", help="split new tenders from an incoming folder, then move them unopened")
+    intake.add_argument("company_id")
+    intake.add_argument("incoming", type=Path, help="~/estim-anbud-data/incoming/<customer>/ with metadata.csv")
+    intake.add_argument("--new-ledger", action="store_true", help="the company's first intake")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
     stop.add_argument("company_id", nargs="?")
     stop.add_argument("run_id", nargs="?")
@@ -134,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stop(args)
     if args.command == "prep":
         return _prep(args)
+    if args.command == "intake":
+        return _intake(args)
     return _not_built(args.command)
 
 
