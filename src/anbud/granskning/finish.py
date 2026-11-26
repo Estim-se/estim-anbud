@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from anbud.granskning.catalog import Catalog
 from anbud.granskning.contracts import CalcPost, LensResult
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
-from anbud.granskning.kronor import Catalog, ranking_kronor
+from anbud.granskning.kronor import ranking_kronor
 from anbud.granskning.merge import merge
 from anbud.granskning.rank import Ranked, coverage, price_items, rank
 from anbud.granskning.report import Report, build_report, write_reports

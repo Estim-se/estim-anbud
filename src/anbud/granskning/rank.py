@@ -16,10 +16,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anbud.granskning.catalog import Catalog
 from anbud.granskning.contracts import CalcPost, LensResult
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
-from anbud.granskning.kronor import Catalog, is_minor, price, ranking_kronor
+from anbud.granskning.kronor import is_minor, price, ranking_kronor
 from anbud.granskning.settings import Settings
 
 NOT_ALL_CLEAR = (

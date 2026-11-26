@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from anbud.granskning.catalog import Catalog, CatalogItem
 from anbud.granskning.contracts import CalcPost, LensResult, ToolCall
 from anbud.granskning.corpus import Corpus
-from anbud.granskning.kronor import Catalog, CatalogItem
 from anbud.models import Block, Citation, Flag, FormulaInput, MoneyBasis
 from anbud.prep.model import Tile
 
@@ -53,16 +53,17 @@ def corpus() -> Corpus:
     )
 
 
-def catalog(default: bool = True, hourly_rate: float | None = 500.0) -> Catalog:
+def catalog(default: bool = True, hourly_rate: float = 500.0) -> Catalog:
     return Catalog(
-        name="synthetic",
+        name="estim-default" if default else "co-001-own",
         label="Syntetisk katalog",
-        default=default,
         hourly_rate=hourly_rate,
         items=[
-            CatalogItem(id="i1", name="Armatur trapphus", hours=1.0, material=1000.0),
-            CatalogItem(id="i2", name="Vägguttag", hours=0.5, material=100.0),
-            CatalogItem(id="i3", name="Byggström per etapp", hours=20.0, material=8000.0),
+            CatalogItem(id="i1", name="Armatur trapphus", hours=1.0, unit_price=1000.0, category="6"),
+            CatalogItem(id="i2", name="Vägguttag", hours=0.5, unit_price=100.0),
+            CatalogItem(id="i3", name="Byggström per etapp", hours=20.0, unit_price=8000.0),
+            CatalogItem(id="i4", name="Utsättning", unit="tim", hours=1.0),
+            CatalogItem(id="i5", name="Avgift utan pris"),
         ],
     )
 

@@ -7,9 +7,9 @@ from typing import Any
 
 from _granskning_synth import CALC_POSTS, basis, catalog, corpus, flag, lens_result, search
 
+from anbud.granskning.catalog import load_named_catalog
 from anbud.granskning.export_catalog import export, parse_catalog_source
 from anbud.granskning.finish import finish
-from anbud.granskning.kronor import load_catalog
 from anbud.granskning.validate import validate_flags
 from anbud.models import Verdict
 
@@ -77,6 +77,9 @@ export const A: PostType[] = ([
 export const B: PostType[] = ([
   [3, 'Syntetisk kanal (m)', 0.2, 50, 7],
 ] as const).map(x => x);
+export const TENDER_SECTIONS: Record<number, string> = {
+  4: 'Rum', 6: 'Allmänt',
+};
 export const UPDATES = [
   { id: id(2), from: { hours: 1, list_price: 900 }, to: { hours: 1.5, list_price: 1200 } },
 ];
@@ -86,9 +89,10 @@ export const UPDATES = [
 def test_the_catalog_exporter_reads_the_app_shape(data_root: Path, tmp_path: Path) -> None:
     items = parse_catalog_source(SYNTHETIC_TS)
     assert [i.name for i in items] == ["Syntetiskt uttag", "Syntetisk armatur", "Syntetisk kanal (m)"]
-    assert items[1].hours == 1.5 and items[1].material == 1200 and items[2].unit == "m"
+    assert items[1].hours == 1.5 and items[1].unit_price == 1200 and items[2].unit == "m"
+    assert items[0].category == "Rum" and items[2].category == "7"
     source = tmp_path / "catalog.ts"
     source.write_text(SYNTHETIC_TS, encoding="utf-8")
     export(source, data_root / "catalogs" / "estim-default.json", hourly_rate=500)
-    loaded = load_catalog("estim-default")
-    assert loaded.default and loaded.label == "Estims standardkatalog" and loaded.hourly_rate == 500
+    loaded = load_named_catalog("estim-default")
+    assert loaded.default and loaded.label == "Estims standardkatalog (ej kundens)" and loaded.hourly_rate == 500

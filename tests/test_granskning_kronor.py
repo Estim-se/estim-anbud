@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from _granskning_synth import CALC_POSTS, basis, catalog, flag
 
-from anbud.granskning.kronor import Catalog, catalog_path, is_minor, load_catalog, price, ranking_kronor
+from anbud.granskning.catalog import Catalog, catalog_path, load_catalog, load_named_catalog
+from anbud.granskning.kronor import is_minor, price, ranking_kronor
 from anbud.granskning.settings import Settings, load_settings
 
 S = load_settings()
@@ -43,7 +44,7 @@ def test_quantity_gaps_prefer_the_calcs_own_figures() -> None:
 
 def test_hours_need_an_hourly_rate() -> None:
     assert price(basis(kind="hours_gap", hours=40), catalog(), POSTS, S).point == 40 * 500
-    k = price(basis(kind="hours_gap", hours=40), catalog(hourly_rate=None), POSTS, S)
+    k = price(basis(kind="hours_gap", hours=40), catalog(hourly_rate=0), POSTS, S)
     assert not k.priced and "timpris" in k.reason
     assert not price(basis(kind="hours_gap"), catalog(), POSTS, S).priced
 
@@ -87,7 +88,26 @@ def test_catalogs_load_from_the_data_folder_only(data_root: Path) -> None:
     assert path == data_root / "catalogs" / "synthetic.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(catalog().model_dump(mode="json")), encoding="utf-8")
-    assert load_catalog("synthetic") == catalog()
+    assert load_named_catalog("synthetic") == load_catalog(path) == catalog()
     with pytest.raises(ValueError):
         catalog_path("../escape")
-    assert isinstance(load_catalog("synthetic"), Catalog)
+
+
+def test_the_shared_catalog_format() -> None:
+    c = catalog()
+    assert c.default and not catalog(default=False).default
+    assert c.find("i2").name == "Vägguttag" and c.find("Vägguttag") is None  # find is by id
+    assert [i.id for i in c.search("ARMATUR")] == ["i1"] and [i.id for i in c.search("per byggström")] == ["i3"]
+    assert c.search("armatur kök") == [] and c.search("  ") == []
+    assert c.unit_cost(c.find("i4")) == 500 and c.unit_cost(c.find("i5")) is None
+    assert catalog(hourly_rate=0).unit_cost(c.find("i1")) is None
+    raw = {
+        "name": "estim-default",
+        "label": "Estims standardkatalog (ej kundens)",
+        "currency": "SEK",
+        "hourly_rate": 500.0,
+        "items": [{"id": "x", "name": "Y", "unit": "m", "unit_price": None, "hours": 0.2, "category": None}],
+    }
+    assert Catalog.model_validate(raw).items[0].unit == "m"
+    with pytest.raises(ValueError):
+        Catalog.model_validate({**raw, "default": True})

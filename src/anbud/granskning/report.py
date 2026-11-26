@@ -25,9 +25,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 from pydantic import BaseModel, ConfigDict, Field
 
+from anbud.granskning.catalog import Catalog
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
-from anbud.granskning.kronor import Catalog
 from anbud.granskning.rank import Ranked, TenderCoverage, document_names
 from anbud.models import Block
 from anbud.paths import dev_tender_dir, repo_root

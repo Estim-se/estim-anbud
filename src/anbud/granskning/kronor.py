@@ -1,7 +1,7 @@
 """Kronor (plan §6.1 step 12): code prices a flag's money basis. No model ever sees a price from here.
 
-- Catalogs load at run time from `~/estim-anbud-data/catalogs/<name>.json` (see `Catalog`). The repo holds no prices.
-  Figures priced from Estim's default catalog carry `default_catalog=True` and say so in the report.
+- Catalogs (`anbud.granskning.catalog`) load at run time from the data folder; the repo holds no prices. Every figure
+  priced from a catalog carries its label, and Estim's default catalog also sets `default_catalog=True`.
 - Contract formulas (vite per week, security, index drift, wage step) are computed here from the flag's named inputs;
   `FORMULA_INPUTS` lists the names, for lens prompts.
 - The calc's own figures (`CalcPost`) price a quantity gap on a post when they can, before the catalog.
@@ -9,21 +9,11 @@
 
 from __future__ import annotations
 
-import difflib
-import json
-import re
-from pathlib import Path
-
-from pydantic import BaseModel, ConfigDict, Field
-
+from anbud.granskning.catalog import Catalog, CatalogItem
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.items import Kronor
 from anbud.granskning.settings import Settings
 from anbud.models import Flag, MoneyBasis
-from anbud.paths import data_root
-from anbud.prep.text import normalise
-
-CATALOG_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 FORMULA_INPUTS: dict[str, dict[str, str]] = {
     "vite_per_week": {
@@ -53,63 +43,6 @@ FORMULA_INPUTS: dict[str, dict[str, str]] = {
         "hourly_rate": "the hourly rate in SEK; the catalog's if left out",
     },
 }
-
-
-class _Model(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class CatalogItem(_Model):
-    id: str
-    name: str
-    hours: float = Field(ge=0, description="Hours per unit")
-    material: float = Field(default=0.0, ge=0, description="Material list price per unit, SEK")
-    unit: str = "st"
-    section: int | str | None = None
-
-
-class Catalog(_Model):
-    name: str
-    label: str = Field(description="Shown next to every figure priced from it, e.g. Estims standardkatalog")
-    default: bool = Field(default=False, description="Estim's default catalog, not the customer's own")
-    currency: str = "SEK"
-    hourly_rate: float | None = Field(default=None, ge=0)
-    list_discount_pct: float = Field(default=0.0, ge=0, le=100)
-    material_markup_pct: float = Field(default=0.0, ge=0)
-    items: list[CatalogItem] = Field(default_factory=list)
-
-    def find(self, wanted: str | None) -> CatalogItem | None:
-        """By id, then by normalised name, then by a close name (difflib ratio 0.85 or more)."""
-        if not wanted:
-            return None
-        key = normalise(wanted).casefold()
-        names = {normalise(i.name).casefold(): i for i in self.items}
-        for item in self.items:
-            if item.id == wanted:
-                return item
-        if key in names:
-            return names[key]
-        close = difflib.get_close_matches(key, list(names), n=1, cutoff=0.85)
-        return names[close[0]] if close else None
-
-    def material_cost(self, item: CatalogItem) -> float:
-        return item.material * (1 - self.list_discount_pct / 100) * (1 + self.material_markup_pct / 100)
-
-    def unit_cost(self, item: CatalogItem) -> float | None:
-        """Labour plus material for one unit, or None without an hourly rate."""
-        if self.hourly_rate is None:
-            return None
-        return item.hours * self.hourly_rate + self.material_cost(item)
-
-
-def catalog_path(name: str, root: Path | None = None) -> Path:
-    if not CATALOG_NAME.fullmatch(name):
-        raise ValueError("catalog names look like estim-default")
-    return (root or data_root()) / "catalogs" / f"{name}.json"
-
-
-def load_catalog(name: str, root: Path | None = None) -> Catalog:
-    return Catalog.model_validate(json.loads(catalog_path(name, root).read_text(encoding="utf-8")))
 
 
 class _Unpriced(Exception):
@@ -162,8 +95,8 @@ def _formula(basis: MoneyBasis, catalog: Catalog | None, settings: Settings) -> 
             increase = x["increase_per_hour"]
         else:
             (pct,) = _need(x, "increase_percent")
-            rate = x.get("hourly_rate", catalog.hourly_rate if catalog else None)
-            if rate is None:
+            rate = x.get("hourly_rate", catalog.hourly_rate if catalog else 0.0)
+            if not rate:
                 raise _Unpriced("saknar timpris")
             increase = rate * pct / 100
         return hours * increase, f"Lönesteg: {hours:g} timmar efter lönehöjningen"
@@ -171,7 +104,7 @@ def _formula(basis: MoneyBasis, catalog: Catalog | None, settings: Settings) -> 
 
 
 def _rate(catalog: Catalog | None) -> float:
-    if catalog is None or catalog.hourly_rate is None:
+    if catalog is None or catalog.hourly_rate <= 0:
         raise _Unpriced("katalogen saknar timpris")
     return catalog.hourly_rate
 
@@ -180,12 +113,12 @@ def _catalog_cost(basis: MoneyBasis, catalog: Catalog | None, post: CalcPost | N
     """The catalog item the basis names (or the calc post's text names) and its unit cost."""
     if catalog is None:
         raise _Unpriced("ingen katalog")
-    item = catalog.find(basis.item) or (catalog.find(post.text) if post else None)
+    item = catalog.lookup(basis.item) or (catalog.lookup(post.text) if post else None)
     if item is None:
         raise _Unpriced("posten finns inte i katalogen")
     cost = catalog.unit_cost(item)
     if cost is None:
-        raise _Unpriced("katalogen saknar timpris")
+        raise _Unpriced("katalogposten saknar pris, eller katalogen saknar timpris")
     return item, cost
 
 
