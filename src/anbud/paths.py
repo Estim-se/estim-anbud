@@ -44,6 +44,14 @@ def dev_tender_dir(company_id: str, tender_id: str, root: Path | None = None) ->
     return company_dir(company_id, root) / "dev" / check_tender_id(tender_id)
 
 
+def fixture_data_dir(company_id: str, fixture: Path, root: Path | None = None) -> Path:
+    """Where a synthetic fixture's prep, runs and labels go: named by its path under fixtures/synthetic/, with `-` for
+    `/`, so `injection-tender/injected` and `injection-tender/clean` don't share a folder."""
+    base = (repo_root() / "fixtures" / "synthetic").resolve()
+    rel = fixture.expanduser().resolve().relative_to(base)
+    return company_dir(company_id, root) / "fixtures" / "-".join(rel.parts)
+
+
 def ledger_path(company_id: str, root: Path | None = None) -> Path:
     return company_dir(company_id, root) / "split" / "ledger.jsonl"
 

@@ -45,7 +45,7 @@ def _prep(args: argparse.Namespace) -> int:
         return REFUSED
     if kind == "fixture":
         inbox = args.fixture.expanduser().resolve()
-        out = paths.company_dir(args.company_id) / "fixtures" / inbox.name / "prep"
+        out = paths.fixture_data_dir(args.company_id, inbox) / "prep"
         manifest = None
     else:
         tender = paths.dev_tender_dir(args.company_id, args.tender_id)
