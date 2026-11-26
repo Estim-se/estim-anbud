@@ -2,6 +2,11 @@
 
 Files are identified by content, deduplicated by hash, and checked against the intake manifest when there is one.
 Nothing here prints a file name: names often carry the customer's or the project's name.
+
+- The inbox and the manifest must be real folders and files: a symlink, or a file that resolves outside the inbox, is
+  refused rather than followed.
+- A file over the per-file limit, or a zip container that unpacks past the limit, is hashed in a stream and listed as
+  skipped ("too large"); its bytes are never held in memory.
 """
 
 from __future__ import annotations
@@ -31,10 +36,15 @@ class Source:
     size: int
     paths: tuple[str, ...]  # relative to the folder; local only, never logged
     data: bytes = field(repr=False, compare=False)
+    too_large: bool = False
 
     @property
     def doc_id(self) -> str:
         return doc_id_of(self.sha256)
+
+
+class _TooLarge(Exception):
+    pass
 
 
 def _zip_kind(data: bytes) -> DocKind:
@@ -42,9 +52,9 @@ def _zip_kind(data: bytes) -> DocKind:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             infos = zf.infolist()
             if len(infos) > MAX_ZIP_ENTRIES or sum(i.file_size for i in infos) > MAX_UNZIPPED_BYTES:
-                raise SourceError("a zip container unpacks to more than the limit")
+                raise _TooLarge
             names = {i.filename for i in infos}
-    except zipfile.BadZipFile:
+    except (zipfile.BadZipFile, ValueError, OSError):
         return "other"
     if "xl/workbook.xml" in names:
         return "xlsx"
@@ -76,8 +86,14 @@ def detect_kind(data: bytes, name: str) -> DocKind:
 
 def read_manifest(path: Path) -> set[str]:
     """Hashes from a `shasum -a 256` style manifest: `<sha256>  <relative path>` per line."""
+    if path.is_symlink() or not path.is_file():
+        raise SourceError("the intake manifest is not a regular file")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise SourceError("the intake manifest can't be read") from None
     hashes = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         digest = line.split(maxsplit=1)[0].lower()
@@ -94,36 +110,55 @@ class Loaded:
     skipped_hidden: int = 0
 
 
+def _stream_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def load_folder(folder: Path, manifest: Path | None = None) -> Loaded:
-    if not folder.is_dir():
-        raise SourceError("the tender has no inbox folder")
-    found: dict[str, tuple[bytes, list[str]]] = {}
+    if folder.is_symlink() or not folder.is_dir():
+        raise SourceError("the tender has no inbox folder, or it is a link")
+    base = folder.resolve()
+    found: dict[str, tuple[bytes, list[str], bool, int]] = {}
     links = hidden = 0
-    for path in sorted(folder.rglob("*")):
-        rel = path.relative_to(folder)
-        if any(part.startswith(".") for part in rel.parts):
-            hidden += path.is_file()
-            continue
-        if path.is_symlink():
-            links += 1
-            continue
-        if not path.is_file():
-            continue
-        if path.stat().st_size > MAX_FILE_BYTES:
-            raise SourceError("a file is larger than the per-file limit")
-        data = path.read_bytes()
-        digest = hashlib.sha256(data).hexdigest()
-        entry = found.setdefault(digest, (data, []))
-        entry[1].append(rel.as_posix())
-    if manifest is not None and manifest.exists():
+    try:
+        for path in sorted(folder.rglob("*")):
+            rel = path.relative_to(folder)
+            if any(part.startswith(".") for part in rel.parts):
+                hidden += path.is_file()
+                continue
+            if path.is_symlink() or not path.resolve().is_relative_to(base):
+                links += 1
+                continue
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size > MAX_FILE_BYTES:
+                data, digest, too_large = b"", _stream_hash(path), True
+            else:
+                data = path.read_bytes()
+                digest, too_large = hashlib.sha256(data).hexdigest(), False
+            entry = found.setdefault(digest, (data, [], too_large, size))
+            entry[1].append(rel.as_posix())
+    except OSError:
+        raise SourceError("a file in the inbox can't be read") from None
+    if manifest is not None and (manifest.exists() or manifest.is_symlink()):
         expected = read_manifest(manifest)
         extra, missing = len(set(found) - expected), len(expected - set(found))
         if extra or missing:
             raise SourceError(
                 f"the inbox doesn't match its intake manifest ({extra} unexpected, {missing} missing or changed)"
             )
-    sources = [
-        Source(digest, detect_kind(data, rels[0]), len(data), tuple(rels), data)
-        for digest, (data, rels) in sorted(found.items(), key=lambda kv: kv[1][1][0])
-    ]
+    sources = []
+    for digest, (data, rels, too_large, size) in sorted(found.items(), key=lambda kv: kv[1][1][0]):
+        kind: DocKind = "other"
+        if not too_large:
+            try:
+                kind = detect_kind(data, rels[0])
+            except _TooLarge:
+                too_large, data = True, b""
+        sources.append(Source(digest, kind, size, tuple(rels), data, too_large))
     return Loaded(sources, links, hidden)

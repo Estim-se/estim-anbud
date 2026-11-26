@@ -29,6 +29,7 @@ class Page:
     texts: list[Text] = field(default_factory=list)
     image: tuple[int, int] | None = None  # pixel size of a gray image stretched over the whole page
     vector_lines: int = 0
+    rotate: int = 0  # 0 or 90; with 90, `size` is the stored (portrait) page and text positions are as displayed
 
 
 def _escape(text: str) -> bytes:
@@ -68,12 +69,17 @@ def make_pdf(pages: list[Page]) -> bytes:
             ops.append(f"0.5 w {x:.1f} 20 m {width - x:.1f} {height - 20} l S".encode())
         for t in page.texts:
             font = "/F2" if t.bold else "/F1"
-            baseline = height - t.top - t.size * 0.8
-            ops.append(f"BT {font} {t.size} Tf {t.x} {baseline:.2f} Td (".encode() + _escape(t.text) + b") Tj ET")
+            if page.rotate == 90:  # displayed (x, baseline) maps to stored (u, v) = (baseline, x), text running up
+                u = t.top + t.size * 0.8
+                matrix = f"0 1 -1 0 {u:.2f} {t.x}"
+            else:
+                matrix = f"1 0 0 1 {t.x} {height - t.top - t.size * 0.8:.2f}"
+            ops.append(f"BT {font} {t.size} Tf {matrix} Tm (".encode() + _escape(t.text) + b") Tj ET")
         content = b"\n".join(ops)
         stream = add(f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream")
         kid = add(
-            f"<< /Type /Page /Parent {pages_obj} 0 R /MediaBox [0 0 {width} {height}] /Contents {stream} 0 R "
+            f"<< /Type /Page /Parent {pages_obj} 0 R /MediaBox [0 0 {width} {height}] /Rotate {page.rotate} "
+            f"/Contents {stream} 0 R "
             f"/Resources << ".encode()
             + b" ".join(resources)
             + b" >> >>"
@@ -110,11 +116,18 @@ def _tc(inner: str) -> str:
     return f"<w:tc>{inner}</w:tc>"
 
 
-def make_docx(body: str) -> bytes:
+def make_docx(body: str, parts: dict[str, str] | None = None) -> bytes:
+    """`parts` maps extra part names (word/header1.xml, word/footnotes.xml) to their root element's inner XML; the
+    root tag follows from the name."""
+    roots = {"header": "w:hdr", "footer": "w:ftr", "footnotes": "w:footnotes", "endnotes": "w:endnotes"}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("[Content_Types].xml", "<Types/>")
         zf.writestr("word/document.xml", f"<w:document {W}><w:body>{body}</w:body></w:document>")
+        for name, inner in (parts or {}).items():
+            stem = name.rsplit("/", 1)[-1].split(".")[0].rstrip("0123456789")
+            tag = roots[stem]
+            zf.writestr(name, f"<{tag} {W}>{inner}</{tag}>")
     return buf.getvalue()
 
 
