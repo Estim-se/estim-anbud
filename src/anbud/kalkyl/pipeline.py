@@ -79,6 +79,7 @@ class KalkylResult:
             "posts": len(self.posts),
             "posts_per_object": sum(1 for p in self.posts if any(ln.per for ln in p.lines)),
             "posts_from_recipe": sum(1 for p in self.posts if any(ln.recipe for ln in p.lines)),
+            "posts_assumed_per_object": sum(1 for p in self.posts if any(ln.assumed for ln in p.lines)),
             "posts_priced": self.totals.priced,
             "posts_missing_price": self.totals.missing_price,
             "posts_missing_quantity": self.totals.missing_quantity,

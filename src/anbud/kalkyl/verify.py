@@ -56,6 +56,14 @@ def parse_record(raw: object) -> tuple[QuantityRecord | None, str | None]:
         return None, f"doesn't match the record fields ({', '.join(fields)})"
 
 
+def quantity_written(record: QuantityRecord) -> bool:
+    """Whether the record's quantity is written in its quotes, as digits or a number word."""
+    if record.quantity is None:
+        return False
+    written = set().union(*(numbers_in(normalise(c.quote)) | number_words(c.quote) for c in record.citations))
+    return any(_close(record.quantity, n) for n in written)
+
+
 def check_record(record: QuantityRecord, chunk: Chunk, corpus: Corpus) -> str | None:
     """Why the record fails, or None if it passes."""
     docs = set()

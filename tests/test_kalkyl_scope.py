@@ -32,7 +32,7 @@ from anbud.kalkyl.export_recipe import build, parse_recipe_source
 from anbud.kalkyl.extract import BRIEF, chunk_message
 from anbud.kalkyl.lines import heading_paths, make_chunks, scope_line_ids
 from anbud.kalkyl.pipeline import with_room_descriptors
-from anbud.kalkyl.price import DerivedQuantity, build_posts, count_objects, price_posts
+from anbud.kalkyl.price import ASSUMED_NOTE, DerivedQuantity, build_posts, count_objects, price_posts
 from anbud.kalkyl.recipe import CUSTOMER_LABEL, DEFAULT_LABEL, Recipe, RecipeError, RecipeItem, bind, load_recipe
 from anbud.kalkyl.records import Contained, QuantityRecord, VerifiedRecord
 from anbud.kalkyl.rooms import descriptor, room_types
@@ -270,7 +270,7 @@ def test_a_stated_count_per_room_type_multiplies_by_that_room_count() -> None:
         "Dubbla uttag i sovrum",
         "per_object",
         "st",
-        SCOPE_CITE,
+        [cite("fu-001", "Sovrum förses med 2 dubbla uttag")],
         quantity=2,
         per_object="bedroom",
         catalog_id="uttag-dubbelt",
@@ -291,13 +291,31 @@ def test_without_a_count_the_recipe_gives_it_labelled() -> None:
     assert post.level == "Enligt recept"
 
 
-def test_without_a_count_or_recipe_the_post_is_missing_a_quantity_with_its_multiplier() -> None:
+def test_without_a_count_or_recipe_a_count_unit_is_one_per_object_labelled_as_an_assumption() -> None:
     record = req("Uttag i sovrum", "per_object", "st", SCOPE_CITE, per_object="bedroom", catalog_id="uttag-dubbelt")
     (post,) = _posts([record])
-    assert post.quantity is None and post.status == "Saknar mängd"
-    assert post.basis == "? per sovrum × 3 sovrum"
-    assert "Saknar mängd: ange antal per sovrum" in post.notes
+    assert post.quantity == 3 and post.status == "Prissatt"  # 1 per bedroom × 3 bedrooms
+    assert post.basis == "1 per sovrum (antaget) × 3 sovrum"
+    assert ASSUMED_NOTE in post.notes and post.level == "Antagande"
     assert post.lines[0].record.record.citations[0].block_id == "fu-001" and post.rows
+
+
+def test_the_models_unwritten_count_is_no_count_so_the_recipe_or_the_assumption_decides() -> None:
+    def uttag(**kw: Any) -> dict:
+        return req("Uttag i sovrum", "per_object", "st", SCOPE_CITE, per_object="bedroom", **kw)
+
+    (with_recipe,) = _posts([uttag(quantity=1, catalog_id="uttag-dubbelt")], TEST_RECIPE)
+    assert with_recipe.quantity == 9 and with_recipe.level == "Enligt recept"  # the recipe's 3, not the model's 1
+    (without,) = _posts([uttag(quantity=1, catalog_id="uttag-dubbelt")])
+    (none_given,) = _posts([uttag(catalog_id="uttag-dubbelt")])
+    assert without.quantity == none_given.quantity == 3 and without.level == none_given.level == "Antagande"
+
+
+def test_without_a_count_a_length_per_object_stays_missing_with_its_multiplier() -> None:
+    record = req("Kabel i sovrum", "per_object", "m", SCOPE_CITE, per_object="bedroom")
+    (post,) = [p for p in _posts([record]) if p.name == "Kabel i sovrum"]
+    assert post.quantity is None and post.status == "Saknar mängd"
+    assert post.basis == "? per sovrum × 3 sovrum" and "Saknar mängd: ange antal per sovrum" in post.notes
 
 
 def test_a_complete_installation_becomes_the_recipe_room_by_room() -> None:
@@ -335,7 +353,8 @@ def test_a_complete_installation_without_a_recipe_is_one_post_missing_its_quanti
 
 def test_per_object_lines_for_different_room_types_are_separate_posts() -> None:
     def per(kind: str, n: int) -> dict:
-        return req("Uttag", "per_object", "st", SCOPE_CITE, quantity=n, per_object=kind, catalog_id="uttag-dubbelt")
+        quote = [cite("fu-001", f"{n} uttag")]
+        return req("Uttag", "per_object", "st", quote, quantity=n, per_object=kind, catalog_id="uttag-dubbelt")
 
     posts = _posts([per("bedroom", 2), per("living_room", 4)])
     assert sorted(p.quantity for p in posts) == [6, 12]  # never a conflict between room types
@@ -481,13 +500,15 @@ def test_a_run_prices_scope_passages_through_the_recipe(scope_tender: Path) -> N
     summary = run_dev_tender("co-001", "t-0001", sdk=fake_sdk(_scope_handler), catalog_name="synthetic", run_id="k")
     assert summary["scope_lines"] == 3 and summary["scope_lines_not_handled"] == 1  # the set-aside common space
     assert summary["rooms_from_row_descriptors"] == 2 and summary["recipe"] == DEFAULT_LABEL
-    assert summary["posts_from_recipe"] == 5 and summary["posts_missing_quantity"] == 1
+    assert summary["posts_from_recipe"] == 5 and summary["posts_missing_quantity"] == 0
+    assert summary["posts_assumed_per_object"] == 1
     out = scope_tender / "kalkyl" / "k"
     result = json.loads((out / "result.json").read_text())
     assert result["recipe"]["label"] == DEFAULT_LABEL
     posts = {p["name"]: p for p in result["posts"]}
     bedroom = posts["Takuttag i sovrum"]  # the bedroom ceiling outlet: no count written, none in the recipe
-    assert bedroom["status"] == "Saknar mängd" and bedroom["basis"] == "? per sovrum × 3 sovrum"
+    assert bedroom["status"] == "Prissatt" and bedroom["basis"] == "1 per sovrum (antaget) × 3 sovrum"
+    assert bedroom["assumed_per_object"] and bedroom["level"] == "Antagande"
     sockets = posts["Vägguttag dubbelt, sovrum"]
     assert sockets["quantity"] == "9" and sockets["recipe"] == DEFAULT_LABEL
     assert sockets["object_rows"] == ["bbbbbb-000002", "bbbbbb-000003"]

@@ -206,6 +206,7 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("varav omfattningsstycken", c["scope_lines_not_handled"], None),
         ("Poster per objekt eller rumstyp", c["posts_per_object"], None),
         ("Poster med antal enligt recept", c["posts_from_recipe"], None),
+        ("Poster med antaget antal per objekt (1)", c["posts_assumed_per_object"], None),
         ("varav bortvalda av modellen", c["lines_set_aside_by_model"], None),
         ("Verifierade poster från modellen", c["records_verified"], None),
         ("Underkända poster från modellen", c["records_rejected"], None),

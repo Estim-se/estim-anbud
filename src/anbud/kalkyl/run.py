@@ -106,6 +106,7 @@ def result_json(result: KalkylResult) -> bytes:
                 "records": [ln.record.id for ln in p.lines],
                 "per_object": sorted({ln.per for ln in p.lines if ln.per}),
                 "recipe": next((ln.recipe for ln in p.lines if ln.recipe), None),
+                "assumed_per_object": any(ln.assumed for ln in p.lines),
                 "object_rows": p.rows,
             }
         )

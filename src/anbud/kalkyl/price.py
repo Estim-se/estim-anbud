@@ -8,10 +8,11 @@ descriptor) give room types per apartment (`rooms.room_types`), counted the same
 type. Room types no row counts (a hall) come from the recipe's per-apartment figure, labelled.
 
 **Requirement quantities.** `stated` is the number written; `lump_sum` is 1; `missing` stays missing. `per_object` is
-the number per object times the object count; with no number written, the recipe's count for that room type and
-catalog item (labelled with the recipe's source), else "Saknar mängd" with the multiplier shown, so the estimator only
-fills in the count. A complete-installation passage becomes one line per recipe item and room type, each citing the
-passage and the counted rows, unless a requirement already states that item for that room type.
+the number per object times the object count. A count the quotes don't write is no count, even when the model gives
+one: then the recipe's count for that room type and catalog item (labelled with the recipe's source), else one per
+object for a count unit (labelled "Antagande"), else "Saknar mängd" with the multiplier shown. A complete-installation
+passage becomes one line per recipe item and room type, each citing the passage and the counted rows, unless a
+requirement already states that item for that room type.
 
 **Posts.** Requirement lines are grouped by scope, catalog item (or, without one, the normalised description), type
 code, unit family and the object kind they multiply by. Inside a post, lines are grouped by location: the same
@@ -42,6 +43,7 @@ from anbud.kalkyl.recipe import BoundRecipe, Count
 from anbud.kalkyl.records import QuantityRecord, Scope, VerifiedRecord
 from anbud.kalkyl.rooms import APARTMENT_ROOMS, room_types
 from anbud.kalkyl.rooms import label as rooms_label
+from anbud.kalkyl.verify import quantity_written
 from anbud.models import Citation
 
 OBJECT_LABELS = {
@@ -72,7 +74,11 @@ LEVEL_LABELS = {
     "visual": "Läst visuellt",
     "interpretation": "Tolkning",
     "recipe": "Enligt recept",
+    "assumed": "Antagande",
 }
+# A per-object requirement in a count unit that names no number ("kitchens get a stove outlet") is one per object.
+ASSUMED_PER_OBJECT = Decimal(1)
+ASSUMED_NOTE = "Antal per objekt antaget till 1: underlaget anger inget antal"
 _UNIT_FAMILIES = {
     "count": {"st", "styck", "stycken", "pcs", "lgh", "rum", "sats", "set", "pkt", "post"},
     "length": {"m", "meter", "lm", "löpmeter"},
@@ -238,6 +244,7 @@ class Line:
     name: str | None = None  # the post name, when it isn't the record's
     catalog_id: str | None = None  # the item, when the line is a recipe count
     unit: str | None = None
+    assumed: bool = False  # the count per object is ASSUMED_PER_OBJECT: no number written, no recipe count
 
 
 def line_of(
@@ -255,16 +262,22 @@ def line_of(
         kind = r.per_object
         one, many = OBJECT_LABELS[kind]
         obj = objects.get(kind)
-        hit = recipe.count_for(kind, catalog_id) if recipe and r.quantity is None else None
-        per = _d(r.quantity) if r.quantity is not None else (hit.count if hit else None)
+        # A count the quotes don't write (the model's own "1", or none) is no stated count: the recipe's count for
+        # that room type and item comes first, then one per object for a count unit.
+        stated = _d(r.quantity) if r.quantity is not None and quantity_written(r) else None
+        hit = recipe.count_for(kind, catalog_id) if recipe and stated is None else None
+        # A complete installation is no single item: without a recipe it stays missing, never "1 per apartment".
+        assumed = stated is None and hit is None and unit_family(unit) == "count" and not r.complete_installation
+        per = stated if stated is not None else hit.count if hit else ASSUMED_PER_OBJECT if assumed else None
         label = hit.label if hit else None
-        each = f"{_num(per)} per {one}" + (f" ({label})" if label else "") if per is not None else f"? per {one}"
+        each = f"? per {one}" if per is None else f"{_num(per)} per {one}"
+        each += f" ({label})" if label else " (antaget)" if assumed else ""
         if obj is None or obj.count is None:
-            return Line(v, None, each, f"antal {many} saknas i objektmodellen", per=kind)
+            return Line(v, None, each, f"antal {many} saknas i objektmodellen", per=kind, assumed=assumed)
         times = f"{each} × {_num(obj.count)} {many}"
         if per is None:
             return Line(v, None, times, f"Saknar mängd: ange antal per {one}", per=kind, objects=obj)
-        return Line(v, per * obj.count, times, obj.conflict, per=kind, objects=obj, recipe=label)
+        return Line(v, per * obj.count, times, obj.conflict, per=kind, objects=obj, recipe=label, assumed=assumed)
     return Line(v, None, "mängd saknas i underlaget")
 
 
@@ -293,6 +306,8 @@ class Post:
 
     @property
     def level(self) -> str:
+        if any(ln.assumed for ln in self.lines):
+            return LEVEL_LABELS["assumed"]
         if any(ln.recipe for ln in self.lines):
             return LEVEL_LABELS["recipe"]
         levels = {ln.record.level for ln in self.lines}
@@ -336,6 +351,7 @@ def _post_quantity(lines: list[Line]) -> tuple[Decimal | None, list[str]]:
         total = q if total is None else total + q
     for ln in lines:
         extra_notes = [ln.note, f"Antal per objekt enligt {ln.recipe}" if ln.recipe else None]
+        extra_notes.append(ASSUMED_NOTE if ln.assumed else None)
         extra_notes.append(ln.objects.note if ln.objects else None)
         for note in extra_notes:
             if note and note not in notes:
