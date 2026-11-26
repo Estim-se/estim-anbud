@@ -79,6 +79,34 @@ class SetAside(_Model):
     reason: str = Field(min_length=1, max_length=300)
 
 
+ColumnRole = Literal["id", "description", "type_code", "quantity", "unit", "location", "contains"]
+
+
+class TableColumn(_Model):
+    col: str = Field(min_length=1, max_length=4, description="The column as in the rows' cols attribute")
+    role: ColumnRole = Field(
+        description="id: the object's id or number (object tables). description: what the row is. quantity: the "
+        "row's number. contains: a count of object_kind in each row's object (rooms, kitchens)."
+    )
+    object_kind: ObjectKind | None = Field(default=None, description="Required for contains")
+
+
+class TableLayout(_Model):
+    """A table code reads row by row: the model names the columns once, code reads every row in the range."""
+
+    header_block_id: str = Field(description="The row with the column headings")
+    first_block_id: str = Field(description="The first row code should read")
+    last_block_id: str = Field(description="The last row code should read, in the same sheet or table")
+    row_kind: Literal["object", "requirement"] = Field(
+        description="object: each row is one object of object_kind (a room or apartment list). requirement: each "
+        "row is a quantity to price (a schedule of quantities)."
+    )
+    object_kind: ObjectKind | None = Field(default=None, description="Required for object tables")
+    unit: str | None = Field(default=None, max_length=20, description="The unit when no column gives it")
+    scope: Scope = Field(description="As for records, for every row of the table")
+    columns: list[TableColumn] = Field(min_length=1, max_length=12)
+
+
 class SubmitQuantitiesInput(_Model):
     """The tool's schema. Code validates each record and set-aside alone, so one bad record never sinks the rest."""
 
@@ -86,6 +114,11 @@ class SubmitQuantitiesInput(_Model):
     set_aside: list[SetAside] = Field(
         default_factory=list,
         description="Quantity lines (q=1) that are not requirements or objects of this contract, with the reason",
+    )
+    tables: list[TableLayout] = Field(
+        default_factory=list,
+        description="Tables whose rows carry a cols attribute: name the columns once and code reads every row. "
+        "Set aside heading, total and blank rows inside the range.",
     )
 
 

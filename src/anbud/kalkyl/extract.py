@@ -22,8 +22,9 @@ from anbud.granskning.corpus import Corpus
 from anbud.kalkyl.catalog import ids as catalog_ids_of
 from anbud.kalkyl.catalog import prompt_lines
 from anbud.kalkyl.lines import Chunk
-from anbud.kalkyl.records import Level, QuantityRecord, Rejected, SetAside
+from anbud.kalkyl.records import Level, QuantityRecord, Rejected, SetAside, TableLayout
 from anbud.kalkyl.settings import EXTRACT, RoleSettings
+from anbud.kalkyl.tables import Cells, cols_attr, parse_layout, read_table
 from anbud.kalkyl.verify import check_record, level_of, parse_record, parse_set_aside, without_unknown_catalog_id
 from anbud.model_client import BudgetExceeded, ModelClient, ModelError, ReplayMiss, RunStopped
 
@@ -64,7 +65,14 @@ and so on). Code lists every q="1" row you neither use nor set aside as not hand
 
 catalog_id: the catalog item that fits the requirement and its unit, from the catalog below. Leave it out when \
 nothing fits; never force the nearest item. Additive: true only when the quote says the quantity comes on top of \
-another stated quantity. A delivery stated twice is one requirement cited twice, not two."""
+another stated quantity. A delivery stated twice is one requirement cited twice, not two.
+
+Tables: rows with a cols attribute have cells code can read. For a room or apartment list, or a schedule of \
+quantities, don't write one record per row: submit a table layout once. Name the header row, the first and last row \
+code should read, whether each row is an object (with its object_kind) or a requirement, the scope, and the role of \
+each column by its letter or number from cols (id, description, type_code, quantity, unit, location, or contains \
+with an object_kind for counts such as rooms or kitchens per row). Set aside heading, total and blank rows inside \
+the range. Rows without cols are recorded one by one."""
 
 
 def outline_text(corpus: Corpus) -> str:
@@ -88,9 +96,11 @@ def system_blocks(catalog: Catalog, corpus: Corpus) -> list[dict[str, Any]]:
     ]
 
 
-def _attrs(block_id: str, corpus: Corpus, quantity: set[str], context: bool) -> str:
+def _attrs(block_id: str, corpus: Corpus, quantity: set[str], context: bool, cells: Cells) -> str:
     b = corpus.blocks[block_id]
     parts = [f'id="{block_id}"', f'kind="{b.kind}"']
+    if (cols := cols_attr(block_id, cells)) is not None:
+        parts.append(f'cols="{escape(cols)}"')
     for name in ("page", "sheet", "row"):
         value = getattr(b, name)
         if value is not None:
@@ -104,7 +114,8 @@ def _attrs(block_id: str, corpus: Corpus, quantity: set[str], context: bool) -> 
     return " ".join(parts)
 
 
-def chunk_message(chunk: Chunk, corpus: Corpus, paths: dict[str, tuple[str, ...]]) -> str:
+def chunk_message(chunk: Chunk, corpus: Corpus, paths: dict[str, tuple[str, ...]], cells: Cells | None = None) -> str:
+    cells = cells or {}
     head = paths.get(chunk.block_ids[0], ())
     quantity = set(chunk.quantity_ids)
     lines = [
@@ -113,10 +124,10 @@ def chunk_message(chunk: Chunk, corpus: Corpus, paths: dict[str, tuple[str, ...]
     ]
     for block_id in chunk.context_ids:
         text = escape(corpus.blocks[block_id].text, quote=False)
-        lines.append(f"<block {_attrs(block_id, corpus, quantity, True)}>{text}</block>")
+        lines.append(f"<block {_attrs(block_id, corpus, quantity, True, cells)}>{text}</block>")
     for block_id in chunk.block_ids:
         text = escape(corpus.blocks[block_id].text, quote=False)
-        lines.append(f"<block {_attrs(block_id, corpus, quantity, False)}>{text}</block>")
+        lines.append(f"<block {_attrs(block_id, corpus, quantity, False, cells)}>{text}</block>")
     lines.append("</tender_blocks>")
     lines.append(
         f'This chunk has {len(chunk.quantity_ids)} row(s) marked q="1". Record what it states, then call '
@@ -132,6 +143,10 @@ class ChunkResult:
     records: list[tuple[QuantityRecord, Level]] = field(default_factory=list)
     set_aside: list[SetAside] = field(default_factory=list)
     rejected: list[Rejected] = field(default_factory=list)
+    tables: list[TableLayout] = field(default_factory=list)
+    table_rows: list[str] = field(default_factory=list)  # rows code read from the tables
+    unread_rows: dict[str, str] = field(default_factory=dict)  # table rows code couldn't read, with the reason
+    superseded: int = 0  # model records for rows a table also covers, dropped so nothing counts twice
     turns: int = 0
     cost_usd: float = 0.0
     error: str | None = None  # a kind (ModelError.kind, budget, stopped), never an API message
@@ -151,15 +166,22 @@ def _cited_ids(raw: object) -> list[str]:
 
 
 def _review(
-    raw_input: object, chunk: Chunk, corpus: Corpus, catalog_ids: set[str], result: ChunkResult
+    raw_input: object, chunk: Chunk, corpus: Corpus, catalog_ids: set[str], result: ChunkResult, cells: Cells
 ) -> list[tuple[str, list[str]]]:
     """Accept what passes into `result`; return (reason, cited block ids) for each failure."""
     failures: list[tuple[str, list[str]]] = []
     data = raw_input if isinstance(raw_input, dict) else {}
     records = data.get("records", [])
     asides = data.get("set_aside", [])
-    if not isinstance(records, list) or not isinstance(asides, list):
-        return [("records and set_aside must be lists", [])]
+    tables = data.get("tables", [])
+    if not isinstance(records, list) or not isinstance(asides, list) or not isinstance(tables, list):
+        return [("records, set_aside and tables must be lists", [])]
+    for n, raw in enumerate(tables, 1):
+        layout, reason = parse_layout(raw, chunk, corpus, cells)
+        if layout is None:
+            failures.append((f"table {n}: {reason}", []))
+            continue
+        result.tables.append(layout)
     for n, raw in enumerate(records, 1):
         record, reason = parse_record(raw)
         if record is not None:
@@ -194,6 +216,7 @@ def extract_chunk(
     system: list[dict[str, Any]],
     message: str,
     settings: RoleSettings,
+    cells: Cells | None = None,
 ) -> ChunkResult:
     result = ChunkResult(chunk.id, "no_submit")
     messages: list[dict[str, Any]] = [{"role": "user", "content": message}]
@@ -229,7 +252,7 @@ def extract_chunk(
             results = _tool_results(uses, {})
             messages += [{"role": "user", "content": [*results, {"type": "text", "text": nudge}] if results else nudge}]
             continue
-        failures = _review(submit.input, chunk, corpus, catalog_ids, result)
+        failures = _review(submit.input, chunk, corpus, catalog_ids, result, cells or {})
         if truncated:
             result.status = "truncated"
             result.rejected += [Rejected(chunk_id=chunk.id, reason=r, block_ids=ids) for r, ids in failures]
@@ -252,6 +275,28 @@ def extract_chunk(
     return result
 
 
+def apply_tables(result: ChunkResult, chunk: Chunk, corpus: Corpus, cells: Cells) -> None:
+    """Read every accepted table's rows into records. A row is read once even if two layouts cover it, and a model
+    record that cites only rows a table read is dropped (counted in `superseded`), so nothing counts twice."""
+    skip = {b for s in result.set_aside for b in s.block_ids}
+    read: list[str] = []
+    for layout in result.tables:
+        rows, unread = read_table(layout, chunk, corpus, cells, skip | set(read))
+        for block_id, record in rows:
+            read.append(block_id)
+            result.records.append((record, "exact"))
+        for block_id, reason in unread.items():
+            result.unread_rows.setdefault(block_id, reason)
+    if not read:
+        return
+    by_table = set(read)
+    from_tables = result.records[-len(read) :]
+    kept = [(r, lv) for r, lv in result.records[: -len(read)] if not {c.block_id for c in r.citations} <= by_table]
+    result.superseded = len(result.records) - len(read) - len(kept)
+    result.records = kept + from_tables
+    result.table_rows = read
+
+
 def extract_all(
     client: ModelClient,
     chunks: list[Chunk],
@@ -261,18 +306,22 @@ def extract_all(
     settings: RoleSettings,
     concurrency: int,
     on_done: Callable[[ChunkResult], None] | None = None,
+    cells: Cells | None = None,
 ) -> list[ChunkResult]:
     """Every chunk once: the first alone (it writes the cache), the rest in parallel. A budget stop or a stop marker
     ends the run's remaining chunks as not run; their quantity lines stay visible as not handled."""
     system = system_blocks(catalog, corpus)
     ids = set(catalog_ids_of(catalog))
     halted: list[str] = []
+    cells = cells or {}
 
     def one(chunk: Chunk) -> ChunkResult:
         if halted:
             return ChunkResult(chunk.id, "not_run", error=halted[0])
         try:
-            res = extract_chunk(client, chunk, corpus, ids, system, chunk_message(chunk, corpus, paths), settings)
+            message = chunk_message(chunk, corpus, paths, cells)
+            res = extract_chunk(client, chunk, corpus, ids, system, message, settings, cells)
+            apply_tables(res, chunk, corpus, cells)
         except BudgetExceeded:
             halted.append("budget")
             res = ChunkResult(chunk.id, "not_run", error="budget")

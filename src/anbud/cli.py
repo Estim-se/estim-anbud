@@ -37,7 +37,7 @@ def _eval(args: argparse.Namespace) -> int:
 def _prep(args: argparse.Namespace) -> int:
     from anbud import paths
     from anbud.prep.sources import SourceError
-    from anbud.prep.tender import PrepError, prepare
+    from anbud.prep.tender import PrepError, prepare, write_cells_sidecar
     from anbud.store import StoreError
 
     try:
@@ -55,7 +55,10 @@ def _prep(args: argparse.Namespace) -> int:
             inbox, out, manifest = tender / "inbox", tender / "prep", tender / "inbox.sha256"
             if not inbox.resolve().is_relative_to(tender.resolve()):
                 raise PrepError("the inbox resolves outside the tender's folder")
-        summary = prepare(args.company_id, inbox, out, manifest)
+        if args.cells_only:  # the sidecar alone; blocks.jsonl and the rest stay byte for byte
+            summary = write_cells_sidecar(args.company_id, inbox, out, manifest)
+        else:
+            summary = prepare(args.company_id, inbox, out, manifest)
     except (PrepError, SourceError, StoreError) as exc:
         print(f"anbud prep: stopped: {exc}", file=sys.stderr)
         return REFUSED
@@ -166,6 +169,11 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("company_id")
     prep.add_argument("tender_id", nargs="?")
     prep.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
+    prep.add_argument(
+        "--cells-only",
+        action="store_true",
+        help="add prep/cells.jsonl to an existing prep without changing anything else (only if the blocks match)",
+    )
     kalkyl = sub.add_parser("kalkyl", help="Kalkyl in shadow: a dev tender's blocks to a priced calc XLSX (paid)")
     kalkyl.add_argument("company_id")
     kalkyl.add_argument("tender_id")

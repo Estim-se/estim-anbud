@@ -334,3 +334,38 @@ def good_handler(params: dict[str, Any]) -> Message:
 
 def fake_sdk(handler: Callable[[dict[str, Any]], Message] = good_handler) -> SimpleNamespace:
     return SimpleNamespace(messages=ScriptedMessages(handler))
+
+
+def _cell(col: str, text: str) -> dict[str, Any]:
+    numeric = text.replace(",", "").replace(".", "").isdigit()
+    return {"col": col, "text": text, "numeric": numeric}
+
+
+def sheet_cells(blocks: list[Block] | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Cells for every sheet row, columns A, B, C... as prep's sidecar would write them for full rows."""
+    out = {}
+    for b in blocks or BLOCKS:
+        if b.kind == "sheet_row":
+            out[b.id] = [_cell(chr(ord("A") + i), t) for i, t in enumerate(b.text.split(" | "))]
+    return out
+
+
+def write_cells(prep_dir: Path, cells: dict[str, list[dict[str, Any]]]) -> None:
+    lines = [json.dumps({"block_id": block_id, "cells": row}, ensure_ascii=False) for block_id, row in cells.items()]
+    (prep_dir / "cells.jsonl").write_text("".join(line + "\n" for line in lines))
+
+
+APARTMENT_TABLE = {
+    "header_block_id": "bbbbbb-000001",
+    "first_block_id": "bbbbbb-000002",
+    "last_block_id": "bbbbbb-000005",
+    "row_kind": "object",
+    "object_kind": "apartment",
+    "scope": "included",
+    "columns": [
+        {"col": "A", "role": "id"},
+        {"col": "B", "role": "contains", "object_kind": "room"},
+        {"col": "C", "role": "contains", "object_kind": "kitchen"},
+        {"col": "D", "role": "contains", "object_kind": "bathroom"},
+    ],
+}

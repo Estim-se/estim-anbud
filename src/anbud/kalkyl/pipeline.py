@@ -17,6 +17,7 @@ from anbud.kalkyl.match import match_posts
 from anbud.kalkyl.price import ObjectCount, Post, Totals, build_posts, count_objects, price_posts, totals_of
 from anbud.kalkyl.records import Rejected, Uncovered, VerifiedRecord
 from anbud.kalkyl.settings import EXTRACT, MATCH, KalkylConfig
+from anbud.kalkyl.tables import Cells
 from anbud.model_client import ModelClient
 
 
@@ -50,6 +51,10 @@ class KalkylResult:
             "quantity_lines": sum(len(c.quantity_ids) for c in self.chunks),
             "records_verified": len(self.verified),
             "records_rejected": len(self.rejected),
+            "tables": sum(len(r.tables) for r in self.chunk_results),
+            "table_rows_read": sum(len(r.table_rows) for r in self.chunk_results),
+            "table_rows_unread": sum(len(r.unread_rows) for r in self.chunk_results),
+            "records_superseded_by_tables": sum(r.superseded for r in self.chunk_results),
             "object_kinds": len(self.objects),
             "posts": len(self.posts),
             "posts_priced": self.totals.priced,
@@ -81,11 +86,12 @@ def run_kalkyl(
     client: ModelClient,
     kalkyl: KalkylConfig,
     on_chunk: Callable[[ChunkResult], None] | None = None,
+    cells: Cells | None = None,
 ) -> KalkylResult:
     chunks = make_chunks(corpus, kalkyl.chunk_max_chars, kalkyl.chunk_max_quantity_lines)
     paths = heading_paths(corpus)
     results = extract_all(
-        client, chunks, corpus, catalog, paths, kalkyl.roles[EXTRACT], kalkyl.concurrency, on_done=on_chunk
+        client, chunks, corpus, catalog, paths, kalkyl.roles[EXTRACT], kalkyl.concurrency, on_done=on_chunk, cells=cells
     )
     verified = verified_records(results)
     objects = count_objects(verified)

@@ -42,6 +42,8 @@ def uncovered_lines(chunks: list[Chunk], results: list[ChunkResult], verified: l
                 reason = "Ej läst klart: svaret nådde max_tokens"
             elif res.status == "no_submit":
                 reason = "Modellen lämnade inget svar för avsnittet"
+            elif block_id in res.unread_rows:
+                reason = f"Tabellrad kunde inte läsas: {res.unread_rows[block_id]}"
             elif block_id in rejected:
                 reason = f"Citatet underkändes: {rejected[block_id]}"
             else:

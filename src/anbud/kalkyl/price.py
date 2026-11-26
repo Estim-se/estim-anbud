@@ -76,6 +76,12 @@ def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", (text or "").casefold()).strip(" .,:;")
 
 
+def _d(value: float | int) -> Decimal:
+    """A model or table number as a Decimal; whole numbers without a trailing .0."""
+    d = Decimal(str(value))
+    return d.quantize(Decimal(1)) if d == d.to_integral_value() else d
+
+
 def _num(value: Decimal | float | None) -> str:
     if value is None:
         return "-"
@@ -101,13 +107,13 @@ def count_objects(records: list[VerifiedRecord]) -> dict[str, ObjectCount]:
         if r.record_kind != "object" or r.object_kind is None or r.scope not in ("included", "unclear"):
             continue
         if r.quantity_source == "list_row":
-            n = Decimal(str(r.quantity if r.quantity is not None else 1))
+            n = _d(r.quantity if r.quantity is not None else 1)
         elif r.quantity_source == "stated" and r.quantity is not None:
-            n = Decimal(str(r.quantity))
+            n = _d(r.quantity)
         else:
             continue
         # The object itself, then what each one holds (an apartment row's kitchens and rooms), counted the same way.
-        for kind, count in [(r.object_kind, n), *((c.object_kind, n * Decimal(str(c.quantity))) for c in r.contains)]:
+        for kind, count in [(r.object_kind, n), *((c.object_kind, n * _d(c.quantity)) for c in r.contains)]:
             if r.quantity_source == "list_row":
                 rows[kind].setdefault(v.block_ids[0], count)
             else:
@@ -150,12 +156,12 @@ def line_of(v: VerifiedRecord, objects: dict[str, ObjectCount]) -> Line:
     unit = r.unit
     src = r.quantity_source
     if src in ("stated", "list_row"):
-        q = Decimal(str(r.quantity if r.quantity is not None else 1))
+        q = _d(r.quantity if r.quantity is not None else 1)
         return Line(v, q, f"angivet {_num(q)} {unit}")
     if src == "lump_sum":
         return Line(v, Decimal(1), "klumpsumma, 1 post")
     if src == "per_object" and r.per_object is not None and r.quantity is not None:
-        per = Decimal(str(r.quantity))
+        per = _d(r.quantity)
         one, many = OBJECT_LABELS[r.per_object]
         obj = objects.get(r.per_object)
         if obj is None or obj.count is None:
