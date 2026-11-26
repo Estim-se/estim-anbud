@@ -60,6 +60,44 @@ def _prep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _kalkyl(args: argparse.Namespace) -> int:
+    """Kalkyl in shadow on a dev tender. Paid unless --dry-run or --replay; never in CI."""
+    import os
+
+    from anbud.config import load_config
+    from anbud.kalkyl.catalog import CatalogError
+    from anbud.kalkyl.run import KalkylError, plan, run_dev_tender
+    from anbud.model_client import KeyMissing, keychain_key, make_sdk_client
+    from anbud.store import StoreError
+
+    try:
+        if check_run_allowed(args.company_id, args.tender_id) != "dev":
+            raise RunRefused("only dev tenders")
+    except RunRefused as exc:
+        print(f"anbud kalkyl: refused: {exc}", file=sys.stderr)
+        return REFUSED
+    try:
+        if args.dry_run:
+            summary = plan(args.company_id, args.tender_id, catalog_name=args.catalog)
+        else:
+            sdk = None
+            if not args.replay:
+                if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+                    print("anbud kalkyl: refused: paid calls never run in CI", file=sys.stderr)
+                    return REFUSED
+                config = load_config()
+                sdk = make_sdk_client(config, keychain_key(account=config.workspace))
+            summary = run_dev_tender(
+                args.company_id, args.tender_id, sdk=sdk, catalog_name=args.catalog, run_id=args.run_id
+            )
+    except (KalkylError, CatalogError, StoreError, KeyMissing) as exc:
+        print(f"anbud kalkyl: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    for key, value in summary.items():
+        print(f"{key}: {value}")
+    return 0
+
+
 def _stop(args: argparse.Namespace) -> int:
     from anbud.store import StoreError, request_stop
 
@@ -114,6 +152,13 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("company_id")
     prep.add_argument("tender_id", nargs="?")
     prep.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
+    kalkyl = sub.add_parser("kalkyl", help="Kalkyl in shadow: a dev tender's blocks to a priced calc XLSX (paid)")
+    kalkyl.add_argument("company_id")
+    kalkyl.add_argument("tender_id")
+    kalkyl.add_argument("--catalog", help="catalog name in ~/estim-anbud-data/catalogs/ (default: config/kalkyl.toml)")
+    kalkyl.add_argument("--run-id", help="resume or replay this run (same salt, so finished calls cost $0)")
+    kalkyl.add_argument("--dry-run", action="store_true", help="chunk counts and a cost estimate, no model call ($0)")
+    kalkyl.add_argument("--replay", action="store_true", help="answer every call from the run's step cache ($0)")
     sub.add_parser("replay", help="replay a stored run at $0 (phase 1)")
     sub.add_parser("guards", help="repo guards: names, document files, licensed text")
     sub.add_parser("split", help="assign new tenders to dev, held-out or prospective")
@@ -134,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stop(args)
     if args.command == "prep":
         return _prep(args)
+    if args.command == "kalkyl":
+        return _kalkyl(args)
     return _not_built(args.command)
 
 
