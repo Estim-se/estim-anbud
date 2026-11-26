@@ -184,6 +184,14 @@ class RunStore:
             raise StoreError("this run already has a different salt")
         return stored
 
+    def stored_salt(self, run_id: str) -> str | None:
+        """A stored run's salt, read without writing anything to it (a frozen run is read-only); None if there's no
+        such run."""
+        manifest = self.run_dir(run_id) / "run.json"
+        if not manifest.is_file():
+            return None
+        return str(json.loads(manifest.read_text())["salt"])
+
     def append_event(self, event: Event) -> None:
         if event.company_id != self.company_id:
             raise StoreError("an event for another company")

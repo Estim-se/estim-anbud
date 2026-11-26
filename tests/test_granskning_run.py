@@ -173,3 +173,28 @@ def test_cli_run_needs_a_prepared_tender_and_never_reads_the_key_for_replay(
     assert cli.main(["run", "co-001", "t-0001", "--replay"]) == cli.REFUSED  # replay needs a run id
     replay = ["run", "co-001", "t-0001", "--replay", "--run-id", "t-0001-x", "--lens", "regulation"]
     assert cli.main(replay) == command.REPLAY_INCOMPLETE  # nothing is cached for this run
+
+
+def test_cli_rebuild_needs_a_stored_base_run_its_own_run_id_and_never_reuses_another_runs_id(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from anbud.store import RunStore
+
+    def no_key(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("the key must not be read")
+
+    monkeypatch.setattr(model_client, "keychain_key", no_key)
+    ledger_with(data_root, t_0001=sh.DEV)
+    write_prep(data_root / "co-001" / "dev" / "t-0001" / "prep")
+    rebuild = ["run", "co-001", "t-0001", "--replay", "--lens", "regulation"]
+    assert cli.main([*rebuild, "--base-run", "t-0001-x", "--run-id", "t-0001-x"]) == cli.REFUSED
+    assert "a rebuild needs its own --run-id" in capsys.readouterr().err
+    assert cli.main([*rebuild, "--base-run", "t-0001-gone", "--run-id", "t-0001-y"]) == cli.REFUSED
+    assert "no stored run t-0001-gone" in capsys.readouterr().err
+    store = RunStore("co-001")
+    store.open_run("t-0001-base")
+    store.open_run("t-0001-other")  # another run's id, with its own salt
+    assert cli.main([*rebuild, "--base-run", "t-0001-base", "--run-id", "t-0001-other"]) == cli.REFUSED
+    assert "different salt" in capsys.readouterr().err
+    assert cli.main([*rebuild, "--base-run", "t-0001-base", "--run-id", "t-0001-new"]) == command.REPLAY_INCOMPLETE
+    assert store.stored_salt("t-0001-new") == store.stored_salt("t-0001-base")

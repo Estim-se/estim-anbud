@@ -454,8 +454,7 @@ def test_the_cli_exits_1_when_a_finished_run_cant_be_made_read_only(
     tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _ledger(sh.DEV)
-    from anbud import model_client
-    from anbud.kalkyl import frozen
+    from anbud import frozen, model_client
 
     run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), catalog_name="synthetic", run_id="kalkyl-base")
 

@@ -286,7 +286,8 @@ def _args(**kw: Any) -> argparse.Namespace:
     ("kind", "flags", "called"),
     [
         ("dev", {}, True),
-        ("dev", {"replay": True}, False),
+        ("dev", {"replay": True}, False),  # an unfinished run replayed in place
+        ("dev", {"replay": True, "base_run": "r0"}, True),  # a rebuild under its own run id
         ("dev", {"dry_run": True}, False),
         ("fixture", {}, False),
     ],
