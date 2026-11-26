@@ -159,7 +159,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
         run_dir = replay_dir(run_dir)  # never over the run it replays
     else:
         try:  # a new run's manifest records its code (a rebuild's, its base's salt); a resumed run keeps the first
-            store.open_run(run_id, salt=salt, code=code)
+            store.open_run(run_id, salt=salt, code=code, base_run=base_run)
         except StoreError as exc:
             print(f"anbud run: {exc}", file=sys.stderr)
             return PAID_REFUSED

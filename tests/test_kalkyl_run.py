@@ -443,6 +443,24 @@ def test_a_rebuild_replay_counts_requests_the_base_run_never_made(tender: Path) 
     assert summary["replay_misses"] > 0 and not summary["complete"]
 
 
+def test_a_resumed_rebuild_keeps_its_base_run_and_refuses_another(tender: Path) -> None:
+    from anbud.kalkyl.run import KalkylError
+    from anbud.kalkyl.settings import KalkylConfig
+
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    _run(fake_sdk(), kalkyl=tiny)  # stopped by the budget: the rebuild's replay misses and leaves it unfinished
+    run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), catalog_name="synthetic", run_id="kalkyl-other")
+    rebuild = {"catalog_name": "synthetic", "run_id": "kalkyl-rebuild"}
+    replay = run_dev_tender("co-001", "t-0001", sdk=None, base_run="kalkyl-test", **rebuild)
+    assert replay["replay_misses"] > 0 and not replay["frozen"]
+    with pytest.raises(KalkylError, match="rebuild from kalkyl-test"):
+        run_dev_tender("co-001", "t-0001", sdk=None, base_run="kalkyl-other", **rebuild)
+    resumed = run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), **rebuild)  # the misses paid, without --base-run
+    assert resumed["frozen"] and resumed["base_run"] == "kalkyl-test"
+    record = json.loads((data_root_of(tender) / "co-001" / "runs" / "kalkyl-rebuild" / "run.json").read_text())
+    assert record["base_run"] == "kalkyl-test"
+
+
 def test_a_rebuild_needs_a_stored_base_run_and_its_own_run_id(tender: Path) -> None:
     from anbud.kalkyl.run import KalkylError
 
