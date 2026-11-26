@@ -496,6 +496,11 @@ class Post:
         return self.assumed_per_object or self.assumed_objects
 
     @property
+    def assumed_lines(self) -> list[Line]:
+        """The lines whose count rests on an assumption, for their citations and bases."""
+        return [ln for ln in self.lines if ln.assumed or (ln.objects is not None and ln.objects.source == "assumed")]
+
+    @property
     def level(self) -> str:
         if self.assumed:
             return LEVEL_LABELS["assumed"]
@@ -804,6 +809,12 @@ def totals_of(posts: list[Post]) -> Totals:
         if p.hours_flat is not None and p.hours is not None:
             t.repetition_hours += p.hours_flat - p.hours
     return t
+
+
+def assumed_posts(posts: list[Post]) -> list[Post]:
+    """The posts in `Totals.assumed_total`, largest first: the ones an estimator checks first."""
+    out = [p for p in posts if p.assumed and p.status == "Prissatt" and p.total is not None and p.scope != "option"]
+    return sorted(out, key=lambda p: (-(p.total or 0), p.id))
 
 
 def calc_posts(posts: list[Post], rows: dict[str, int]) -> list[CalcPost]:
