@@ -160,7 +160,9 @@ def _line_text(glyphs: list[_Glyph]) -> tuple[str, bool]:
     return "".join(parts), table
 
 
-def _lines(glyphs: list[_Glyph | None], page: int) -> list[_Line]:
+def _lines(glyphs: list[_Glyph | None], page: int, split_columns: bool = False) -> list[_Line]:
+    """Lines in PDFium's order. With `split_columns` (drawings), a column gap ends the line, so each label on a
+    drawing is its own line with its own box."""
     lines: list[_Line] = []
     current: list[_Glyph] = []
 
@@ -193,8 +195,9 @@ def _lines(glyphs: list[_Glyph | None], page: int) -> list[_Line]:
             last = None
             continue
         if g is not _SPACE and last is not None:
+            size = max(g.size, last.size, 1.0)
             jump = abs((g.top + g.bottom) - (last.top + last.bottom)) / 2
-            if jump > 0.7 * max(g.size, last.size, 1.0):
+            if jump > 0.7 * size or (split_columns and g.x0 - last.x1 > COLUMN_GAP * size):
                 flush()
         current.append(g)
         if g is not _SPACE:
@@ -251,7 +254,7 @@ def _scan_page(pdf: pdfium.PdfDocument, index: int) -> _PageScan:
     chars = sum(1 for g in glyphs if g is not None and g is not _SPACE)
     errors = sum(1 for i in range(textpage.count_chars()) if pdfium_c.FPDFText_HasUnicodeMapError(textpage.raw, i) == 1)
     kind, dpi = _classify(page, chars, errors)
-    lines = _lines(glyphs, index + 1) if kind != "scan" else []
+    lines = _lines(glyphs, index + 1, split_columns=kind == "drawing") if kind != "scan" else []
     info = PageInfo(page=index + 1, width=round(width, 1), height=round(height, 1), kind=kind, chars=chars)
     return _PageScan(info, lines, dpi)
 
