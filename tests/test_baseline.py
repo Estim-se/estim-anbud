@@ -16,7 +16,7 @@ import pytest
 
 from anbud import cli, paths
 from anbud.config import CONFIG_DIR, Price
-from anbud.evals import baseline
+from anbud.evals import baseline, freeze
 from anbud.evals import split_heldout as sh
 
 BUN = shutil.which("bun")
@@ -232,3 +232,96 @@ def test_settled_spend_ends_the_run_at_the_hard_stop(tmp_path: Path) -> None:
     events = [r for r in records if r["event"] != "start"]
     assert [r["event"] for r in events] == ["call", "call", "hard_stop"]
     assert events[-1]["spent_usd"] == pytest.approx(2 * events[0]["cost_usd"])
+
+
+FINISHING = """
+import { writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+writeFileSync(args[args.indexOf('--out') + 1], JSON.stringify({ total: 1234567, rows: [{}, {}] }));
+const sv = n => n.toLocaleString('sv-SE');
+console.log(`\\nTotal: ${sv(1234567)} kr (arbete ${sv(1000000)}, material ${sv(234567)}, 812.5 h)`);
+"""
+
+
+def dev_tender(data_root: Path) -> Path:
+    tender = paths.dev_tender_dir("co-001", "t-0001")
+    (tender / "inbox" / "a").mkdir(parents=True)
+    (tender / "inbox" / "a" / "AF.pdf").write_bytes(b"x")
+    (tender / "inbox.sha256").write_text(f"{'0' * 64}  a/AF.pdf\n")
+    return tender
+
+
+def snapshot(folder: Path) -> list[str]:
+    return sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*"))
+
+
+@needs_bun
+def test_a_baseline_run_lands_under_predictions_and_nothing_under_dev(data_root: Path, tmp_path: Path) -> None:
+    tender = dev_tender(data_root)
+    before = snapshot(tender)
+    app = fake_app(tmp_path, FINISHING)
+    result = baseline.run_dev(
+        "co-001",
+        "t-0001",
+        dry_run=False,
+        app=app,
+        app_ref="HEAD",
+        code={"harness_sha": "x"},
+        stop_requested=lambda _: False,
+        api_key=lambda: "test-key-never-sent",
+        now=NOW,
+    )
+    assert result.outcome == "ok" and result.calls == 0
+    assert snapshot(tender) == before  # the build lane reads dev/: nothing of the old engine goes there
+    assert not (data_root / "co-001" / "runs").exists()
+    run_dir = paths.baseline_dir("co-001", "t-0001") / result.run_id
+    assert run_dir.is_relative_to(data_root / "predictions" / "co-001" / "baseline")
+    assert (run_dir / "outputs" / "engine.json").is_file() and (run_dir / "record" / "engine.log").is_file()
+
+    frozen = freeze.freeze_run(
+        "co-001", result.run_id, outputs_dir=run_dir / "outputs", run_record_dir=run_dir / "record", tender_id="t-0001"
+    )
+    rel = f"predictions/co-001/baseline/t-0001/{result.run_id}"
+    assert frozen["outputs_dir"] == f"{rel}/outputs" and frozen["run_record_dir"] == f"{rel}/record"
+    totals = json.loads(baseline.write_totals(run_dir).read_text())
+    assert totals == {
+        "total_sek": 1234567,
+        "rows": 2,
+        "labor_sek": 1000000,
+        "material_sek": 234567,
+        "hours": 812.5,
+        "printed_total_matches": True,
+    }
+    assert snapshot(tender) == before
+
+
+def test_a_moved_frozen_run_is_relocated_only_when_every_hash_matches(data_root: Path) -> None:
+    outputs = data_root / "co-001" / "dev" / "t-0001" / "baseline" / "r1"
+    record = data_root / "co-001" / "runs" / "r1"
+    for folder, name in ((outputs, "engine.json"), (record, "run.json")):
+        folder.mkdir(parents=True)
+        (folder / name).write_text("{}")
+    freeze.freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", now=NOW)
+    new = paths.baseline_dir("co-001", "t-0001") / "r1"
+    new.mkdir(parents=True)
+    outputs.rename(new / "outputs")
+    record.rename(new / "record")
+
+    (new / "record" / "extra.txt").write_text("x")
+    with pytest.raises(freeze.FreezeError, match="don't match"):
+        freeze.relocate_run("co-001", "r1", outputs_dir=new / "outputs", run_record_dir=new / "record")
+    (new / "record" / "extra.txt").unlink()
+    with pytest.raises(freeze.FreezeError, match="no frozen run"):
+        freeze.relocate_run("co-001", "r2", outputs_dir=new / "outputs", run_record_dir=new / "record")
+
+    assert (
+        cli.main(
+            ["freeze", "relocate", "co-001", "r1", "--outputs", str(new / "outputs"), "--record", str(new / "record")]
+        )
+        == 0
+    )
+    summary = freeze.verify(freeze.ledger_file("co-001"))
+    assert summary.lines == 2 and summary.kinds == {"freeze": 1, "relocate": 1}
+    last = json.loads(freeze.ledger_file("co-001").read_text().splitlines()[-1])
+    assert last["outputs_dir"] == "predictions/co-001/baseline/t-0001/r1/outputs" and last["frozen_line"] == 1
+    assert freeze.freezes_by_tender(freeze.ledger_file("co-001")) == {"co-001/t-0001": 1}

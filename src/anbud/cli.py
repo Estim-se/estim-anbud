@@ -233,7 +233,7 @@ def _baseline(args: argparse.Namespace) -> int:
             app=(args.app or baseline.APP_DIR).expanduser(),
             app_ref=args.app_ref or baseline.APP_REF,
             code=provenance.code_block(state),
-            stop_requested=lambda record: (root / "STOP").exists() or (record / "STOP").exists(),
+            stop_requested=lambda marker: (root / "STOP").exists() or marker.exists(),
         )
     except (baseline.BaselineError, KeyMissing, StoreError, ValueError) as exc:
         print(f"anbud baseline: stopped: {exc}", file=sys.stderr)
@@ -242,18 +242,26 @@ def _baseline(args: argparse.Namespace) -> int:
         print(line)
     if result.outcome != "ok" or args.dry_run:
         return 0 if result.outcome == ("dry_run" if args.dry_run else "ok") else 1
+    run_dir = paths.baseline_dir(args.company_id, args.tender_id) / result.run_id
     try:
         record = freeze.freeze_run(
             args.company_id,
             result.run_id,
-            outputs_dir=paths.dev_tender_dir(args.company_id, args.tender_id) / "baseline" / result.run_id,
-            run_record_dir=freeze.run_record_dir(args.company_id, result.run_id),
+            outputs_dir=run_dir / "outputs",
+            run_record_dir=run_dir / "record",
             tender_id=args.tender_id,
         )
     except freeze.FreezeError as exc:
         print(f"anbud baseline: not frozen: {exc}", file=sys.stderr)
         return 1
     print(f"frozen: ledger line {record['line_number']}, {record['line_sha256'][:12]}")
+    try:
+        target = baseline.write_totals(run_dir)
+        print(
+            f"totals: written to predictions/{args.company_id}/baseline/{args.tender_id}/{result.run_id}/{target.name}"
+        )
+    except (OSError, ValueError):
+        print("anbud baseline: totals.json not written; engine.json or engine.log is unreadable", file=sys.stderr)
     if (warning := freeze.read_only_warning(record)) is not None:
         print(f"anbud baseline: {warning}", file=sys.stderr)
         return 1
@@ -417,6 +425,15 @@ def _freeze(args: argparse.Namespace) -> int:
             kinds = ", ".join(f"{kind} {n}" for kind, n in summary.kinds.items()) or "none"
             last = summary.last_sha256[:12] if summary.last_sha256 else "none"
             print(f"ledger: {summary.lines} lines, last {last}; {len(summary.tenders)} tenders frozen; kinds: {kinds}")
+            return 0
+        if args.action == "relocate":
+            moved = freeze.relocate_run(
+                args.company_id,
+                args.run_id,
+                outputs_dir=args.outputs.expanduser(),
+                run_record_dir=args.record.expanduser(),
+            )
+            print(f"relocated: ledger line {moved['line_number']} (frozen at line {moved['frozen_line']})")
             return 0
         if args.action == "import":
             n = freeze.import_manual(args.company_id, args.file.expanduser())
@@ -603,6 +620,11 @@ def main(argv: list[str] | None = None) -> int:
     fr_run.add_argument("--outputs", type=Path, help="the run's outputs folder, inside the company folder")
     fr_verify = fr_sub.add_parser("verify", help="check the ledger's chain; counts only")
     fr_verify.add_argument("company_id")
+    fr_move = fr_sub.add_parser("relocate", help="record that a frozen run's folders moved; every hash must match")
+    fr_move.add_argument("company_id")
+    fr_move.add_argument("run_id")
+    fr_move.add_argument("--outputs", type=Path, required=True, help="the outputs folder's new place")
+    fr_move.add_argument("--record", type=Path, required=True, help="the run record folder's new place")
     fr_import = fr_sub.add_parser("import", help="start the ledger with hand-made, chained freeze records")
     fr_import.add_argument("company_id")
     fr_import.add_argument("file", type=Path)

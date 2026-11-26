@@ -9,9 +9,11 @@ and the `anbud-dev` key, read from the Keychain into the child's environment onl
 underneath the script: it refuses every host but the Messages API, logs each call's ids, usage and cost (never text)
 and enforces the hard stop. Nothing here runs `verify-anbud-pipeline.ts` or touches Supabase.
 
-Outputs: `<co>/dev/<t>/baseline/<run_id>/engine.json` (the script's --out). The run record, `<co>/runs/<run_id>/`,
-holds run.json, calls.jsonl and engine.log. A finished paid run is frozen. The CLI prints counts, costs and timings
-only; the engine's own output stays in engine.log.
+Everything goes to `predictions/<co>/baseline/<t>/<run_id>/`, which only the eval lane and the orchestrator open,
+never under `dev/` or `<co>/runs/`: the old engine's total is an anchor the build lane must not see. `outputs/` holds
+engine.json (the script's --out), `record/` holds run.json, calls.jsonl and engine.log, and `totals.json` (written
+after the freeze, outside both) holds the total and its labour, material and hours split. A finished paid run is
+frozen. The CLI prints counts, costs, timings and ids only.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -377,7 +380,7 @@ def run_dev(
     app: Path = APP_DIR,
     app_ref: str = APP_REF,
     code: dict[str, Any],
-    stop_requested: Callable[[Path], bool],
+    stop_requested: Callable[[Path], bool],  # given the run's stop marker
     api_key: Callable[[], str] | None = None,
     root: Path | None = None,
     now: datetime | None = None,
@@ -391,10 +394,11 @@ def run_dev(
     sha = resolve_app(app, app_ref)
     app_root = export_app(app, sha, root)
     run_id = new_run_id(tender_id, sha, dry_run, now)
-    record_dir = paths.company_dir(company_id, root) / "runs" / run_id
-    outputs_dir = paths.dev_tender_dir(company_id, tender_id, root) / "baseline" / run_id
-    if record_dir.exists() or outputs_dir.exists():
+    run_dir = paths.baseline_dir(company_id, tender_id, root) / run_id
+    if run_dir.exists():
         raise BaselineError("a run with this id exists already")
+    record_dir, outputs_dir = run_dir / "record", run_dir / "outputs"
+    marker = paths.company_dir(company_id, root) / "runs" / run_id / "STOP"  # where `anbud stop <co> <run>` writes
     if api_key is None:
         from anbud.model_client import keychain_key
 
@@ -422,5 +426,36 @@ def run_dev(
         dry_run=dry_run,
         api_key=api_key,
         manifest=manifest,
-        stop_requested=lambda: stop_requested(record_dir),
+        stop_requested=lambda: stop_requested(marker),
     )
+
+
+_TOTAL_LINE = re.compile(
+    r"^Total: (?P<total>[\d\s]+) kr \(arbete (?P<labor>[\d\s]+), material (?P<material>[\d\s]+), "
+    r"(?P<hours>[\d.,]+) h\)$"
+)
+
+
+def _kronor(text: str) -> int:
+    return int(re.sub(r"\s", "", text))
+
+
+def write_totals(run_dir: Path) -> Path:
+    """`totals.json` beside the frozen folders: the engine's total and its labour, material and hours split, read by
+    code from the line the script prints (sv-SE numbers) and checked against engine.json's total. Never printed."""
+    engine = json.loads((run_dir / "outputs" / "engine.json").read_text(encoding="utf-8"))
+    found = None
+    for line in (run_dir / "record" / "engine.log").read_text(encoding="utf-8", errors="replace").splitlines():
+        if match := _TOTAL_LINE.match(line.strip()):
+            found = match
+    out: dict[str, Any] = {"total_sek": engine.get("total"), "rows": len(engine.get("rows") or [])}
+    if found:
+        out |= {
+            "labor_sek": _kronor(found["labor"]),
+            "material_sek": _kronor(found["material"]),
+            "hours": float(found["hours"].replace(",", ".")),
+            "printed_total_matches": abs(_kronor(found["total"]) - round(float(engine.get("total") or 0))) <= 1,
+        }
+    target = run_dir / "totals.json"
+    _write_json(target, out)
+    return target

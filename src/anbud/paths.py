@@ -75,6 +75,12 @@ def predictions_dir(company_id: str, root: Path | None = None) -> Path:
     return (root or data_root()) / "predictions" / check_company_id(company_id)
 
 
+def baseline_dir(company_id: str, tender_id: str, root: Path | None = None) -> Path:
+    """Old-engine baseline runs, `predictions/<co>/baseline/<t>/`: eval lane and orchestrator only, never `dev/`, so
+    the build lane never sees the old engine's totals."""
+    return predictions_dir(company_id, root) / "baseline" / check_tender_id(tender_id)
+
+
 def answers_dir(company_id: str, tender_id: str, root: Path | None = None) -> Path:
     return (root or data_root()) / "answers" / check_company_id(company_id) / check_tender_id(tender_id)
 
