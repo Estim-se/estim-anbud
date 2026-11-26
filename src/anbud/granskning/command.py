@@ -17,6 +17,7 @@ from anbud import paths
 
 PAID_REFUSED = 3
 REPLAY_INCOMPLETE = 4
+RUN_HALTED = 5
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -93,7 +94,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
         sdk = None
         run_dir = replay_dir(run_dir)  # never over the run it replays
     else:
-        refusal = provenance.paid_refusal(state)
+        refusal = provenance.paid_refusal(state) or frozen_refusal(args.company_id, run_id)
         if refusal is not None:
             print(f"anbud run: {refusal}", file=sys.stderr)
             return PAID_REFUSED
@@ -155,15 +156,40 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     if client.replay_misses:
         print(f"anbud run: replay incomplete: {client.replay_misses} calls were not in the step cache", file=sys.stderr)
         return REPLAY_INCOMPLETE
+    if client.halted:
+        print(
+            f"anbud run: stopped before it finished ({client.halted} calls refused); not frozen. "
+            "Resume it with the same --run-id",
+            file=sys.stderr,
+        )
+        return RUN_HALTED
     return freeze_after_run(args, kind, run_id, run_dir, store.run_dir(run_id))
+
+
+def frozen_refusal(company_id: str, run_id: str) -> str | None:
+    """Why a paid run may not use this id: a frozen run is a prediction that never changes, and resuming it would
+    write over its read-only outputs and append to its hashed record."""
+    from anbud.evals.freeze import FreezeError, frozen_line
+
+    try:
+        line = frozen_line(company_id, run_id)
+    except FreezeError as exc:
+        return f"can't check the freeze ledger: {exc}"
+    except OSError as exc:
+        return f"can't check the freeze ledger: {type(exc).__name__}"
+    if line is None:
+        return None
+    return f"run {run_id} is frozen at ledger line {line}; start a new run id"
 
 
 def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_dir: Path, record_dir: Path) -> int:
     """Hash a finished paid dev run into the freeze ledger, so it is provably blind before any answer arrives. A
-    replay, a dry run or a fixture freezes nothing. A run that can't be frozen exits non-zero."""
+    replay, a dry run or a fixture freezes nothing, and run_command only calls this for a run that finished: a run
+    with failed store writes, a replay miss or a stop or cap exits non-zero before it. A run that can't be frozen
+    exits non-zero."""
     if kind != "dev" or args.replay or args.dry_run:
         return 0
-    from anbud.evals.freeze import FreezeError, freeze_run
+    from anbud.evals.freeze import FreezeError, freeze_run, read_only_warning
 
     try:
         frozen = freeze_run(
@@ -176,6 +202,9 @@ def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_d
         print(f"anbud run: not frozen: {type(exc).__name__}", file=sys.stderr)
         return 1
     print(f"frozen: ledger line {frozen['line_number']}, {frozen['line_sha256'][:12]}")
+    if (warning := read_only_warning(frozen)) is not None:
+        print(f"anbud run: {warning}", file=sys.stderr)
+        return 1
     return 0
 
 

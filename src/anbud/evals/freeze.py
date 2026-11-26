@@ -13,7 +13,9 @@ Layout, outside every repo:
   ever rewrites or reorders a line.
 - A frozen run's output files become read-only (0o400).
 - Records hold ids, hashes, timestamps and data-root-relative paths of the harness's own folders, never document text,
-  model output or a customer's file name. Errors name a line number or a reason, never a file.
+  model output or a customer's file name. A folder other than the run's own (`freeze run --outputs`), and any file
+  name the harness wouldn't write, is stored as "sha256:" and the hash of its relative path. Errors name a line
+  number or a reason, never a file.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 from collections import Counter
 from collections.abc import Iterator
@@ -39,6 +42,10 @@ LOCK = "ledger.lock"
 FREEZE_KINDS = ("freeze", "manual_freeze_v0")
 HASHED_REPO_DIRS = ("config", "schemas", "lenses")
 PREP_FILES = ("blocks.jsonl", "documents.json", "summary.json")
+# The names the harness itself gives files and folders in a run; anything else may be a customer's name.
+_HARNESS_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
+# The key in freeze_run's result (never in the ledger) that lists outputs left writable.
+NOT_READ_ONLY = "not_read_only"
 # Fields that may differ when the same run is frozen again and still count as the same freeze.
 _VOLATILE = frozenset({"frozen_at", "prev"})
 
@@ -133,9 +140,9 @@ def _summary(lines: list[bytes], records: list[dict[str, Any]]) -> LedgerSummary
     return LedgerSummary(len(lines), last, dict(sorted(kinds.items())), tuple(sorted(tenders)))
 
 
-def _read(path: Path) -> tuple[list[bytes], list[dict[str, Any]]]:
-    if path.is_symlink():
-        raise FreezeError("the ledger is a symlink; it must be a plain file")
+def _read(path: Path, root: Path | None = None) -> tuple[list[bytes], list[dict[str, Any]]]:
+    """The checks a write makes apply to every read too: the answer store opens on what a read finds."""
+    _check_no_symlinks(path, root)
     if not path.exists():
         return [], []
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -143,9 +150,9 @@ def _read(path: Path) -> tuple[list[bytes], list[dict[str, Any]]]:
         return _parse(handle.read())
 
 
-def verify(path: Path) -> LedgerSummary:
+def verify(path: Path, root: Path | None = None) -> LedgerSummary:
     """Check a ledger's chain end to end. A missing ledger is an empty one."""
-    return _summary(*_read(path))
+    return _summary(*_read(path, root))
 
 
 @contextmanager
@@ -191,7 +198,7 @@ def import_manual(company_id: str, source: Path, root: Path | None = None) -> in
     if not lines:
         raise FreezeError("the hand-made records are empty")
     with _locked(ledger, root):
-        existing, _ = _read(ledger)
+        existing, _ = _read(ledger, root)
         if not existing:
             _append(ledger, data)
             return len(lines)
@@ -202,8 +209,22 @@ def import_manual(company_id: str, source: Path, root: Path | None = None) -> in
 
 def is_frozen(company_id: str, tender_id: str, sealed: bool = False, root: Path | None = None) -> bool:
     key = f"{_company(company_id)}/{_tender(tender_id)}"
-    _, records = _read(ledger_file(company_id, sealed, root))
+    _, records = _read(ledger_file(company_id, sealed, root), root)
     return any(r.get("tender") == key and r.get("kind") in FREEZE_KINDS for r in records)
+
+
+def frozen_line(company_id: str, run_id: str, sealed: bool = False, root: Path | None = None) -> int | None:
+    """The ledger line that froze this run, or None. A frozen run's outputs and record never change, so a paid run
+    must not resume it."""
+    try:
+        check_run_id(run_id)
+    except StoreError as exc:
+        raise FreezeError(str(exc)) from None
+    _, records = _read(ledger_file(company_id, sealed, root), root)
+    for number, record in enumerate(records, start=1):
+        if record.get("kind") in FREEZE_KINDS and record.get("run_id") == run_id:
+            return number
+    return None
 
 
 # Hashing
@@ -220,9 +241,14 @@ def _file_sha(path: Path) -> str:
 
 def _tree(folder: Path, what: str) -> dict[str, Path]:
     """Every regular file under the folder by posix relative path, sorted. A symlink anywhere, or a special file, is
-    refused: it could point the hash at something other than what the run wrote."""
+    refused: it could point the hash at something other than what the run wrote. So is a folder the walk can't list,
+    which os.walk would otherwise skip in silence and leave out of the hashes."""
+
+    def unreadable(exc: OSError) -> None:
+        raise FreezeError(f"a folder in the {what} couldn't be read ({type(exc).__name__})")
+
     found: dict[str, Path] = {}
-    for current, dirs, files in os.walk(folder, followlinks=False):
+    for current, dirs, files in os.walk(folder, onerror=unreadable, followlinks=False):
         here = Path(current)
         for name in sorted(dirs + files):
             entry = here / name
@@ -236,8 +262,16 @@ def _tree(folder: Path, what: str) -> dict[str, Path]:
     return dict(sorted(found.items()))
 
 
-def _hash_tree(files: dict[str, Path]) -> dict[str, str]:
-    return {rel: _file_sha(path) for rel, path in files.items()}
+def _named(rel: str, own: bool) -> str:
+    """A relative path as the ledger may hold it: in clear inside the harness's own folder when every part is a name
+    the harness writes, otherwise as the hash of the path, which a later check can still recompute."""
+    if own and all(_HARNESS_NAME.fullmatch(part) for part in rel.split("/")):
+        return rel
+    return "sha256:" + _sha(rel.encode())
+
+
+def _hash_tree(files: dict[str, Path], own: bool) -> dict[str, str]:
+    return dict(sorted((_named(rel, own), _file_sha(path)) for rel, path in files.items()))
 
 
 def repo_hashes(repo: Path | None = None) -> dict[str, str]:
@@ -276,6 +310,11 @@ def _check_location(folder: Path, company_id: str, sealed: bool, root: Path | No
 
 def _relative(path: Path, root: Path | None) -> str:
     return path.relative_to((root or paths.data_root()).expanduser().resolve()).as_posix()
+
+
+def _is(path: Path, expected: Path) -> bool:
+    """The resolved folder is the harness's own folder for this run (its path is built from ids only)."""
+    return path == expected.expanduser().resolve()
 
 
 def _harness(run_record_dir: Path) -> dict[str, Any]:
@@ -335,6 +374,10 @@ def freeze_run(
     if not output_files:
         raise FreezeError("the outputs folder has no files")
     record_files = _tree(record_dir, "run record")
+    own_outputs = tender_id is not None and _is(
+        outputs, paths.dev_tender_dir(company_id, tender_id, root) / "runs" / run_id
+    )
+    own_record = _is(record_dir, paths.company_dir(company_id, root) / "runs" / run_id)
 
     config = repo_hashes()
     manifest_sha, prep = _inputs(company_id, tender_id, root)
@@ -349,32 +392,47 @@ def freeze_run(
         "config_set_sha256": _sha(canonical(config)),
         "input_manifest_sha256": manifest_sha,
         "prep_sha256": prep,
-        "outputs_dir": _relative(outputs, root),
-        "run_record_dir": _relative(record_dir, root),
-        "outputs_sha256": _hash_tree(output_files),
-        "run_record_sha256": _hash_tree(record_files),
+        "outputs_dir": _relative(outputs, root) if own_outputs else _named(_relative(outputs, root), own=False),
+        "run_record_dir": _relative(record_dir, root) if own_record else _named(_relative(record_dir, root), own=False),
+        "outputs_sha256": _hash_tree(output_files, own_outputs),
+        "run_record_sha256": _hash_tree(record_files, own_record),
     }
 
     ledger = ledger_file(company_id, sealed, root)
     with _locked(ledger, root):
-        lines, records = _read(ledger)
+        lines, records = _read(ledger, root)
         for number, old in enumerate(records, start=1):
             if old.get("kind") == "freeze" and old.get("run_id") == run_id:
                 if not _same_freeze(old, record):
                     raise FreezeError(f"run already frozen at ledger line {number} with different hashes")
-                _read_only(output_files)
-                return {**old, "line_number": number, "line_sha256": _sha(lines[number - 1])}
+                failed = _read_only(output_files)
+                return {**old, "line_number": number, "line_sha256": _sha(lines[number - 1]), NOT_READ_ONLY: failed}
         if lines:
             record["prev"] = _sha(lines[-1])
         line = canonical(record)
         _append(ledger, line + b"\n")
-    _read_only(output_files)
-    return {**record, "line_number": len(lines) + 1, "line_sha256": _sha(line)}
+    # The line is written, so the run is frozen whatever happens next; a failure here is reported, never raised.
+    failed = _read_only(output_files)
+    return {**record, "line_number": len(lines) + 1, "line_sha256": _sha(line), NOT_READ_ONLY: failed}
 
 
-def _read_only(files: dict[str, Path]) -> None:
+def _read_only(files: dict[str, Path]) -> list[str]:
+    """Make every file 0o400. Returns the error type for each file that couldn't be, so the caller can say so."""
+    failed: list[str] = []
     for path in files.values():
-        os.chmod(path, 0o400, follow_symlinks=False)
+        try:
+            os.chmod(path, 0o400, follow_symlinks=False)
+        except OSError as exc:
+            failed.append(type(exc).__name__)
+    return failed
+
+
+def read_only_warning(frozen: dict[str, Any]) -> str | None:
+    """What to tell the operator when a frozen run's outputs aren't all read-only, or None when they are."""
+    failed = frozen.get(NOT_READ_ONLY) or []
+    if not failed:
+        return None
+    return f"frozen, but {len(failed)} output files could not be made read-only ({', '.join(sorted(set(failed)))})"
 
 
 def find_run_outputs(company_id: str, run_id: str, root: Path | None = None) -> tuple[Path, str]:

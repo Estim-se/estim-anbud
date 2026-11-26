@@ -132,6 +132,22 @@ def test_a_call_past_the_hard_stop_is_refused_unsent() -> None:
     assert fake.sent == []
 
 
+@pytest.mark.parametrize(
+    ("messages", "hard_stop", "halted"),
+    [
+        (FakeMessages(), 0.001, 1),  # the run's own hard stop
+        (FakeMessages(error=_status_error(anthropic.EnforcedSpendLimitReachedError, 402, "limit")), 10.0, 1),
+        (FakeMessages(error=_status_error(anthropic.RateLimitError, 429, "slow down")), 10.0, 0),
+    ],
+)
+def test_a_hard_stop_or_spend_cap_marks_the_run_halted(messages: FakeMessages, hard_stop: float, halted: int) -> None:
+    """A halted run is incomplete, so `anbud run` must not freeze it; a passing error doesn't halt it."""
+    client = _client(messages, hard_stop=hard_stop)
+    with pytest.raises((BudgetExceeded, ModelError)):
+        _call(client)
+    assert client.halted == halted
+
+
 def test_shared_prefix_roles_must_send_identical_system_blocks() -> None:
     client = _client()
     _call(client, "map")

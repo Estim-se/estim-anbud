@@ -133,3 +133,32 @@ def test_cli_answers_print_counts_and_hashes_never_names(
     assert "dev, frozen; 1 files; kinds: award 1" in captured.out
     assert hashlib.sha256(b"syntetiskt").hexdigest()[:12] in captured.out
     assert_no_fake_names(captured.out, captured.err)
+
+
+def test_an_unreadable_source_leaks_no_descriptor_or_temp_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import tempfile
+
+    from anbud.evals import answers
+
+    store = tmp_path / "files"
+    store.mkdir()
+    source = _file(tmp_path / "in", "beslut.pdf", b"syntetiskt beslut")
+    source.chmod(0o000)
+    made: list[int] = []
+    real = tempfile.mkstemp
+
+    def tracked(*args: object, **kw: object) -> tuple[int, str]:
+        fd, name = real(*args, **kw)  # type: ignore[call-overload]
+        made.append(fd)
+        return fd, name
+
+    monkeypatch.setattr(answers.tempfile, "mkstemp", tracked)
+    try:
+        with pytest.raises(PermissionError):
+            answers._stage(source, store, 1, 1)
+    finally:
+        source.chmod(0o600)
+    assert made and list(store.iterdir()) == []
+    with pytest.raises(OSError):
+        os.fstat(made[0])  # closed

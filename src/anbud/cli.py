@@ -120,6 +120,9 @@ def _freeze(args: argparse.Namespace) -> int:
         print(f"anbud freeze {args.action}: refused: {type(exc).__name__}", file=sys.stderr)
         return REFUSED
     print(f"frozen: ledger line {record['line_number']}, {record['line_sha256'][:12]}")
+    if (warning := freeze.read_only_warning(record)) is not None:
+        print(f"anbud freeze run: {warning}", file=sys.stderr)
+        return 1
     return 0
 
 

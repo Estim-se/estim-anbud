@@ -178,14 +178,17 @@ def _stage(source: Path, files_dir: Path, number: int, total: int) -> tuple[str,
     size = 0
     fd, tmp = tempfile.mkstemp(dir=files_dir, prefix=".tmp-")
     try:
-        src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(src, "rb") as reader, os.fdopen(fd, "wb") as writer:
-            for chunk in iter(lambda: reader.read(1 << 20), b""):
-                size += len(chunk)
-                if size > MAX_BYTES:
-                    raise AnswerError(f"file {number} of {total}: over 1 GiB")
-                digest.update(chunk)
-                writer.write(chunk)
+        # The writer owns the temp descriptor before the source is opened, so a source that can't be opened still
+        # closes it.
+        with os.fdopen(fd, "wb") as writer:
+            src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(src, "rb") as reader:
+                for chunk in iter(lambda: reader.read(1 << 20), b""):
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        raise AnswerError(f"file {number} of {total}: over 1 GiB")
+                    digest.update(chunk)
+                    writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
         os.chmod(tmp, 0o600)

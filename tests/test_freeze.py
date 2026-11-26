@@ -128,6 +128,25 @@ def test_a_symlinked_ledger_is_refused_even_dangling(data_root: Path, tmp_path: 
     assert not (tmp_path / "nowhere.jsonl").exists()
 
 
+@pytest.mark.parametrize("sealed", [False, True])
+def test_a_symlinked_folder_above_the_ledger_is_refused_when_reading(
+    data_root: Path, tmp_path: Path, sealed: bool
+) -> None:
+    """A redirected company folder could point the freeze check at a forged chain that unlocks the answer store."""
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / "ledger.jsonl").write_text('{"kind":"freeze","tender":"co-001/t-0001","run_id":"r1"}\n')
+    link = ledger_file("co-001", sealed=sealed).parent
+    link.parent.mkdir(parents=True)
+    link.symlink_to(forged, target_is_directory=True)
+    with pytest.raises(FreezeError, match="symlink"):
+        is_frozen("co-001", "t-0001", sealed=sealed)
+    with pytest.raises(FreezeError, match="symlink"):
+        verify(ledger_file("co-001", sealed=sealed))
+    with pytest.raises(FreezeError, match="symlink"):
+        freeze.frozen_line("co-001", "r1", sealed=sealed)
+
+
 def test_a_symlinked_ledger_folder_is_refused(data_root: Path, tmp_path: Path) -> None:
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -306,3 +325,60 @@ def test_a_run_that_cannot_be_frozen_exits_non_zero(
     err = capsys.readouterr().err
     assert "not frozen: OSError" in err
     assert_no_fake_names(err)
+
+
+def test_a_chmod_failure_after_the_append_still_reports_the_freeze(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ledger line is the freeze; a file that can't be made read-only afterwards is reported, not hidden behind a
+    'not frozen' that the ledger contradicts."""
+    outputs, record = make_run(data_root, "r1")
+
+    def gone(*_: Any, **__: Any) -> None:
+        raise FileNotFoundError("/Users/x/Fiktivbolaget AB/flags.json")
+
+    monkeypatch.setattr(freeze.os, "chmod", gone)
+    code = command.freeze_after_run(_args(), "dev", "r1", outputs, record)
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "frozen: ledger line 1, " in captured.out and "not frozen" not in captured.err
+    assert "2 output files could not be made read-only (FileNotFoundError)" in captured.err
+    assert is_frozen("co-001", "t-0001")
+    assert_no_fake_names(captured.out, captured.err)
+
+
+def test_an_unreadable_subfolder_is_refused_not_skipped(data_root: Path) -> None:
+    """A folder the walk can't list would leave its files out of the hashes while the freeze looked complete."""
+    outputs, record = make_run(data_root, "r1")
+    hidden = outputs / "report"
+    hidden.chmod(0o000)
+    try:
+        with pytest.raises(FreezeError, match="couldn't be read") as caught:
+            freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", now=NOW)
+    finally:
+        hidden.chmod(0o700)
+    assert "report" not in str(caught.value)
+    assert not ledger_file("co-001").exists()
+
+
+def test_the_ledger_holds_no_customer_file_or_folder_name(data_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Only the harness's own run folders and file names go in clear; any other name is stored as its hash, so a
+    freeze of a folder the customer named still proves its files without writing their names down."""
+    outputs, record = make_run(data_root, "r1")
+    (outputs / "Fiktivbolaget AB anbud.json").write_text("[]\n")
+    kalkyl = data_root / "co-001" / "kalkyl" / "Påhittade Fastigheter"
+    kalkyl.mkdir(parents=True)
+    (kalkyl / "Örjan Exempelsson.json").write_text("[]\n")
+    make_run(data_root, "r2")
+    assert cli.main(["freeze", "run", "co-001", "r1"]) == 0
+    assert cli.main(["freeze", "run", "co-001", "r2", "--outputs", str(kalkyl)]) == 0
+    capsys.readouterr()
+    ledger = ledger_file("co-001").read_text(encoding="utf-8")
+    assert_no_fake_names(ledger)
+    first, second = (json.loads(line) for line in ledger.splitlines())
+    assert first["outputs_dir"] == "co-001/dev/t-0001/runs/r1"
+    named = _sha(b"Fiktivbolaget AB anbud.json")
+    assert set(first["outputs_sha256"]) == {"flags.json", "report/granskning.html", f"sha256:{named}"}
+    assert second["outputs_dir"] == "sha256:" + _sha("co-001/kalkyl/Påhittade Fastigheter".encode())
+    assert list(second["outputs_sha256"]) == ["sha256:" + _sha("Örjan Exempelsson.json".encode())]
+    assert second["run_record_dir"] == "co-001/runs/r2"
