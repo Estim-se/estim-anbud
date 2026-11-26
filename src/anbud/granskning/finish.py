@@ -60,7 +60,7 @@ def finish(
     settings = settings or load_settings()
     posts = {p.id: p for p in calc_posts}
     # Checks first. Each check flag carries a check_key, so it keeps its own item and its own money basis.
-    items = merge([*check_results, *results], corpus, merge_client, settings)
+    items = merge([*check_results, *results], corpus, merge_client, settings, calc_posts=posts)
     provisional = price_items(items, catalog, posts, settings)
     chosen = select(
         provisional,

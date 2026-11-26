@@ -3,8 +3,9 @@
 - Plain Messages API, always streamed, with an explicit `max_tokens` and effort. Model ids come from
   config/providers.toml by role. No sampling parameters, no thinking settings (adaptive is the default and the only
   mode on the pinned models), no fallback to another model: a run must be reproducible on the model it names.
-- Tool-using roles send the shared tool list with `tool_choice` auto (forced tool choice returns 400 on these models).
-  Roles marked `shared_prefix` must send byte-identical system blocks per model, so the cache is written once a run.
+- Tool-using roles send the shared tool list with `tool_choice` auto (forced tool choice returns 400 on these models),
+  or their own list if they declare one (Kalkyl's Sonnet roles). Roles marked `shared_prefix` must send
+  byte-identical system blocks per model (per role for an own list), so the cache is written once a run.
 - Every call reserves its worst-case cost from the run's budget before it is sent, and settles the real cost after.
   A call that would cross the hard stop is refused unsent.
 - Events carry ids, sizes, timings and costs, never prompt text or model output. Error messages from the API stay on
@@ -32,7 +33,7 @@ from typing import Any
 from anbud.config import Config
 from anbud.models import Event
 from anbud.store import RunStore, canonical
-from anbud.tools import ROLES, shared_tools
+from anbud.tools import ROLES, own_tools, shared_tools
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 KEYCHAIN_SERVICE = "estim-anbud"
@@ -228,7 +229,10 @@ class ModelClient:
             "messages": messages,
             "output_config": {"effort": effort},
         }
-        if ROLES[role].tools:
+        if ROLES[role].own_tools:
+            params["tools"] = own_tools(role)
+            params["tool_choice"] = {"type": "auto"}
+        elif ROLES[role].tools:
             params["tools"] = shared_tools()
             params["tool_choice"] = {"type": "auto"}
         return params
@@ -237,8 +241,9 @@ class ModelClient:
         if not ROLES[role].shared_prefix:
             return
         digest = _digest(params.get("tools"), params["system"])
+        group = f"role:{role}" if ROLES[role].own_tools else params["model"]  # own lists never share the model's prefix
         with self._lock:
-            first = self._prefixes.setdefault(params["model"], digest)
+            first = self._prefixes.setdefault(group, digest)
         if first != digest:
             raise PrefixDrift(f"{role} would send a different tools or system prefix than earlier calls on its model")
 

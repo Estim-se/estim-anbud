@@ -68,6 +68,25 @@ def _text(message: object) -> str:
     return "\n".join(b.text for b in getattr(message, "content", []) if getattr(b, "type", None) == "text")
 
 
+def card_from_message(tile: Tile, message: object, masker: Masker | None = None) -> Cards:
+    """One tile's card from the model's answer: gated, masked, one tile_text block per paragraph."""
+    cards = Cards()
+    masker = masker or Masker()
+    paragraphs = [clean(p) for p in _text(message).split("\n\n")]
+    for n, raw in enumerate((p for p in paragraphs if p), 1):
+        block_id = f"{tile.id}-{n}"
+        cards.markings += [Marking(doc_id=tile.doc_id, block_id=block_id, kind=k) for k in markings(raw)]
+        text, spans = masker.text(raw)
+        cards.masked += [
+            MaskedSpan(
+                doc_id=tile.doc_id, block_id=block_id, kind=s.kind, start=s.start, end=s.end, original=s.original
+            )
+            for s in spans
+        ]
+        cards.blocks.append(Block(id=block_id, doc_id=tile.doc_id, kind="tile_text", text=text, page=tile.page))
+    return cards
+
+
 def read_cards(client: ModelClient, store: RunStore, tiles: list[Tile]) -> Cards:
     cards = Cards()
     masker = Masker()
@@ -81,16 +100,8 @@ def read_cards(client: ModelClient, store: RunStore, tiles: list[Tile]) -> Cards
             effort=EFFORT,
         )
         cards.cost_usd += result.cost_usd
-        paragraphs = [clean(p) for p in _text(result.message).split("\n\n")]
-        for n, raw in enumerate((p for p in paragraphs if p), 1):
-            block_id = f"{tile.id}-{n}"
-            cards.markings += [Marking(doc_id=tile.doc_id, block_id=block_id, kind=k) for k in markings(raw)]
-            text, spans = masker.text(raw)
-            cards.masked += [
-                MaskedSpan(
-                    doc_id=tile.doc_id, block_id=block_id, kind=s.kind, start=s.start, end=s.end, original=s.original
-                )
-                for s in spans
-            ]
-            cards.blocks.append(Block(id=block_id, doc_id=tile.doc_id, kind="tile_text", text=text, page=tile.page))
+        one = card_from_message(tile, result.message, masker)
+        cards.blocks += one.blocks
+        cards.masked += one.masked
+        cards.markings += one.markings
     return cards
