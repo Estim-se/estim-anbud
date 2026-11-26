@@ -135,6 +135,7 @@ def test_a_run_maps_then_runs_every_lens_and_records_it(data_root: Path, tmp_pat
 
     summary = json.loads((store.run_dir("t-0001-a") / "granskning.json").read_text())
     assert summary["map"]["valid"] and len(summary["lenses"]) == 8
+    assert summary["map"]["error"] is None and summary["lenses"][0]["error"] is None
     blob = summary["lenses"][0]["blob"]
     assert LensResult.model_validate_json(store.get_blob(blob)).status == "submitted"
     kinds = [(e.step, e.kind) for e in store.events("t-0001-a") if e.kind != "model_call"]

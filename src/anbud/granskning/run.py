@@ -157,7 +157,8 @@ def run_granskning(
         }
     )
     events("map", "result" if mapped.tender_map else "error", cost_usd=mapped.outcome.cost_usd, blob=map_blob)
-    say(f"map: {mapped.outcome.status}, {'valid' if mapped.tender_map else 'no valid map'}")
+    map_error = f" ({mapped.outcome.error})" if mapped.outcome.error else ""
+    say(f"map: {mapped.outcome.status}{map_error}, {'valid' if mapped.tender_map else 'no valid map'}")
     if mapped.tender_map is not None:
         toolbox.set_roles({d.doc_id: d.role for d in mapped.tender_map.documents})
 
@@ -165,6 +166,7 @@ def run_granskning(
     caps = lens_caps(client.config.budgets, prefix_tokens)
     result = GranskningResult(client.run_id, mapped, prefix_tokens=prefix_tokens, caps=caps)
     lens_blobs: dict[str, str | None] = {}
+    lens_errors: dict[str, str | None] = {}
 
     def one(lens: Lens) -> LensResult:
         say(f"lens {lens.id}: running")
@@ -183,14 +185,17 @@ def run_granskning(
                 generic=lens.generic,
                 max_tokens=LENS_MAX_TOKENS,
                 effort=effort,
+                on_outcome=lambda o: lens_errors.__setitem__(lens.id, o.error),
             )
-        except Exception:  # noqa: BLE001 - one lens's bug must not lose the others' paid work
+        except Exception as exc:  # noqa: BLE001 - one lens's bug must not lose the others' paid work
+            lens_errors[lens.id] = type(exc).__name__
             lens_result = LensResult(lens_id=lens.id, model=client.config.model_for(lens.role), status="error")
         blob = events.blob(lens_result.model_dump(mode="json"))
         lens_blobs[lens.id] = blob
         kind = "error" if lens_result.status == "error" else "result"
         events(f"lens:{lens.id}", kind, cost_usd=lens_result.cost_usd, blob=blob)
-        say(f"lens {lens.id}: {lens_result.status}, {len(lens_result.flags)} flags, {lens_result.turns} turns")
+        error = f" ({lens_errors[lens.id]})" if lens_errors.get(lens.id) else ""
+        say(f"lens {lens.id}: {lens_result.status}{error}, {len(lens_result.flags)} flags, {lens_result.turns} turns")
         return lens_result
 
     if mapped.outcome.status == "error" and mapped.outcome.error in ("RunStopped", "BudgetExceeded", "spend_cap"):
@@ -205,6 +210,7 @@ def run_granskning(
         "caps": {"max_turns": caps.max_turns, "max_usd": caps.max_usd},
         "map": {
             "status": mapped.outcome.status,
+            "error": mapped.outcome.error,
             "valid": mapped.tender_map is not None,
             "turns": mapped.outcome.turns,
             "cost_usd": mapped.outcome.cost_usd,
@@ -219,6 +225,7 @@ def run_granskning(
                 "turns": r.turns,
                 "cost_usd": r.cost_usd,
                 "blob": lens_blobs.get(r.lens_id),
+                "error": lens_errors.get(r.lens_id),
             }
             for r in result.lenses
         ],

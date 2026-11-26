@@ -254,7 +254,9 @@ def run_lens(
     generic: bool = False,
     max_tokens: int = LENS_MAX_TOKENS,
     effort: str = EFFORT,
+    on_outcome: Callable[[LoopOutcome], None] | None = None,
 ) -> LensResult:
+    """`on_outcome` sees the loop's outcome, which carries the error kind a `LensResult` has no field for."""
     submission = FlagSubmission(lens_id, validator)
     outcome = run_tool_loop(
         client,
@@ -272,6 +274,8 @@ def run_lens(
         lens_id=lens_id,
         allowed=allowed,
     )
+    if on_outcome is not None:
+        on_outcome(outcome)
     return LensResult(
         lens_id=lens_id,
         model=client.config.model_for(role),
