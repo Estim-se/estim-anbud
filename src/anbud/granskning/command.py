@@ -155,6 +155,27 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     if client.replay_misses:
         print(f"anbud run: replay incomplete: {client.replay_misses} calls were not in the step cache", file=sys.stderr)
         return REPLAY_INCOMPLETE
+    return freeze_after_run(args, kind, run_id, run_dir, store.run_dir(run_id))
+
+
+def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_dir: Path, record_dir: Path) -> int:
+    """Hash a finished paid dev run into the freeze ledger, so it is provably blind before any answer arrives. A
+    replay, a dry run or a fixture freezes nothing. A run that can't be frozen exits non-zero."""
+    if kind != "dev" or args.replay or args.dry_run:
+        return 0
+    from anbud.evals.freeze import FreezeError, freeze_run
+
+    try:
+        frozen = freeze_run(
+            args.company_id, run_id, outputs_dir=outputs_dir, run_record_dir=record_dir, tender_id=args.tender_id
+        )
+    except FreezeError as exc:
+        print(f"anbud run: not frozen: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # the message may hold a path, so only the type is shown
+        print(f"anbud run: not frozen: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(f"frozen: ledger line {frozen['line_number']}, {frozen['line_sha256'][:12]}")
     return 0
 
 

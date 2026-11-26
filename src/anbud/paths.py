@@ -48,6 +48,14 @@ def ledger_path(company_id: str, root: Path | None = None) -> Path:
     return company_dir(company_id, root) / "split" / "ledger.jsonl"
 
 
+def predictions_dir(company_id: str, root: Path | None = None) -> Path:
+    return (root or data_root()) / "predictions" / check_company_id(company_id)
+
+
+def answers_dir(company_id: str, tender_id: str, root: Path | None = None) -> Path:
+    return (root or data_root()) / "answers" / check_company_id(company_id) / check_tender_id(tender_id)
+
+
 def sealed_roots(root: Path | None = None) -> tuple[Path, Path]:
     base = (root or data_root()).expanduser().resolve()
     return (base / "heldout").resolve(), (base / "sealed").resolve()

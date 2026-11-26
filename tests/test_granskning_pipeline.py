@@ -14,6 +14,7 @@ from openpyxl import Workbook, load_workbook
 from test_runguard import ledger_with
 
 from anbud import cli, model_client
+from anbud.evals import freeze
 from anbud.evals import split_heldout as sh
 from anbud.granskning import command, provenance
 from anbud.granskning.catalog import Catalog, CatalogItem, calc_hourly_rate, with_calc_rate
@@ -237,6 +238,11 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert prefix["estimated_tokens"] == int(prefix["chars"] / 1.6) and granskning["prefix_tokens"] == 40_000
     assert "prefix 40000 tokens (measured)" in out
 
+    # The paid dev run was frozen before anything else could happen to it, and its outputs are read-only.
+    assert "frozen: ledger line 1, " in out
+    assert freeze.is_frozen("co-001", "t-0001")
+    assert (run_dir / "flags.json").stat().st_mode & 0o777 == 0o400
+
     # Replay: no key, no SDK, every answer from the step cache, the same outputs.
     def no_key(**_: Any) -> str:
         raise AssertionError("replay must not read the key")
@@ -248,7 +254,9 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     paid_summary = summary.read_text()
     sent = len(sdk.sent)
     assert cli.main(["run", "co-001", "t-0001", "--run-id", RUN, "--replay"]) == 0
-    assert "total $0.00" in capsys.readouterr().out
+    replay_out = capsys.readouterr().out
+    assert "total $0.00" in replay_out and "frozen" not in replay_out  # a replay freezes nothing
+    assert freeze.verify(freeze.ledger_file("co-001")).lines == 1
     replay = run_dir / "replay-1"
     for name in names[:3]:
         assert (replay / name).read_text() == before[name]  # the same outputs, in their own folder
