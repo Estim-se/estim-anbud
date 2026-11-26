@@ -90,7 +90,7 @@ def test_formula_text_stays_text_after_saving(tmp_path: Path) -> None:
 
 def test_reports_go_to_the_tender_folder_never_the_repo(data_root: Path) -> None:
     out = report_dir("co-001", "t-0001", "run-0001")
-    assert out == data_root / "co-001" / "dev" / "t-0001" / "reports" / "run-0001"
+    assert out == data_root / "co-001" / "dev" / "t-0001" / "runs" / "run-0001" / "report"
     paths = write_reports(_report(), out)
     assert paths["html"].read_text(encoding="utf-8").startswith("<!doctype html>")
     assert load_workbook(paths["xlsx"]).sheetnames[0] == "Flaggor"

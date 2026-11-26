@@ -18,7 +18,7 @@ def _run(args: argparse.Namespace) -> int:
     except RunRefused as exc:
         print(f"anbud run: refused: {exc}", file=sys.stderr)
         return REFUSED
-    # Granskning up to the lenses (map, then lenses in parallel). Checks, verifier and reports come next.
+    # Granskning end to end: page cards, map, lenses, checks, merge, verifier, kronor and the reports.
     from anbud.granskning.command import run_command
 
     return run_command(args, kind)

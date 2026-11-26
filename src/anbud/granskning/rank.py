@@ -110,6 +110,7 @@ class TenderCoverage(_Model):
     documents: int
     not_read_by_prep: list[str] = Field(default_factory=list)
     named_not_present: list[str] = Field(default_factory=list)
+    unread_tiles: list[str] = Field(default_factory=list, description="Drawing or scan tiles no page card was read for")
     lenses: list[LensCoverage] = Field(default_factory=list)
     note: str = NOT_ALL_CLEAR
 
@@ -206,13 +207,19 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
     )
 
 
-def coverage(results: list[LensResult], corpus: Corpus, named_not_present: list[str] | None = None) -> TenderCoverage:
+def coverage(
+    results: list[LensResult],
+    corpus: Corpus,
+    named_not_present: list[str] | None = None,
+    unread_tiles: list[str] | None = None,
+) -> TenderCoverage:
     names = document_names(corpus)
     skipped = [f"{names.get(d['doc_id'], d['doc_id'])} ({d['skipped']})" for d in corpus.documents if d.get("skipped")]
     return TenderCoverage(
         documents=len(names),
         not_read_by_prep=skipped,
         named_not_present=list(named_not_present or []),
+        unread_tiles=list(unread_tiles or []),
         lenses=[lens_coverage(r, corpus, names) for r in results],
     )
 

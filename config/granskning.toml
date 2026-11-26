@@ -40,3 +40,9 @@ default_action_rate = 1.0
 [merge]
 max_tokens = 8000
 effort = "medium"
+
+# Per flag under review. Turns, top_n and the sample size are in budgets.toml [verifier].
+[verifier]
+max_usd = 0.40
+max_tokens = 12000
+effort = "high"

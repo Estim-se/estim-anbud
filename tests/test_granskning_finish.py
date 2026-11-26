@@ -95,4 +95,5 @@ def test_the_catalog_exporter_reads_the_app_shape(data_root: Path, tmp_path: Pat
     source.write_text(SYNTHETIC_TS, encoding="utf-8")
     export(source, data_root / "catalogs" / "estim-default.json", hourly_rate=500)
     loaded = load_named_catalog("estim-default")
-    assert loaded.default and loaded.label == "Estims standardkatalog (ej kundens)" and loaded.hourly_rate == 500
+    assert loaded.default and loaded.hourly_rate == 500
+    assert loaded.label == "Estims standardkatalog, antaget timpris 500 kr/h, ej kundens"

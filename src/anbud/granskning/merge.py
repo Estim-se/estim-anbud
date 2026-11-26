@@ -17,9 +17,11 @@ from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
 from anbud.granskning.settings import Settings
 from anbud.granskning.validate import _search_key, check_flag
-from anbud.model_client import ModelClient
+from anbud.model_client import BudgetExceeded, ModelClient, ModelError, PrefixDrift, ReplayMiss, RunStopped
 from anbud.models import Citation, Flag
 from anbud.prep.text import normalise
+
+STOP_ERRORS = (ModelError, BudgetExceeded, RunStopped, ReplayMiss, PrefixDrift)
 
 MERGE_SYSTEM = (
     "You merge near-duplicate findings from a review of an electrical tender. You get clusters of findings that cite "
@@ -166,14 +168,17 @@ def merge(
     if client is None or not multi:
         return items
     settings = settings or Settings()
-    result = client.call(
-        role="merge",
-        step=step,
-        system=[{"type": "text", "text": MERGE_SYSTEM}],
-        messages=[{"role": "user", "content": _merge_request(multi)}],
-        max_tokens=settings.merge_max_tokens,
-        effort=settings.merge_effort,
-    )
+    try:
+        result = client.call(
+            role="merge",
+            step=step,
+            system=[{"type": "text", "text": MERGE_SYSTEM}],
+            messages=[{"role": "user", "content": _merge_request(multi)}],
+            max_tokens=settings.merge_max_tokens,
+            effort=settings.merge_effort,
+        )
+    except STOP_ERRORS:  # a failed or refused merge call loses nothing: the code merge stands
+        return items
     raw = _submitted(result.message)
     try:
         outputs = [Flag.model_validate(f) for f in raw] if raw is not None else []

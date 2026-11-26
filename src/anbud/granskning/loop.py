@@ -256,7 +256,7 @@ def run_lens(
     effort: str = EFFORT,
     on_outcome: Callable[[LoopOutcome], None] | None = None,
 ) -> LensResult:
-    """`on_outcome` sees the loop's outcome, which carries the error kind a `LensResult` has no field for."""
+    """`on_outcome` sees the loop's whole outcome; the result carries its error kind too."""
     submission = FlagSubmission(lens_id, validator)
     outcome = run_tool_loop(
         client,
@@ -286,6 +286,7 @@ def run_lens(
         turns=outcome.turns,
         cost_usd=outcome.cost_usd,
         generic=generic,
+        error=outcome.error,
     )
 
 

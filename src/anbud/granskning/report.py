@@ -240,6 +240,9 @@ def render_html(report: Report) -> str:
     parts.append(f"<p>{cov.documents} dokument i underlaget.</p>")
     if cov.not_read_by_prep:
         parts.append(f"<p>Kunde inte läsas: {_e(', '.join(cov.not_read_by_prep))}</p>")
+    if cov.unread_tiles:
+        unread = ", ".join(cov.unread_tiles)
+        parts.append(f"<p>{len(cov.unread_tiles)} ritningsrutor kunde inte läsas av kortsteget: {_e(unread)}</p>")
     if cov.named_not_present:
         parts.append(f"<p>Nämns men finns inte i underlaget: {_e(', '.join(cov.named_not_present))}</p>")
     for lens in cov.lenses:
@@ -436,10 +439,15 @@ def column_keys(wb: Workbook, sheet: str) -> dict[str, int]:
 # ---------------------------------------------------------------- writing
 
 
-def report_dir(company_id: str, tender_id: str, run_id: str, root: Path | None = None) -> Path:
+def tender_run_dir(company_id: str, tender_id: str, run_id: str, root: Path | None = None) -> Path:
+    """`<data>/<company>/dev/<tender>/runs/<run_id>`: a run's outputs, next to the tender they review."""
     if not RUN_ID.fullmatch(run_id):
         raise ValueError("run ids are letters, digits, dot, dash and underscore")
-    return dev_tender_dir(company_id, tender_id, root) / "reports" / run_id
+    return dev_tender_dir(company_id, tender_id, root) / "runs" / run_id
+
+
+def report_dir(company_id: str, tender_id: str, run_id: str, root: Path | None = None) -> Path:
+    return tender_run_dir(company_id, tender_id, run_id, root) / "report"
 
 
 def write_reports(report: Report, out_dir: Path, extra_columns: Sequence[Column] = ()) -> dict[str, Path]:

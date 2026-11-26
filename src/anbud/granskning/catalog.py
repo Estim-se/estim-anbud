@@ -15,10 +15,12 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anbud.granskning.contracts import CalcPost
 from anbud.paths import data_root
 from anbud.prep.text import normalise
 
@@ -85,6 +87,37 @@ class Catalog(_Model):
         if item.hours and self.hourly_rate <= 0:
             return None
         return (item.hours or 0.0) * self.hourly_rate + (item.unit_price or 0.0)
+
+
+_RATE_POST = re.compile(
+    r"\btimpris|timkostnad|timdebitering|montörstim|arbetstim|\bkr\s*/\s*(?:tim|h)\b|per\s+(?:arbets)?timme",
+    re.IGNORECASE,
+)
+_ASSUMED_RATE = re.compile(r",?\s*antaget timpris[^,]*(?:,\s*ej kundens)?")
+MIN_RATE, MAX_RATE = 200.0, 3000.0
+
+
+def calc_hourly_rate(posts: Iterable[CalcPost]) -> float | None:
+    """The hourly rate the customer's calc states, if a post names one: its unit price, or its amount when the post
+    is a single unit. The first plausible one (200-3000 kr) wins."""
+    for post in posts:
+        if not _RATE_POST.search(f"{post.section or ''} {post.text}"):
+            continue
+        value = post.unit_price
+        if value is None and post.amount is not None and post.quantity in (None, 1):
+            value = post.amount
+        if value is not None and MIN_RATE <= value <= MAX_RATE:
+            return value
+    return None
+
+
+def with_calc_rate(catalog: Catalog, posts: Iterable[CalcPost]) -> Catalog:
+    """The catalog with the calc's own hourly rate, when the calc states one, and a label that says so."""
+    rate = calc_hourly_rate(posts)
+    if rate is None:
+        return catalog
+    label = _ASSUMED_RATE.sub("", catalog.label) + f", timpris {rate:g} kr/h från kundens kalkyl"
+    return catalog.model_copy(update={"hourly_rate": rate, "label": label})
 
 
 def catalog_path(name: str, root: Path | None = None) -> Path:

@@ -189,7 +189,9 @@ def run_granskning(
             )
         except Exception as exc:  # noqa: BLE001 - one lens's bug must not lose the others' paid work
             lens_errors[lens.id] = type(exc).__name__
-            lens_result = LensResult(lens_id=lens.id, model=client.config.model_for(lens.role), status="error")
+            lens_result = LensResult(
+                lens_id=lens.id, model=client.config.model_for(lens.role), status="error", error=type(exc).__name__
+            )
         blob = events.blob(lens_result.model_dump(mode="json"))
         lens_blobs[lens.id] = blob
         kind = "error" if lens_result.status == "error" else "result"

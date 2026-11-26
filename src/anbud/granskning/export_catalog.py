@@ -4,8 +4,9 @@
 
 Reads the app's example catalog source read-only, applies its value updates, and writes a `Catalog` JSON (the format
 in `anbud.granskning.catalog`) labelled as Estim's default. Nothing it reads is written into this repo. The app's own
-default hourly rate is unset, so the rate is a required argument. The app's list prices are material only, so they
-become `unit_price`; list discount and markup are left out (the app's defaults are 0).
+default hourly rate is unset, so the rate is a required argument, and the label calls it assumed. The app's list
+prices are material only, so they become `unit_price`; list discount and markup are left out (the app's defaults are
+0).
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ def export(source: Path, out: Path, hourly_rate: float) -> Catalog:
         raise ValueError("no catalog rows found in the source")
     catalog = Catalog(
         name=DEFAULT_CATALOG,
-        label="Estims standardkatalog (ej kundens)",
+        label=f"Estims standardkatalog, antaget timpris {hourly_rate:g} kr/h, ej kundens",
         hourly_rate=hourly_rate,
         items=items,
     )

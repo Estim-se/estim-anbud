@@ -16,6 +16,7 @@ Reasons name block ids, numbers and searches, never document text, so they are s
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Collection
 from typing import Any
 
 from pydantic import ValidationError
@@ -110,8 +111,10 @@ def searches_run(tool_log: list[ToolCall]) -> set[str]:
     }
 
 
-def check_flag(flag: Flag, searches: set[str], corpus: Corpus) -> list[str]:
+def check_flag(flag: Flag, searches: set[str], corpus: Corpus, claim_types: Collection[str] | None = None) -> list[str]:
     reasons: list[str] = []
+    if claim_types is not None and flag.claim_type not in claim_types:
+        reasons.append(f"claim_type {flag.claim_type!r} is not one of the claim types in the system prompt")
     for i, citation in enumerate(flag.citations):
         block = corpus.get(citation.block_id)
         if block is None:
@@ -137,10 +140,30 @@ def _schema_reasons(error: ValidationError) -> list[str]:
     return [f"{'.'.join(str(p) for p in e['loc']) or 'flag'}: {e['msg']}" for e in error.errors(include_input=False)]
 
 
+def _reject(index: int, reasons: list[str], item: Any) -> dict[str, Any]:
+    return {"index": index, "reasons": reasons, "reason": "; ".join(reasons), "flag": item}
+
+
+def flag_validator(
+    corpus: Corpus, claim_types: Collection[str] | None = None
+) -> Callable[[list[dict[str, Any]], list[ToolCall]], tuple[list[Flag], list[dict[str, Any]]]]:
+    """`validate_flags` bound to a corpus, in the shape the tool loop's `Validator` takes."""
+
+    def validator(raw: list[dict[str, Any]], tool_log: list[ToolCall]) -> tuple[list[Flag], list[dict[str, Any]]]:
+        return validate_flags(raw, tool_log, corpus, claim_types)
+
+    return validator
+
+
 def validate_flags(
-    raw: list[dict[str, Any]], tool_log: list[ToolCall], corpus: Corpus
+    raw: list[dict[str, Any]],
+    tool_log: list[ToolCall],
+    corpus: Corpus,
+    claim_types: Collection[str] | None = None,
 ) -> tuple[list[Flag], list[dict[str, Any]]]:
-    """The flags that pass every check, and the rejects as {"index", "reasons", "flag"} (the raw input)."""
+    """The flags that pass every check, and the rejects as {"index", "reasons", "reason", "flag"}: `reasons` a list,
+    `reason` the same joined (the tool loop's repair message reads it), `flag` the raw input. With `claim_types`, a
+    flag's claim type must be one of them."""
     searches = searches_run(tool_log)
     valid: list[Flag] = []
     rejects: list[dict[str, Any]] = []
@@ -148,11 +171,11 @@ def validate_flags(
         try:
             flag = Flag.model_validate(item)
         except ValidationError as error:
-            rejects.append({"index": index, "reasons": _schema_reasons(error), "flag": item})
+            rejects.append(_reject(index, _schema_reasons(error), item))
             continue
-        reasons = check_flag(flag, searches, corpus)
+        reasons = check_flag(flag, searches, corpus, claim_types)
         if reasons:
-            rejects.append({"index": index, "reasons": reasons, "flag": item})
+            rejects.append(_reject(index, reasons, item))
         else:
             valid.append(flag)
     return valid, rejects
