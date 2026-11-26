@@ -197,6 +197,88 @@ def _kalkyl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _baseline(args: argparse.Namespace) -> int:
+    """The app's current engine on a dev tender. Paid unless --dry-run; never in CI. Prints counts, costs and timings
+    only; the engine's own output stays in the run record's engine.log."""
+    import os
+
+    from anbud import paths
+    from anbud.evals import baseline, freeze
+    from anbud.granskning import provenance
+    from anbud.model_client import KeyMissing
+    from anbud.store import StoreError
+
+    try:
+        if check_run_allowed(args.company_id, args.tender_id) != "dev":
+            raise RunRefused("only dev tenders")
+    except RunRefused as exc:
+        print(f"anbud baseline: refused: {exc}", file=sys.stderr)
+        return REFUSED
+    state = provenance.git_state()
+    if not args.dry_run:
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            print("anbud baseline: refused: paid calls never run in CI", file=sys.stderr)
+            return REFUSED
+        refusal = provenance.paid_refusal(state)
+        if refusal:
+            print(f"anbud baseline: refused: {refusal}", file=sys.stderr)
+            return REFUSED
+    root = paths.data_root()
+    try:
+        result = baseline.run_dev(
+            args.company_id,
+            args.tender_id,
+            dry_run=args.dry_run,
+            hard_stop=args.hard_stop,
+            app=(args.app or baseline.APP_DIR).expanduser(),
+            app_ref=args.app_ref or baseline.APP_REF,
+            code=provenance.code_block(state),
+            stop_requested=lambda record: (root / "STOP").exists() or (record / "STOP").exists(),
+        )
+    except (baseline.BaselineError, KeyMissing, StoreError, ValueError) as exc:
+        print(f"anbud baseline: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    for line in baseline_report(result):
+        print(line)
+    if result.outcome != "ok" or args.dry_run:
+        return 0 if result.outcome == ("dry_run" if args.dry_run else "ok") else 1
+    try:
+        record = freeze.freeze_run(
+            args.company_id,
+            result.run_id,
+            outputs_dir=paths.dev_tender_dir(args.company_id, args.tender_id) / "baseline" / result.run_id,
+            run_record_dir=freeze.run_record_dir(args.company_id, result.run_id),
+            tender_id=args.tender_id,
+        )
+    except freeze.FreezeError as exc:
+        print(f"anbud baseline: not frozen: {exc}", file=sys.stderr)
+        return 1
+    print(f"frozen: ledger line {record['line_number']}, {record['line_sha256'][:12]}")
+    if (warning := freeze.read_only_warning(record)) is not None:
+        print(f"anbud baseline: {warning}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def baseline_report(result: Any) -> list[str]:
+    """Counts, costs, timings and ids. No file name and nothing the engine wrote."""
+    skipped = ", ".join(f"{k} {v}" for k, v in result.skipped_by_type.items()) or "none"
+    lines = [
+        f"anbud baseline: {result.outcome} (exit {result.exit_code}), run {result.run_id}",
+        f"documents: {result.documents} given to the engine; skipped by type: {skipped}",
+        f"calls: {result.calls} ({result.calls_failed} failed, {result.calls_incomplete} cut off), "
+        f"cost ${result.cost_usd:.2f}, {result.duration_s:.0f} s",
+        f"workspace ids: {', '.join(result.workspace_ids) or 'none seen'}; "
+        f"organization ids: {len(result.organization_ids)} distinct",
+        f"child environment: {', '.join(result.env_names) or 'not recorded'}",
+    ]
+    if result.outcome == "hard_stop":
+        lines.append(f"hard stop: up to ${result.in_flight_usd_at_stop:.2f} was in flight when the run ended")
+    if result.blocked_hosts:
+        lines.append(f"blocked: {result.blocked_hosts} request to a host other than the Messages API")
+    return lines
+
+
 def _cards(args: argparse.Namespace) -> int:
     from anbud.evals.cards import CardError, write
 
@@ -475,6 +557,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser("plant", help="a planted variant of a dev tender: plants, both control arms and the answer key")
     sub.add_parser("plant-score", help="score runs on a planted variant's arms against its answer key")
+    bl = sub.add_parser("baseline", help="the app's current engine on a dev tender, frozen (paid unless --dry-run)")
+    bl.add_argument("company_id")
+    bl.add_argument("tender_id")
+    bl.add_argument("--dry-run", action="store_true", help="run up to the first model call, which is never sent ($0)")
+    bl.add_argument(
+        "--hard-stop", type=float, help="lower the hard stop in config/budgets.toml [baseline]; never raise"
+    )
+    bl.add_argument("--app", type=Path, help="the app checkout (default: ~/Documents/estim/workspace/estim)")
+    bl.add_argument("--app-ref", help="the app commit to export and run (default: origin/main)")
     cards = sub.add_parser("cards", help="case cards: counts per dev tender, sealed tenders counted only (local)")
     cards.add_argument("company_id")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
@@ -537,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
         return _eval(args)
     if args.command == "stop":
         return _stop(args)
+    if args.command == "baseline":
+        return _baseline(args)
     if args.command == "cards":
         return _cards(args)
     if args.command == "prep":
