@@ -35,6 +35,8 @@ from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from urllib.parse import unquote
 
+import pypdfium2 as pdfium
+
 from anbud.answer_terms import classify, classify_path, fold
 
 NOTICE_SUFFIXES = (".html", ".htm", ".xhtml", ".mht", ".mhtml", ".webarchive")
@@ -43,6 +45,11 @@ MAX_INNER_ZIP_BYTES = 200 * 1024 * 1024  # nested zips searched for a notice, in
 MAX_LINES = 50_000
 NOTICE_SCORE = 2  # a page with labels for at least this many fields is a notice, whatever its title says
 BUYER_BLOCK = 12  # lines after the buyer's name searched first for its org number
+# With no deadline on any notice page, the first pages of the delivery's PDFs are read for it (an invitation to
+# tender or the administrative rules usually state it), within these limits.
+PDF_PAGES = 3
+MAX_PDF_BYTES = 40 * 1024 * 1024
+MAX_PDFS = 60
 
 # What reading a damaged, odd or unsupported zip member can raise: a damaged deflate stream raises zlib.error, which
 # is not an OSError, and LZMA members raise their own error. Every reader of a delivered zip catches all of these.
@@ -122,6 +129,19 @@ _MONTHS = {
         ("jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"), 1)},
     "may": 5, "oct": 10, "sept": 9,
 }  # fmt: skip
+
+# In a PDF a bid deadline is a label at the start of a line, after any section code ("AFB.31", "1.4"), or a sentence
+# such as "Anbud ska vara inkomna senast ...". A line about questions is never the bid deadline.
+_PDF_LABELS = [
+    re.compile(rf"^(?:[a-z]{{2,4}} ?)?(?:\d+ )*{re.escape(label)}(?: |$)")
+    for label in (*LABELS["deadline"], "anbudstiden utgar", "anbudstiden gar ut")
+    if label not in ("deadline", "tender deadline", "anbudsinlamning")
+]
+_PDF_SENTENCE = re.compile(r"(?:^| )anbud\w* (?:ska|skall) (?:vara|ha) (?:\w+ ){0,4}?senast(?: |$)")
+_QUESTION_WORDS = frozenset("fraga fragor fragan fragorna fragestallningar questions question clarification".split())
+_PDF_FIRST = re.compile(
+    r"anbudsinbjudan|inbjudan|afb|annons|administrativ|upphandlingsforeskrift|kommersiell|forfragan"
+)
 
 _TIME = r"(?:,?\s*(?:kl\.?\s*|at\s+)?(\d{1,2})[:.](\d\d))?"
 _ISO = re.compile(r"(?<!\d)(20\d\d)-(\d\d)-(\d\d)(?:[ T]+(?:kl\.?\s*)?(\d{1,2})[:.](\d\d))?")
@@ -453,6 +473,7 @@ class Notice:
     cpv: list[str] = field(default_factory=list)
     procedure: str | None = None
     framework: bool = False  # a framework agreement (ramavtal)
+    deadline_from_pdf: bool = False  # no notice page gave a deadline; a PDF's first pages did
     pages: int = 0  # notice pages read
     listed: set[str] = field(default_factory=set)  # folded file names listed under answer-key headings
     answer_pages: set[str] = field(default_factory=set)  # member paths of pages that are themselves answer keys
@@ -623,13 +644,91 @@ def _members(zf: zipfile.ZipFile, prefix: tuple[str, ...], depth: int) -> list[t
 
 
 def from_zip(path: str | object) -> Notice:
-    """Read the notice from a delivered zip without unpacking it to disk. A damaged zip gives an empty notice."""
+    """Read the notice from a delivered zip without unpacking it to disk. A damaged zip gives an empty notice. With
+    no deadline on any page, the first pages of its PDFs are read for one."""
     try:
         with zipfile.ZipFile(path) as zf:  # type: ignore[arg-type]
-            members = _members(zf, (), 0)
+            notice = from_pages(_members(zf, (), 0))
+            if notice.deadline is None:
+                dates = _pdf_deadlines(zf, 0, [MAX_PDFS])
+                notice.deadline = max(dates) if dates else None
+                notice.deadline_from_pdf = bool(dates)
     except ZIP_ERRORS:
         return Notice()
-    return from_pages(members)
+    return notice
+
+
+def pdf_lines(data: bytes, pages: int = PDF_PAGES) -> list[str]:
+    """The text lines of a PDF's first pages, or none if it can't be read (damaged, encrypted, no text)."""
+    lines: list[str] = []
+    try:
+        pdf = pdfium.PdfDocument(data)
+    except Exception:  # noqa: BLE001 - an unreadable PDF has no deadline
+        return lines
+    try:
+        for i in range(min(len(pdf), pages)):
+            page = pdf[i]
+            text = page.get_textpage()
+            try:
+                lines += [" ".join(line.split()) for line in text.get_text_range().splitlines() if line.strip()]
+            finally:
+                text.close()
+                page.close()
+    except Exception:  # noqa: BLE001 - keep what was read
+        pass
+    finally:
+        pdf.close()
+    return lines
+
+
+def text_deadlines(lines: list[str]) -> list[datetime]:
+    """Bid deadlines stated in plain text lines: every date on a deadline line, or the first dated line of the two
+    after a label that stands alone."""
+    found: list[datetime] = []
+    for i, line in enumerate(lines):
+        folded = fold(line)
+        if _QUESTION_WORDS & set(folded.split()):
+            continue
+        if not (_PDF_SENTENCE.search(folded) or any(p.match(folded) for p in _PDF_LABELS)):
+            continue
+        dates = _dates(line)
+        for j in (i + 1, i + 2):
+            if dates or j >= len(lines) or _QUESTION_WORDS & set(fold(lines[j]).split()):
+                break
+            dates = _dates(lines[j])
+        found += dates
+    return found
+
+
+def _pdf_deadlines(zf: zipfile.ZipFile, depth: int, budget: list[int]) -> list[datetime]:
+    """Deadlines in the first pages of a zip's PDFs and those of zips inside it, likeliest documents first, at most
+    `budget[0]` PDFs in all."""
+    pdfs, zips = [], []
+    for info in zf.infolist():
+        if info.is_dir() or info.flag_bits & 0x1:
+            continue
+        name = member_parts(info)[-1:] or ("",)
+        suffix = PurePosixPath(name[0]).suffix.casefold()
+        if suffix == ".pdf" and info.file_size <= MAX_PDF_BYTES:
+            pdfs.append((not _PDF_FIRST.search(fold(name[0])), info.filename, info))
+        elif suffix == ".zip" and depth < 3 and info.file_size <= MAX_INNER_ZIP_BYTES:
+            zips.append(info)
+    found: list[datetime] = []
+    for _, _, info in sorted(pdfs, key=lambda p: p[:2]):
+        if budget[0] <= 0:
+            return found
+        budget[0] -= 1
+        try:
+            found += text_deadlines(pdf_lines(zf.read(info)))
+        except ZIP_ERRORS:
+            continue
+    for info in zips:
+        try:
+            with zipfile.ZipFile(io.BytesIO(zf.read(info))) as inner:
+                found += _pdf_deadlines(inner, depth + 1, budget)
+        except ZIP_ERRORS:
+            continue
+    return found
 
 
 def from_pages(members: list[tuple[tuple[str, ...], bytes]]) -> Notice:

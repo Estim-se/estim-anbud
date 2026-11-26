@@ -121,7 +121,8 @@ def intake_report(result: Any, cutoff: Any = None) -> list[str]:
             f"  training cutoff {cutoff}: {n.before_cutoff} published before, {n.after_cutoff} after, "
             f"{n.unknown_date} unknown; {n.framework} framework agreements",
             f"  prospective by deadline: {n.open} still open, {n.no_deadline} with no deadline read, "
-            f"{n.may_have_moved} passed lately with amendments or answers that may have moved it",
+            f"{n.may_have_moved} passed lately with amendments or answers that may have moved it; "
+            f"{n.deadline_from_pdf} deadlines read from PDFs",
         ]
         held = ", ".join(f"{k} {v}" for k, v in sorted(result.held.items())) or "none"
         lines.append(

@@ -401,3 +401,51 @@ def test_a_contact_line_is_not_the_reference() -> None:
     body = "<p>Referens: Anna Exempel, 070-123 45 67</p><p>Diarienummer: KS 2026/123</p>"
     assert read(("a.html", page(body))).reference == "KS 2026/123"
     assert read(("a.html", page("<p>Referensnummer: Anna Exempel, 070-123 45 67</p>"))).reference is None
+
+
+# Follow-up: with no deadline on a notice page, the first pages of the delivery's PDFs are read for it.
+
+
+def pdf(*lines: str) -> bytes:
+    from synthetic_docs import Page, Text, make_pdf
+
+    return make_pdf([Page(texts=[Text(72, 72 + 16 * i, line) for i, line in enumerate(lines)])])
+
+
+@pytest.mark.parametrize(
+    ("lines", "deadline"),
+    [
+        (("Anbudsinbjudan", "Anbud ska vara inkomna senast 2026-06-10 kl. 23:59."), datetime(2026, 6, 10, 23, 59)),
+        (("AFB.31 Sista anbudsdag", "2026-06-10"), datetime(2026, 6, 10)),
+        (("Anbudstid: 2026-05-01 - 2026-06-10",), datetime(2026, 6, 10)),
+        (("Frågor ska ställas senast 2026-05-25.", "Anbud ska ha kommit in senast 2026-06-10"), datetime(2026, 6, 10)),
+        (("Frågor ska ställas senast 2026-05-25.",), None),  # a question deadline is not the bid deadline
+        (("Anbudet ska vara giltigt till och med 2026-12-31.",), None),
+    ],
+)
+def test_the_deadline_is_read_from_a_pdf_when_no_page_gives_one(
+    tmp_path: Path, lines: tuple[str, ...], deadline: datetime | None
+) -> None:
+    path = tmp_path / "u.zip"
+    path.write_bytes(zip_bytes({"Handlingar/AFB.pdf": pdf(*lines), "Ritning.pdf": pdf("Plan 1")}))
+    n = notice.from_zip(path)
+    assert n.deadline == deadline and n.deadline_from_pdf == (deadline is not None)
+
+
+def test_a_notice_page_deadline_wins_and_pdfs_are_not_read(tmp_path: Path) -> None:
+    path = tmp_path / "u.zip"
+    path.write_bytes(zip_bytes({"Annons.html": notice_page(*dev_meta()), "AFB.pdf": pdf("Sista anbudsdag 2027-03-01")}))
+    n = notice.from_zip(path)
+    assert n.deadline == datetime(2026, 6, 10) and not n.deadline_from_pdf
+
+
+def test_a_zip_whose_pdf_gives_a_passed_deadline_can_be_split(
+    data_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = zip_bytes({"AFB.pdf": pdf("Anbud ska vara inkomna senast 2026-06-10"), "AF.txt": "a"})
+    incoming = incoming_with(data_root, {"Utan annons.zip": data})
+    assert cli.main(["intake", "co-002", str(incoming), "--dry-run"]) == 0
+    assert "0 with no deadline read" in capsys.readouterr().out
+    result = intake("co-002", incoming, new_ledger=True, now=NOW)
+    assert result.notices.deadline_from_pdf == 1 and result.notices.no_deadline == 0
+    assert result.prospective == 0 and result.dev + result.heldout == 1

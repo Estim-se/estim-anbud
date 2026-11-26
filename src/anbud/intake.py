@@ -401,6 +401,7 @@ class NoticeStats:
     open: int = 0  # the deadline is still ahead: prospective
     no_deadline: int = 0  # no deadline read: prospective, never dev
     may_have_moved: int = 0  # passed lately, with amendments or answers intake can't read: prospective
+    deadline_from_pdf: int = 0  # no notice page gave the deadline; a PDF's first pages did
 
     def add(
         self, notice: notices.Notice, keys: tuple[str, ...], entity: bool, cutoff: date, sealed_because: str | None
@@ -409,6 +410,7 @@ class NoticeStats:
         self.open += sealed_because == "open"
         self.no_deadline += sealed_because == "no deadline"
         self.may_have_moved += sealed_because == "deadline may have moved"
+        self.deadline_from_pdf += notice.deadline_from_pdf
         self.without_page += notice.pages == 0
         for name, ok in notice.found().items():
             self.found[name] = self.found.get(name, 0) + ok
