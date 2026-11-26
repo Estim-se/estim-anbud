@@ -25,7 +25,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
 from anbud.granskning.catalog import Catalog
-from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Post
+from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Line, Post, assumed_posts
 from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered
 
 if TYPE_CHECKING:
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 KR = '#,##0.00 "kr"'
 NUM = "#,##0.##"
 HOURS = '#,##0.00 "h"'
+SHARE = "0%"
 BOLD = Font(bold=True)
 TITLE = Font(bold=True, size=14)
 HEAD_FILL = PatternFill("solid", fgColor="D9E2EC")
@@ -77,8 +78,8 @@ def _status(result: KalkylResult) -> str:
     return "Skuggkalkyl (Kalkyl v3) – OFULLSTÄNDIG: delar av underlaget lästes inte, se Ej omhändertaget."
 
 
-def _citation(post: Post) -> tuple[str, str]:
-    cites = [c for ln in post.lines for c in ln.record.record.citations]
+def _citation(post: Post, lines: list[Line] | None = None) -> tuple[str, str]:
+    cites = [c for ln in (lines or post.lines) for c in ln.record.record.citations]
     first = cites[0]
     more = f" (+{len(cites) - 1} källor i Underlag)" if len(cites) > 1 else ""
     return first.block_id, f"{first.quote}{more}"
@@ -197,12 +198,43 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
     return rows
 
 
+OVERVIEW_COLUMNS = [("Uppgift", 44), ("Värde", 24), ("Underlag", 50), ("Källa (block)", 18), ("Citat", 60)]
+TOP_ASSUMED = 3  # the assumed posts Översikt names, largest first
+
+
+def _pct(part: Decimal, whole: Decimal) -> str:
+    return f"{(part / whole * 100).quantize(Decimal(1))} %"
+
+
+def _assumed_rows(result: KalkylResult) -> list[tuple[Any, ...]]:
+    """How much of the total rests on assumed counts, and the largest assumed posts with the citation of the line
+    the assumption sits on, so the estimator sees at once that the figure is an assumption and what to check."""
+    t = result.totals
+    share = t.assumed_total / t.total if t.total else "ingen summa"
+    rows: list[tuple[Any, ...]] = [
+        ("varav antagna mängder", t.assumed_total, KR),
+        ("Andel av summan som vilar på antagna mängder", share, SHARE, "filtrera Nivå = Antagande i Kalkyl"),
+        ("Prissatta poster med antagen mängd", t.assumed_priced, None),
+    ]
+    posts = assumed_posts(result.posts)
+    for n, p in enumerate(posts[:TOP_ASSUMED], 1):
+        lines = p.assumed_lines
+        basis = "; ".join(dict.fromkeys(ln.basis for ln in lines))
+        block, quote = _citation(p, lines)
+        how = f"{_pct(p.total or Decimal(0), t.total)} av summan; {basis}; {p.id}"
+        rows.append((f"Antagen post att kontrollera {n}: {p.name}", p.total, KR, how, block, quote))
+    rest = posts[TOP_ASSUMED:]
+    if rest:
+        rows.append((f"Övriga antagna poster ({len(rest)})", sum((p.total or 0 for p in rest), Decimal(0)), KR))
+    return rows
+
+
 def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str, meta: dict) -> None:
-    _header(ws, catalog, status, run, [("Uppgift", 44), ("Värde", 24)])
+    _header(ws, catalog, status, run, OVERVIEW_COLUMNS)
     _put(ws, FIRST_ROW, 1, "Kalkyl (skugga)")
     ws.cell(row=FIRST_ROW, column=1).font = TITLE
     t, c = result.totals, result.counts()
-    rows: list[tuple[str, Any, str | None]] = [
+    rows: list[tuple[Any, ...]] = [
         ("Företag", meta["company_id"], None),
         ("Anbud", meta["tender_id"], None),
         ("Körning", meta["run_id"], None),
@@ -210,6 +242,7 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Timpris", catalog.hourly_rate, KR),
         ("Recept", result.recipe.label if result.recipe else "inget recept: rumsposter utan antal saknar mängd", None),
         ("Summa (exkl. optioner)", t.total, KR),
+        *_assumed_rows(result),
         ("Material", t.material, KR),
         ("Arbete", t.labour, KR),
         ("Timmar", t.hours, HOURS),
@@ -220,8 +253,6 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
             None,
         ),
         ("varav oklar entreprenadgräns", t.unclear_total, KR),
-        ("varav antagna mängder", t.assumed_total, KR),
-        ("Prissatta poster med antagen mängd", t.assumed_priced, None),
         ("Optioner (utanför summan)", t.options_total, KR),
         ("Poster", c["posts"], None),
         ("Prissatta poster", c["posts_priced"], None),
@@ -247,9 +278,13 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Avsnitt lästa / totalt", f"{c['chunk_status'].get('submitted', 0)} / {c['chunks']}", None),
         ("Modellkostnad (USD)", meta.get("cost_usd", 0.0), "0.0000"),
     ]
-    for i, (label, value, fmt) in enumerate(rows, FIRST_ROW + 2):
+    for i, (label, value, fmt, *more) in enumerate(rows, FIRST_ROW + 2):
         _put(ws, i, 1, label)
         _put(ws, i, 2, value, fmt)
+        for col, extra in enumerate(more, 3):
+            _put(ws, i, col, extra)
+        if label.startswith("Andel av summan") and t.assumed_total:
+            ws.cell(row=i, column=2).fill = WARN_FILL
 
 
 CODE_KINDS = ("apartment", "premises", "stairwell", "stairwell_floor", "building")
