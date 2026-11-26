@@ -98,8 +98,10 @@ class Toolbox:
         ids = []
         for hit in hits:
             snippet = defuse(" ".join(hit.snippet.split()))
+            trade = self.corpus.excluded.get(hit.doc_id)
+            outside = f" [excluded: {defuse(trade)}]" if trade is not None else ""
             if hit.block_id is not None and (block := self.corpus.get(hit.block_id)) is not None:
-                lines.append(f"{block.id} {provenance(block)}: {snippet}")
+                lines.append(f"{block.id} {provenance(block)}: {snippet}{outside}")
                 ids.append(hit.block_id)
             else:
                 lines.append(f"outline {hit.doc_id}: {snippet}")

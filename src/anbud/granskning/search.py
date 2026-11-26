@@ -40,7 +40,7 @@ class SearchIndex:
             "tokenize = 'trigram')"
         )
         rows: list[tuple[str | None, str, str, str]] = []
-        for block_id in corpus.order:
+        for block_id in corpus.all_order:  # excluded documents too
             block = corpus.blocks[block_id]
             rows.append((block.id, block.doc_id, "block", block.text))
         for entry in corpus.outline:

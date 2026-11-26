@@ -393,6 +393,7 @@ def test_the_summary_records_code_and_input_hashes(tender: Path) -> None:
     assert summary["code"] == code
     inputs = summary["inputs"]
     names = {"blocks", "cells", "tiles", "catalog", "customer_recipe", "default_recipe", "customer_repetition"}
+    names.add("selection_override")  # the tender's local selection override, when there is one
     assert set(inputs) == names
     assert len(inputs["blocks"]) == 64 and len(inputs["catalog"]) == 64
     assert "/" not in json.dumps(inputs)  # hashes only, never a path

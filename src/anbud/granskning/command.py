@@ -76,12 +76,12 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     from anbud.granskning import provenance
     from anbud.granskning.calc import load_calc
     from anbud.granskning.catalog import load_named_catalog
-    from anbud.granskning.corpus import Corpus
     from anbud.granskning.lenses import load_lenses
     from anbud.granskning.pipeline import run_pipeline
     from anbud.granskning.settings import load_settings
     from anbud.model_client import Budget, KeyMissing, ModelClient, keychain_key, make_sdk_client
     from anbud.prep.tender import IntakeStop
+    from anbud.selection import load_selected
     from anbud.store import RunStore, StoreError, check_run_id
 
     if getattr(args, "arm", None) is not None and kind != "dev":
@@ -123,7 +123,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             print(f"anbud run: unknown lens: {', '.join(sorted(unknown))}", file=sys.stderr)
             return PAID_REFUSED
         lenses = [lens for lens in lenses if lens.id in args.lens]
-    corpus = Corpus.load(prep_dir)
+    corpus, _ = load_selected(prep_dir)
     calc = load_calc(calc_dir)
     settings = load_settings()
     try:

@@ -27,6 +27,7 @@ from anbud.granskning.items import Item
 from anbud.granskning.kronor import is_minor, price, ranking_kronor
 from anbud.granskning.settings import Settings
 from anbud.models import MoneyBasis
+from anbud.selection import excluded_counts, excluded_label
 
 NOT_ALL_CLEAR = (
     "Täckningen visar bara vad granskningen läste och sökte. Den betyder inte att underlaget saknar fel eller risker."
@@ -175,6 +176,11 @@ class TenderCoverage(_Model):
     not_read_by_prep: list[str] = Field(default_factory=list)
     named_not_present: list[str] = Field(default_factory=list)
     unread_tiles: list[str] = Field(default_factory=list, description="Drawing or scan tiles no page card was read for")
+    other_discipline: str | None = Field(
+        default=None, description="Other trades' documents left out of the models' input: pages, documents, trades"
+    )
+    other_discipline_documents: list[str] = Field(default_factory=list, description="Each one: name (trade, pages)")
+    boundary_lines: int = 0
     lenses: list[LensCoverage] = Field(default_factory=list)
     note: str = NOT_ALL_CLEAR
 
@@ -288,9 +294,14 @@ def coverage(
 ) -> TenderCoverage:
     names = document_names(corpus)
     skipped = [f"{names.get(d['doc_id'], d['doc_id'])} ({d['skipped']})" for d in corpus.documents if d.get("skipped")]
+    pages = {d["doc_id"]: len(d.get("pages") or ()) for d in corpus.documents}
+    other = [f"{names.get(d, d)} ({t}, {pages.get(d, 0)} s.)" for d, t in corpus.excluded.items()]
     return TenderCoverage(
         documents=len(names),
         not_read_by_prep=skipped,
+        other_discipline=excluded_label(corpus) if corpus.excluded else None,
+        other_discipline_documents=other,
+        boundary_lines=excluded_counts(corpus)["boundary_lines"],
         named_not_present=list(named_not_present or []),
         unread_tiles=list(unread_tiles or []),
         lenses=[lens_coverage(r, corpus, names) for r in results],

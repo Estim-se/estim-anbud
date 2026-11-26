@@ -1,5 +1,9 @@
 """The prepared tender as one in-memory corpus: blocks by id in reading order, the outline and the tiles.
 
+`order` is what the models read; `all_order` is every block, the same unless the selection (`anbud.selection`) left
+another trade's documents out of `order`. Search and neighbours go over `all_order`, so excluded documents stay
+searchable; `excluded` maps each excluded document to its trade.
+
 Search (FTS5) lives with the tool loop; this module only loads and looks up.
 """
 
@@ -20,6 +24,12 @@ class Corpus:
     outline: list[OutlineEntry] = field(default_factory=list)
     tiles: dict[str, Tile] = field(default_factory=dict)
     documents: list[dict] = field(default_factory=list)
+    all_order: list[str] = field(default_factory=list)
+    excluded: dict[str, str] = field(default_factory=dict)  # doc_id -> trade, for documents outside `order`
+
+    def __post_init__(self) -> None:
+        if not self.all_order:
+            self.all_order = list(self.order)
 
     @classmethod
     def load(cls, prep_dir: Path) -> Corpus:
@@ -38,7 +48,7 @@ class Corpus:
         """The block with up to n blocks either side of it in the same document."""
         if block_id not in self.blocks:
             return []
-        i = self.order.index(block_id)
+        i = self.all_order.index(block_id)
         doc = self.blocks[block_id].doc_id
-        window = self.order[max(0, i - n) : i + n + 1]
+        window = self.all_order[max(0, i - n) : i + n + 1]
         return [self.blocks[b] for b in window if self.blocks[b].doc_id == doc]

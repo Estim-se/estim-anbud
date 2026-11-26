@@ -116,7 +116,13 @@ def doc_name(doc: dict[str, Any]) -> str:
     return defuse(PurePath(str(paths[0])).name) if paths else ""
 
 
-def _doc_header(doc: dict[str, Any], tile_ids: list[str]) -> str:
+EXCLUDED_NOTE = (
+    "A document marked excluded= belongs to another trade: only its lines that refer to the electrical work, with "
+    "their headings, are in this corpus. search_blocks and read_blocks reach all of its text."
+)
+
+
+def _doc_header(doc: dict[str, Any], tile_ids: list[str], excluded: str | None = None) -> str:
     parts = [doc["doc_id"], str(doc.get("kind", "")), f'"{doc_name(doc)}"']
     pages = doc.get("pages") or []
     sheets = doc.get("sheets") or []
@@ -129,6 +135,8 @@ def _doc_header(doc: dict[str, Any], tile_ids: list[str]) -> str:
         parts.append("tiles=" + ",".join(tile_ids))
     if doc.get("skipped"):
         parts.append(f"skipped={doc['skipped']}")
+    if excluded is not None:
+        parts.append(f'excluded="{defuse(excluded)}"')
     return " ".join(parts)
 
 
@@ -159,7 +167,10 @@ def corpus_text(corpus: Corpus) -> str:
     lines = ["<tender_corpus>", "<documents>"]
     order = _doc_order(corpus)
     for doc_id in order:
-        lines.append(_doc_header(docs.get(doc_id, {"doc_id": doc_id}), tiles.get(doc_id, [])))
+        doc = docs.get(doc_id, {"doc_id": doc_id})
+        lines.append(_doc_header(doc, tiles.get(doc_id, []), corpus.excluded.get(doc_id)))
+    if corpus.excluded:
+        lines.append(EXCLUDED_NOTE)
     lines.append("</documents>")
     for doc_id in order:
         blocks = by_doc.get(doc_id, [])

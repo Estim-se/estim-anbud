@@ -27,6 +27,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from anbud.granskning.catalog import Catalog
 from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Line, Post, assumed_posts
 from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered
+from anbud.selection import excluded_counts, excluded_label
 
 if TYPE_CHECKING:
     from anbud.granskning.corpus import Corpus
@@ -200,6 +201,8 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
 
 OVERVIEW_COLUMNS = [("Uppgift", 44), ("Värde", 24), ("Underlag", 50), ("Källa (block)", 18), ("Citat", 60)]
 TOP_ASSUMED = 3  # the assumed posts Översikt names, largest first
+OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
+BOUNDARY_LINES = "Rader i andra discipliners handlingar som rör elarbetena (lästa)"
 
 
 def _pct(part: Decimal, whole: Decimal) -> str:
@@ -229,7 +232,9 @@ def _assumed_rows(result: KalkylResult) -> list[tuple[Any, ...]]:
     return rows
 
 
-def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str, meta: dict) -> None:
+def _overview(
+    ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str, meta: dict, corpus: Corpus
+) -> None:
     _header(ws, catalog, status, run, OVERVIEW_COLUMNS)
     _put(ws, FIRST_ROW, 1, "Kalkyl (skugga)")
     ws.cell(row=FIRST_ROW, column=1).font = TITLE
@@ -265,6 +270,8 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Anslutningsposter för annans utrustning (tillagda av kod)", c["connection_posts"], None),
         ("Rader och stycken utan post", c["lines_not_handled"], None),
         ("varav ej omhändertagna (se Ej omhändertaget)", c["lines_unresolved"], None),
+        (OTHER_DISCIPLINE, excluded_label(corpus), None, "sökbara; räknas inte i Ej omhändertaget"),
+        (BOUNDARY_LINES, excluded_counts(corpus)["boundary_lines"], None),
         ("varav bortvalda med skäl (se Bortvalt med skäl)", c["lines_not_handled"] - c["lines_unresolved"], None),
         ("varav omfattningsstycken", c["scope_lines_not_handled"], None),
         ("Objekt lästa av kod ur objektlistan (som appen)", _code_objects(result), None),
@@ -426,7 +433,7 @@ def write_workbook(result: KalkylResult, corpus: Corpus, catalog: Catalog, meta:
     wb = Workbook()
     overview = wb.active
     overview.title = "Översikt"
-    _overview(overview, result, catalog, status, run, meta)
+    _overview(overview, result, catalog, status, run, meta, corpus)
     rows = _calc_sheet(wb.create_sheet("Kalkyl"), result, catalog, status, run)
     _evidence_sheet(wb.create_sheet("Underlag"), result, catalog, status, run)
     _objects_sheet(wb.create_sheet("Objektmodell"), result, catalog, status, run)

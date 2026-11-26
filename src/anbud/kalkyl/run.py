@@ -42,6 +42,7 @@ from anbud.kalkyl.tables import load_cells
 from anbud.kalkyl.xlsx import write_workbook
 from anbud.model_client import Budget, ModelClient
 from anbud.prep.tender import CELLS_FILE, IntakeStop
+from anbud.selection import OVERRIDE_FILE, SELECTION_FILE, Selection, SelectionError, load_selected
 from anbud.store import RunStore, canonical
 
 CHARS_PER_TOKEN = 3.0  # Swedish text with block markup; conservative, so the estimate errs high
@@ -53,10 +54,14 @@ class KalkylError(RuntimeError):
     """Raised with a reason that names no tender content."""
 
 
-def load_corpus(prep_dir: Path) -> Corpus:
+def load_corpus(prep_dir: Path) -> tuple[Corpus, Selection]:
+    """The prepared corpus with the selection applied: other trades' documents outside what the models read."""
     if not (prep_dir / "blocks.jsonl").exists():
         raise KalkylError("the tender has no prep output; run `anbud prep` first")
-    return Corpus.load(prep_dir)
+    try:
+        return load_selected(prep_dir)
+    except SelectionError as exc:
+        raise KalkylError(str(exc)) from None
 
 
 def card_source_runs(store: RunStore, tender_id: str) -> list[str]:
@@ -160,6 +165,7 @@ def input_hashes(company_id: str, tender: Path, catalog_name: str, root: Path | 
         "customer_recipe": _file_sha(customer_path(company_id, root)),
         "default_recipe": _file_sha(default_path(root)),
         "customer_repetition": _file_sha(repetition_path(company_id, root)),
+        "selection_override": _file_sha(tender / OVERRIDE_FILE),
     }
 
 
@@ -204,7 +210,7 @@ def run_dev_tender(
     config = config or load_config()
     kalkyl = kalkyl or load_kalkyl_config()
     tender = paths.dev_tender_dir(company_id, tender_id, root)
-    corpus = load_corpus(tender / "prep")
+    corpus, selection = load_corpus(tender / "prep")
     catalog = load(catalog_name or kalkyl.default_catalog, root)
     recipe = load_bound_recipe(company_id, catalog, root)
     store = RunStore(company_id, root)
@@ -236,6 +242,7 @@ def run_dev_tender(
     store.write_file(out / "kalkyl.xlsx", workbook)
     store.write_file(out / "posts.json", canonical([p.model_dump(mode="json") for p in result.calc_posts]))
     store.write_file(out / "result.json", result_json(result))
+    store.write_file(out / SELECTION_FILE, canonical(selection.to_json()))
     if cards.cards.masked:  # the originals stay local, like prep's masking report
         store.write_file(out / "cards_masking.json", canonical([m.model_dump(mode="json") for m in cards.cards.masked]))
     summary = {
@@ -248,6 +255,7 @@ def run_dev_tender(
         "cards": dict(cards.sources),
         "tiles_unread": len(cards.failed),
         "repetition": repetition.label if repetition else None,
+        "selection": selection.summary(),
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
         "persist_failures": client.persist_failures,
@@ -269,7 +277,7 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
     config = load_config()
     kalkyl = load_kalkyl_config()
     prep_dir = paths.dev_tender_dir(company_id, tender_id, root) / "prep"
-    corpus = load_corpus(prep_dir)
+    corpus, selection = load_corpus(prep_dir)
     cells = load_cells(prep_dir / CELLS_FILE)
     repetition = load_repetition(company_id, root)
     try:
@@ -308,6 +316,7 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
         "quantity_lines": sum(len(c.quantity_ids) for c in chunks),
         "scope_lines": sum(len(c.scope_ids) for c in chunks),
         "rows_with_cells": len(cells),
+        "selection": selection.summary(),
         "recipe": recipe.label if recipe else None,
         "repetition": repetition.label if repetition else None,
         "recipe_items": len(recipe.counts) if recipe else 0,
