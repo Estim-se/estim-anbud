@@ -1,46 +1,64 @@
 """`anbud intake`: new tenders from an incoming folder, split before anyone opens a file.
 
-The founder puts each tender in its own folder under `~/estim-anbud-data/incoming/<customer>/`, with the tender
+The founder puts each tender in its own folder under `~/estim-anbud-data/incoming/<company>/`, with the tender
 documents in `docs/` (zips are fine) and the bid calculation, if there is one, in `calc/`. Next to the folders,
 `metadata.csv` has one row per folder:
 
-    folder, client, property_owner, project_family, prospective
+    folder, client, property_owner, project_family, prospective[, forced_dev]
 
 Intake then:
-1. reads the CSV only, assigns each new folder the next neutral tender id, and runs the held-out split on the CSV's
-   attributes (the same grouping, seed and ledger as `anbud split`);
-2. records folder name -> tender id in the local registry, outside every repo;
-3. moves held-out and prospective folders, unopened, into `heldout/<company>/<tender>/` with a single rename;
-4. moves dev folders into `<company>/dev/<tender>/{inbox,calc}`, unpacks zips there (the zip itself goes to
-   `originals/`), and writes the sha256 manifests prep checks.
+1. recognises each delivery by a fingerprint, so a delivery seen before keeps its tender id and a new delivery that
+   reuses a registered name is refused before anything is written;
+2. assigns each new delivery the next neutral tender id and runs the held-out split on the CSV's attributes (the same
+   grouping, seed and ledger as `anbud split`);
+3. records name, fingerprint and tender id in the local registry, outside every repo;
+4. moves held-out and prospective folders, unopened, into `heldout/<company>/<tender>/` with a single rename;
+5. builds each dev tender in a staging folder: documents copied to `inbox/` with every `.zip` unpacked (nested zips
+   too), the calculation to `calc/`, the sha256 manifests prep checks, and the delivery itself, untouched, under
+   `originals/<fingerprint>`. One rename then puts the tender in place. On any error the staging folder is removed and
+   the delivery is back where it was, so a rerun simply tries again.
 
-No tender file is read before the split decides its status, and held-out files are never read at all. The screen gets
-counts only: folder names are customer and project names.
+A folder's fingerprint is a hash of its file names and sizes, so held-out files are never opened. The screen gets
+counts and tender ids only: folder and file names are customer and project names, and no error message carries one.
 """
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import errno
 import fcntl
 import hashlib
 import os
+import re
 import shutil
+import tempfile
 import tomllib
+import unicodedata
 import zipfile
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from anbud import paths
 from anbud.evals import split_heldout as sh
+from anbud.prep.sources import is_ignored
 from anbud.store import private_dirs
 
 COLUMNS = ("folder", "client", "property_owner", "project_family", "prospective")
-MAX_UNZIPPED = 2 * 1024**3
-MAX_ENTRIES = 20_000
+MAX_UNZIPPED = 2 * 1024**3  # per tender, across every nested zip
+MAX_ENTRIES = 20_000  # per tender, across every nested zip
+MAX_DEPTH = 5  # zips inside zips
+MAX_NAME_BYTES = 200  # one path component, so a long name in a zip can't fail the write
 
 
 class IntakeError(RuntimeError):
     """Raised with a reason that names no folder or file."""
+
+
+def nfc(name: str) -> str:
+    """The one form a name is compared and stored in: macOS may hand back the decomposed form of 'ö'."""
+    return unicodedata.normalize("NFC", name)
 
 
 @dataclass(frozen=True)
@@ -55,6 +73,8 @@ class Row:
 
 
 def read_rows(path: Path) -> list[Row]:
+    if not path.is_file() or path.is_symlink():
+        raise IntakeError("the incoming folder has no metadata.csv")
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         missing = [c for c in COLUMNS if c not in (reader.fieldnames or [])]
@@ -62,7 +82,7 @@ def read_rows(path: Path) -> list[Row]:
             raise IntakeError(f"metadata.csv is missing columns: {', '.join(missing)}")
         rows = []
         for line, raw in enumerate(reader, start=2):
-            folder = (raw["folder"] or "").strip()
+            folder = nfc((raw["folder"] or "").strip())
             if not folder or "/" in folder or folder.startswith("."):
                 raise IntakeError(f"metadata.csv line {line}: the folder must be a plain folder name")
             rows.append(
@@ -81,35 +101,81 @@ def read_rows(path: Path) -> list[Row]:
     return rows
 
 
-# The registry: [companies] co-NNN = "name"; [tenders.co-NNN] t-NNNN = "folder name". Local only.
+# The registry, local only:
+#   [companies]        co-NNN = "name"
+#   [tenders.co-NNN]   t-NNNN = "name as delivered"
+#   [hashes.co-NNN]    t-NNNN = "fingerprint of the delivery"
+# Any other table of strings is kept as it is.
+
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def load_registry(path: Path) -> dict:
+    if path.is_symlink():
+        raise IntakeError("the registry is a link; it must be a plain file in the data folder")
     return tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 def _toml_string(value: str) -> str:
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in value):
+        raise IntakeError("a name isn't valid text; rename it")
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return '"' + "".join(c if c >= " " else f"\\u{ord(c):04x}" for c in escaped) + '"'
+    return '"' + "".join(c if " " <= c != "\x7f" else f"\\u{ord(c):04x}" for c in escaped) + '"'
+
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_KEY.fullmatch(key) else _toml_string(key)
 
 
 def dump_registry(registry: dict) -> str:
-    lines = ["# Neutral id -> real name. Local only; never copy this anywhere.", "", "[companies]"]
-    lines += [f"{k} = {_toml_string(v)}" for k, v in sorted(registry.get("companies", {}).items())]
-    for company, tenders in sorted(registry.get("tenders", {}).items()):
-        lines += ["", f"[tenders.{company}]"]
-        lines += [f"{k} = {_toml_string(v)}" for k, v in sorted(tenders.items())]
+    """Every table of strings, one level of sub-tables. Anything else is refused rather than dropped."""
+    lines = ["# Neutral id -> real name. Local only; never copy this anywhere."]
+    for table in ["companies", *sorted(k for k in registry if k != "companies")]:
+        content = registry.get(table, {})
+        if not isinstance(content, dict):
+            raise IntakeError("the registry holds a value intake can't write back; fix it by hand")
+        strings = {k: v for k, v in content.items() if not isinstance(v, dict)}
+        if any(not isinstance(v, str) for v in strings.values()):
+            raise IntakeError("the registry holds a value intake can't write back; fix it by hand")
+        if strings or table == "companies":
+            lines += ["", f"[{_toml_key(table)}]"]
+            lines += [f"{_toml_key(k)} = {_toml_string(v)}" for k, v in sorted(strings.items())]
+        for sub, values in sorted((k, v) for k, v in content.items() if isinstance(v, dict)):
+            if any(not isinstance(v, str) for v in values.values()):
+                raise IntakeError("the registry holds a value intake can't write back; fix it by hand")
+            lines += ["", f"[{_toml_key(table)}.{_toml_key(sub)}]"]
+            lines += [f"{_toml_key(k)} = {_toml_string(v)}" for k, v in sorted(values.items())]
     return "\n".join(lines) + "\n"
 
 
 def _write_private(path: Path, text: str) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    """Atomic, private, and with a temp name of its own, so two writers never share one."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    private_dirs(path.parent)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise IntakeError("a lock file is a link; remove it") from None
+        raise
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def _next_ids(taken: set[str], count: int) -> list[str]:
@@ -118,115 +184,390 @@ def _next_ids(taken: set[str], count: int) -> list[str]:
     return [f"t-{n:04d}" for n in range(start, start + count)]
 
 
+# Files
+
+
+def _walk(folder: Path) -> Iterator[tuple[Path, tuple[str, ...]]]:
+    """Regular files under a folder with their relative parts, sorted, never through a link, ignored names left out."""
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+        here = Path(dirpath)
+        rel = here.relative_to(folder).parts
+        dirnames[:] = sorted(d for d in dirnames if not is_ignored((*rel, d)) and not (here / d).is_symlink())
+        for name in sorted(filenames):
+            path = here / name
+            if not is_ignored((*rel, name)) and not path.is_symlink() and path.is_file():
+                yield path, (*rel, name)
+
+
+def _sha256_file(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
 def _manifest(folder: Path) -> str:
-    lines = []
-    for path in sorted(p for p in folder.rglob("*") if p.is_file() and not p.is_symlink()):
-        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(folder).as_posix()}")
+    lines = [f"{_sha256_file(path)}  {'/'.join(parts)}" for path, parts in _walk(folder)]
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def _safe_unzip(archive: Path, target: Path) -> None:
-    with zipfile.ZipFile(archive) as zf:
-        infos = zf.infolist()
-        if len(infos) > MAX_ENTRIES or sum(i.file_size for i in infos) > MAX_UNZIPPED:
-            raise IntakeError("a zip unpacks to more than the limit")
-        for info in infos:
-            name = PurePosixPath(info.filename.replace("\\", "/"))
-            link = (info.external_attr >> 16) & 0o170000 == 0o120000
-            if info.is_dir() or name.is_absolute() or ".." in name.parts or link:
-                continue  # directories, escapes and symlinks are not unpacked
-            dest = target.joinpath(*name.parts)
-            private_dirs(dest.parent)
-            with zf.open(info) as src, open(dest, "xb") as out:
-                shutil.copyfileobj(src, out)
-            os.chmod(dest, 0o600)
+def folder_fingerprint(folder: Path) -> str:
+    """A hash of every file's name and size: tells deliveries apart without opening a single file."""
+    digest = hashlib.sha256(b"anbud-folder-v1\0")
+    for path, parts in _walk(folder):
+        digest.update(nfc("/".join(parts)).encode("utf-8", "surrogatepass") + b"\0")
+        digest.update(str(path.stat().st_size).encode() + b"\0")
+    return digest.hexdigest()
 
 
-def _place_dev(source: Path, tender_dir: Path) -> None:
-    docs = source / "docs" if (source / "docs").is_dir() else source
-    inbox, calc, originals = tender_dir / "inbox", tender_dir / "calc", tender_dir / "originals"
-    private_dirs(tender_dir)
-    if (source / "calc").is_dir():
-        os.rename(source / "calc", calc)
-    if docs is source:
-        private_dirs(inbox)
-        for entry in sorted(source.iterdir()):
-            if entry.name != "calc":
-                os.rename(entry, inbox / entry.name)
-        source.rmdir()
-    else:
-        os.rename(docs, inbox)
-        leftovers = sorted(source.iterdir())
-        if leftovers:
-            private_dirs(originals)
-            for entry in leftovers:
-                os.rename(entry, originals / entry.name)
-        source.rmdir()
-    for archive in sorted(p for p in inbox.rglob("*") if p.is_file() and zipfile.is_zipfile(p)):
-        if archive.suffix.lower() in (".xlsx", ".xlsm", ".docx"):
+def _copy_tree(source: Path, target: Path, skip_top: frozenset[str] = frozenset()) -> None:
+    for path, parts in _walk(source):
+        if parts[0] in skip_top:
             continue
-        _safe_unzip(archive, archive.with_suffix(""))
-        private_dirs(originals)
-        os.rename(archive, originals / archive.name)
-    _write_private(tender_dir / "inbox.sha256", _manifest(inbox))
-    if calc.is_dir():
-        _write_private(tender_dir / "calc.sha256", _manifest(calc))
+        dest = target.joinpath(*parts)
+        private_dirs(dest.parent)
+        shutil.copyfile(path, dest, follow_symlinks=False)
+        os.chmod(dest, 0o600)
 
 
-def intake(company_id: str, incoming: Path, root: Path | None = None, new_ledger: bool = False) -> dict[str, int]:
-    base = (root or paths.data_root()).expanduser()
-    paths.check_company_id(company_id)
-    if paths.is_sealed_path(incoming, root):
-        raise IntakeError("the incoming folder is inside held-out or sealed storage")
+def _free(path: Path) -> Path:
+    """`path`, or `name (2).ext`, `name (3).ext` ... when it is taken (a case-insensitive disk folds 'A' and 'a')."""
+    if not path.exists() and not path.is_symlink():
+        return path
+    for n in range(2, 10_000):
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise IntakeError("too many files with one name")
+
+
+def _short(part: str) -> str:
+    """A path component cut to MAX_NAME_BYTES, keeping its extension."""
+    if len(part.encode()) <= MAX_NAME_BYTES:
+        return part
+    stem, dot, suffix = part.rpartition(".")
+    if not dot or len(suffix) > 16:
+        stem, suffix = part, ""
+    keep = MAX_NAME_BYTES - len(suffix.encode()) - 1
+    cut = stem.encode()[:keep].decode("utf-8", "ignore")
+    return f"{cut}.{suffix}" if suffix else cut
+
+
+# Unpacking
+
+
+@dataclass
+class UnpackStats:
+    bytes: int = 0
+    entries: int = 0
+    archives_unpacked: int = 0
+    archives_kept: int = 0  # encrypted, damaged, unsupported, too deep or over the limit: left as delivered
+    entries_skipped: int = 0  # links, paths that escape, hidden and system files
+
+
+class _Keep(Exception):
+    """This archive stays in the inbox as delivered."""
+
+
+def _entry_name(info: zipfile.ZipInfo) -> str:
+    """Zips written without the UTF-8 flag are read as cp437. If the bytes are really UTF-8 (a Mac without the
+    flag), read them as UTF-8; otherwise cp437, which spells å, ä and ö like the Swedish Windows code page does."""
+    name = info.filename
+    if not info.flag_bits & 0x800:
+        with contextlib.suppress(UnicodeEncodeError, UnicodeDecodeError):
+            name = name.encode("cp437").decode("utf-8")
+    return nfc(name)
+
+
+def _safe_unzip(archive: Path, target: Path, stats: UnpackStats) -> list[Path]:
+    """Unpack into `target` (which must not exist) and return the files written. Raises _Keep, after removing what
+    it wrote, when the archive can't be unpacked whole."""
+    written: list[Path] = []
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            infos = [i for i in zf.infolist() if not i.is_dir()]
+            if stats.entries + len(infos) > MAX_ENTRIES or stats.bytes + sum(i.file_size for i in infos) > MAX_UNZIPPED:
+                raise _Keep
+            if any(i.flag_bits & 0x1 for i in infos):
+                raise _Keep  # encrypted
+            private_dirs(target)
+            for info in infos:
+                name = PurePosixPath(_entry_name(info).replace("\\", "/"))
+                parts = tuple(p for p in name.parts if p not in ("", "."))
+                link = (info.external_attr >> 16) & 0o170000 == 0o120000
+                if not parts or name.is_absolute() or ".." in parts or ":" in parts[0] or link or is_ignored(parts):
+                    stats.entries_skipped += 1
+                    continue
+                dest = _free(target.joinpath(*(_short(p) for p in parts)))
+                private_dirs(dest.parent)
+                with zf.open(info) as src, open(dest, "xb") as out:
+                    shutil.copyfileobj(src, out)
+                os.chmod(dest, 0o600)
+                written.append(dest)
+            stats.entries += len(infos)
+            stats.bytes += sum(i.file_size for i in infos)
+    except (_Keep, zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, RuntimeError, EOFError, OSError):
+        # RuntimeError: encrypted entries; NotImplementedError: Deflate64 and other methods zipfile can't read;
+        # OSError: a damaged stream (zlib) or a name the disk refuses. The message may name a file, so it is dropped.
+        if target.exists():
+            shutil.rmtree(target)
+        raise _Keep from None
+    return written
+
+
+def _is_zip(path: Path) -> bool:
+    """Only `.zip` files are unpacked: an xlsx, docx, pptx or odt is a zip inside but a document to prep."""
+    return path.suffix.casefold() == ".zip" and zipfile.is_zipfile(path)
+
+
+def unpack_all(inbox: Path, stats: UnpackStats) -> None:
+    """Unpack every `.zip` in the inbox into a folder next to it, then the zips that came out, MAX_DEPTH deep. An
+    unpacked zip is removed from the inbox: the delivery under `originals/` still holds it."""
+    pending = [(p, 1) for p, _ in _walk(inbox) if _is_zip(p)]
+    while pending:
+        archive, depth = pending.pop(0)
+        if depth > MAX_DEPTH:
+            stats.archives_kept += 1
+            continue
+        staging = _free(archive.with_name(f".unpacking-{archive.name}"))
+        try:
+            written = _safe_unzip(archive, staging, stats)
+        except _Keep:
+            stats.archives_kept += 1
+            continue
+        dest = _free(archive.with_name(_short(archive.stem) or "zip"))
+        os.rename(staging, dest)
+        archive.unlink()
+        stats.archives_unpacked += 1
+        for path in written:
+            inner = dest / path.relative_to(staging)
+            if _is_zip(inner):
+                pending.append((inner, depth + 1))
+
+
+# Deliveries
+
+
+@dataclass
+class Delivery:
+    name: str  # as delivered, NFC; local only, never printed
+    path: Path
+    fingerprint: str
+    keys: tuple[str, ...] = ()
+    prospective: bool = False
+    forced_dev: bool = False
+    tender_id: str = ""
+
+
+@dataclass
+class Result:
+    dev: int = 0
+    heldout: int = 0
+    prospective: int = 0
+    burned: int = 0
+    already_in: int = 0
+    failed: list[str] = field(default_factory=list)  # tender ids, with the error type: "t-0003 BadZipFile"
+    unpack: UnpackStats = field(default_factory=UnpackStats)
+
+    def counts(self) -> dict[str, int]:
+        return {"dev": self.dev, "heldout": self.heldout, "prospective": self.prospective, "burned": self.burned}
+
+
+def _placed(base: Path, company_id: str, tender_id: str, root: Path | None) -> bool:
+    return (
+        paths.dev_tender_dir(company_id, tender_id, root).exists()
+        or (base / "heldout" / company_id / tender_id).exists()
+    )
+
+
+def _staging(company_id: str, tender_id: str, root: Path | None) -> Path:
+    return paths.company_dir(company_id, root) / "dev" / f".staging-{tender_id}"
+
+
+def _recover(company_id: str, incoming: Path, names: dict[str, str], root: Path | None) -> None:
+    """Undo placements a crash interrupted: the delivery goes back to the incoming folder under its registered name,
+    and the staging folder is removed, so this run places the tender again."""
+    dev = paths.company_dir(company_id, root) / "dev"
+    if not dev.is_dir():
+        return
+    for staging in sorted(dev.glob(".staging-t-*")):
+        tender_id = staging.name.removeprefix(".staging-")
+        originals = staging / "originals"
+        delivered = sorted(originals.iterdir()) if originals.is_dir() else []
+        if delivered:
+            name = names.get(tender_id)
+            if len(delivered) != 1 or not name or (incoming / name).exists():
+                raise IntakeError(f"{tender_id} has an interrupted placement that needs a person; nothing was moved")
+            os.rename(delivered[0], incoming / name)
+        shutil.rmtree(staging)
+
+
+def _place_dev(delivery: Delivery, company_id: str, root: Path | None, stats: UnpackStats) -> None:
+    target = paths.dev_tender_dir(company_id, delivery.tender_id, root)
+    staging = _staging(company_id, delivery.tender_id, root)
+    if target.exists() or staging.exists():
+        raise IntakeError(f"{delivery.tender_id} already has a dev folder; nothing was moved for it")
+    private_dirs(staging)
+    moved = staging / "originals" / delivery.fingerprint
+    try:
+        source = delivery.path
+        docs = source / "docs" if (source / "docs").is_dir() and not (source / "docs").is_symlink() else source
+        _copy_tree(docs, staging / "inbox", skip_top=frozenset({"calc"}) if docs is source else frozenset())
+        private_dirs(staging / "inbox")
+        calc = source / "calc"
+        if calc.is_dir() and not calc.is_symlink():
+            _copy_tree(calc, staging / "calc")
+        unpack_all(staging / "inbox", stats)
+        _write_private(staging / "inbox.sha256", _manifest(staging / "inbox"))
+        if (staging / "calc").is_dir():
+            _write_private(staging / "calc.sha256", _manifest(staging / "calc"))
+        private_dirs(moved.parent)
+        os.rename(source, moved)  # the commit begins: the delivery leaves the incoming folder...
+        try:
+            os.rename(staging, target)  # ...and the tender appears, whole, in one rename
+        except BaseException:
+            os.rename(moved, source)
+            raise
+    except BaseException:
+        if moved.exists() or moved.is_symlink():
+            raise  # the delivery is still inside: the next run's _recover puts it back
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+
+
+def _place_heldout(delivery: Delivery, base: Path, company_id: str) -> None:
+    target = base / "heldout" / company_id / delivery.tender_id
+    if target.exists():
+        raise IntakeError(f"{delivery.tender_id} already has a held-out folder; nothing was moved for it")
+    private_dirs(target.parent)
+    os.rename(delivery.path, target)  # unopened: one rename, nothing read
+
+
+def _check_ledger(ledger: Path, new_ledger: bool) -> None:
+    # is_symlink() first: a dangling link isn't there for exists(), and appending would create its target elsewhere.
+    if ledger.is_symlink() or ledger.parent.is_symlink():
+        raise IntakeError("the split ledger is a link; it must be a plain file in the company folder")
+    if new_ledger and ledger.exists():
+        raise IntakeError("this company already has a ledger; leave out --new-ledger")
+    if not new_ledger and not ledger.exists():
+        raise IntakeError("this company has no ledger yet; for its first intake, add --new-ledger")
+
+
+def _folder_deliveries(incoming: Path) -> list[Delivery]:
     rows = read_rows(incoming / "metadata.csv")
-    present = {p.name for p in incoming.iterdir() if p.is_dir() and not p.name.startswith(".")}
-    unlisted = present - {r.folder for r in rows}
+    present = {
+        nfc(p.name): p for p in incoming.iterdir() if p.is_dir() and not p.is_symlink() and not is_ignored([p.name])
+    }
+    unlisted = set(present) - {r.folder for r in rows}
     if unlisted:
         raise IntakeError(f"{len(unlisted)} folder(s) have no row in metadata.csv; every tender needs one")
-    rows = [r for r in rows if r.folder in present]  # rows whose folder was already moved are skipped
+    deliveries = []
+    for r in rows:
+        if r.folder not in present:
+            continue  # already taken in on an earlier run
+        if r.prospective and r.forced_dev:
+            raise IntakeError(f"metadata.csv line {r.line}: a tender can't be both prospective and forced dev")
+        keys = sh.group_keys(r.client, r.property_owner, r.project_family, r.line)
+        if not r.prospective and not sh.normalise(r.client):
+            raise IntakeError(f"metadata.csv line {r.line}: client or main contractor is required")
+        path = present[r.folder]
+        deliveries.append(Delivery(r.folder, path, folder_fingerprint(path), keys, r.prospective, r.forced_dev))
+    return deliveries
+
+
+def intake(
+    company_id: str,
+    incoming: Path,
+    root: Path | None = None,
+    new_ledger: bool = False,
+    company_name: str | None = None,
+) -> Result:
+    base = (root or paths.data_root()).expanduser()
+    try:
+        paths.check_company_id(company_id)
+    except ValueError as exc:
+        raise IntakeError(str(exc)) from None
+    incoming = incoming.expanduser()
+    if incoming.is_symlink() or not incoming.is_dir():
+        raise IntakeError("the incoming folder doesn't exist or is a link")
+    if paths.is_sealed_path(incoming, root):
+        raise IntakeError("the incoming folder is inside held-out or sealed storage")
     registry_path = base / "registry.toml"
     ledger = paths.ledger_path(company_id, root)
-    private_dirs(ledger.parent)
-    with (ledger.parent / "ledger.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        registry = load_registry(registry_path)
-        companies = registry.setdefault("companies", {})
-        companies.setdefault(company_id, incoming.name)
-        tenders = registry.setdefault("tenders", {}).setdefault(company_id, {})
-        by_folder = {v: k for k, v in tenders.items()}
-        state = sh.load_ledger(ledger) if ledger.exists() else sh.LedgerState()
-        if not ledger.exists() and not new_ledger:
-            raise IntakeError("this company has no ledger yet; for its first intake, add --new-ledger")
-        fresh = [r for r in rows if r.folder not in by_folder]
-        for row, tid in zip(fresh, _next_ids(set(tenders) | set(state.status), len(fresh)), strict=True):
-            by_folder[row.folder] = tid
-        split_rows = []
-        for r in rows:
-            keys = sh.group_keys(r.client, r.property_owner, r.project_family, r.line)
-            if not r.prospective and not sh.normalise(r.client):
-                raise IntakeError(f"metadata.csv line {r.line}: client or main contractor is required")
-            split_rows.append(sh.TenderRow(by_folder[r.folder], keys, r.prospective, r.forced_dev))
-        events = sh.plan_split(state, split_rows)
-        if events:
-            sh.append_events(ledger, events)
-        burned = sum(1 for e in events if e["event"] == "burn")
-        for row in rows:
-            tenders[by_folder[row.folder]] = row.folder
-        _write_private(registry_path, dump_registry(registry))
-        status = sh.load_ledger(ledger).status
-    moved = {sh.DEV: 0, sh.HELDOUT: 0, sh.PROSPECTIVE: 0}
-    for row in rows:
-        tid = by_folder[row.folder]
-        source = incoming / row.folder
-        if status[tid] == sh.DEV:
-            target = paths.dev_tender_dir(company_id, tid, root)
-            if target.exists():
-                raise IntakeError(f"{tid} already has a dev folder; nothing was moved for it")
-            _place_dev(source, target)
-        else:
-            target = base / "heldout" / company_id / tid
-            private_dirs(target.parent)
-            os.rename(source, target)  # unopened: one rename, nothing read
-        moved[status[tid]] += 1
+    result = Result()
+    # One lock for the registry, which every company shares, then the company's ledger lock (the order `anbud split`
+    # can't break: it takes the ledger lock only). Both are held until every tender is placed.
+    with _locked(base / "registry.lock"):
+        _check_ledger(ledger, new_ledger)
+        private_dirs(ledger.parent)
+        with _locked(ledger.parent / "ledger.lock"):
+            registry = load_registry(registry_path)
+            tenders = registry.setdefault("tenders", {}).setdefault(company_id, {})
+            hashes = registry.setdefault("hashes", {}).setdefault(company_id, {})
+            _recover(company_id, incoming, tenders, root)
+            deliveries = _folder_deliveries(incoming)
+            todo = _identify(deliveries, tenders, hashes, base, company_id, root, result)
+            state = sh.load_ledger(ledger)
+            fresh = [d for d in todo if not d.tender_id]
+            for delivery, tender_id in zip(fresh, _next_ids(set(tenders) | set(state.status), len(fresh)), strict=True):
+                delivery.tender_id = tender_id
+            rows = [sh.TenderRow(d.tender_id, d.keys, d.prospective, d.forced_dev) for d in todo]
+            events = sh.plan_split(state, rows)
+            result.burned = sum(1 for e in events if e["event"] == "burn")
+            # The registry first: if the append below never happens, the next run finds these ids by fingerprint
+            # and assigns them then. The other order would leave ledger ids that no delivery maps to.
+            registry.setdefault("companies", {}).setdefault(company_id, company_name or company_id)
+            for d in todo:
+                tenders[d.tender_id] = d.name
+                hashes[d.tender_id] = d.fingerprint
+            _write_private(registry_path, dump_registry(registry))
+            if events:
+                sh.append_events(ledger, events)
+            status = sh.load_ledger(ledger).status
+            for d in todo:
+                try:
+                    if status[d.tender_id] == sh.DEV:
+                        _place_dev(d, company_id, root, result.unpack)
+                        result.dev += 1
+                    else:
+                        _place_heldout(d, base, company_id)
+                        if status[d.tender_id] == sh.HELDOUT:
+                            result.heldout += 1
+                        else:
+                            result.prospective += 1
+                except Exception as exc:  # noqa: BLE001 - other messages may name a file; the type and id are enough
+                    reason = str(exc) if isinstance(exc, IntakeError) else type(exc).__name__
+                    result.failed.append(f"{d.tender_id}: {reason.removeprefix(d.tender_id + ' ')}")
     # A burn moves an earlier held-out tender to dev in the ledger; its folder stays in heldout/ for a person to move.
-    return {"dev": moved[sh.DEV], "heldout": moved[sh.HELDOUT], "prospective": moved[sh.PROSPECTIVE], "burned": burned}
+    return result
+
+
+def _identify(
+    deliveries: list[Delivery],
+    tenders: dict[str, str],
+    hashes: dict[str, str],
+    base: Path,
+    company_id: str,
+    root: Path | None,
+    result: Result,
+) -> list[Delivery]:
+    """Match each delivery to a registered tender by fingerprint. A new delivery under a registered name is refused
+    before anything is written: treating it as the old tender would log an update that could burn held-out tenders."""
+    by_hash = {v: k for k, v in hashes.items()}
+    by_name = {nfc(v): k for k, v in tenders.items()}
+    if len({d.fingerprint for d in deliveries}) != len(deliveries):
+        raise IntakeError("two deliveries in the incoming folder are identical; remove one")
+    clashes = sum(1 for d in deliveries if d.fingerprint not in by_hash and d.name in by_name)
+    if clashes:
+        raise IntakeError(
+            f"{clashes} new deliver{'y has' if clashes == 1 else 'ies have'} the name of a registered tender; "
+            "rename and run again. Nothing was written"
+        )
+    todo = []
+    for d in deliveries:
+        if d.fingerprint in by_hash:
+            d.tender_id = by_hash[d.fingerprint]
+            if _placed(base, company_id, d.tender_id, root):
+                result.already_in += 1  # the same delivery again; left where it is
+                continue
+        todo.append(d)
+    return todo

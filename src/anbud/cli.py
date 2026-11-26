@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from anbud.runguard import RunRefused, check_run_allowed, held_out_refusal
 
@@ -72,16 +73,31 @@ def _intake(args: argparse.Namespace) -> int:
     from anbud.intake import IntakeError, intake
 
     try:
-        moved = intake(args.company_id, args.incoming.expanduser(), new_ledger=args.new_ledger)
-    except (IntakeError, SplitError, ValueError, OSError) as exc:
-        message = str(exc) if isinstance(exc, IntakeError | SplitError | ValueError) else type(exc).__name__
+        result = intake(
+            args.company_id, args.incoming.expanduser(), new_ledger=args.new_ledger, company_name=args.company_name
+        )
+    except Exception as exc:  # noqa: BLE001 - a traceback or message could name a file: only ours are printed
+        message = str(exc) if isinstance(exc, IntakeError | SplitError) else type(exc).__name__
         print(f"anbud intake: stopped: {message}", file=sys.stderr)
         return REFUSED
-    print(
-        f"anbud intake: {moved['dev']} dev, {moved['heldout']} held-out, {moved['prospective']} prospective, "
-        f"{moved['burned']} burned"
-    )
+    for line in intake_report(result):
+        print(line)
+    if result.failed:
+        print(f"anbud intake: {len(result.failed)} not placed: {'; '.join(result.failed)}", file=sys.stderr)
+        print("anbud intake: each one is back in the incoming folder; run intake again", file=sys.stderr)
+        return 1
     return 0
+
+
+def intake_report(result: Any) -> list[str]:
+    """Counts only."""
+    u = result.unpack
+    return [
+        f"anbud intake: {result.dev} dev, {result.heldout} held-out, {result.prospective} prospective, "
+        f"{result.burned} burned, {result.already_in} already taken in",
+        f"  zips: {u.archives_unpacked} unpacked, {u.archives_kept} kept as delivered; {u.entries} entries, "
+        f"{u.entries_skipped} skipped (links, escaping paths, hidden or system files)",
+    ]
 
 
 def _stop(args: argparse.Namespace) -> int:
@@ -148,8 +164,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
     intake = sub.add_parser("intake", help="split new tenders from an incoming folder, then move them unopened")
     intake.add_argument("company_id")
-    intake.add_argument("incoming", type=Path, help="~/estim-anbud-data/incoming/<customer>/ with metadata.csv")
+    intake.add_argument("incoming", type=Path, help="~/estim-anbud-data/incoming/<company>/ with metadata.csv")
     intake.add_argument("--new-ledger", action="store_true", help="the company's first intake")
+    intake.add_argument("--company-name", help="the company's name in the local registry, on its first intake")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
     stop.add_argument("company_id", nargs="?")
     stop.add_argument("run_id", nargs="?")

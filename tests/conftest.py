@@ -43,6 +43,16 @@ def local_env(names_file: Path) -> dict[str, str]:
     return {"ANBUD_NAMES_FILE": str(names_file)}
 
 
+@pytest.fixture(autouse=True)
+def _never_the_real_data_root(tmp_path_factory: pytest.TempPathFactory) -> object:
+    """No test reaches ~/estim-anbud-data, not even one whose monkeypatch.undo() also undoes `data_root`: that
+    leaves this fallback in place, because it is set on a MonkeyPatch of its own."""
+    patch = pytest.MonkeyPatch()
+    patch.setenv("ANBUD_DATA_ROOT", str(tmp_path_factory.mktemp("not-the-real-data")))
+    yield
+    patch.undo()
+
+
 @pytest.fixture
 def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "data"
