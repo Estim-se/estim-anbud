@@ -17,6 +17,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from anbud.prep.html import looks_like_mime
 from anbud.prep.model import DocKind
 from anbud.prep.text import doc_id_of
 
@@ -24,6 +25,8 @@ MAX_FILE_BYTES = 512 * 1024 * 1024
 IGNORED_NAMES = frozenset({"__macosx", "thumbs.db", "desktop.ini"})
 MAX_UNZIPPED_BYTES = 1024 * 1024 * 1024
 MAX_ZIP_ENTRIES = 20_000
+_HTML_SUFFIXES = (".html", ".htm", ".xhtml")
+_MHTML_SUFFIXES = (".mht", ".mhtml")
 
 
 class SourceError(RuntimeError):
@@ -64,6 +67,31 @@ def _zip_kind(data: bytes) -> DocKind:
     return "archive"
 
 
+def _looks_like_html(head: bytes) -> bool:
+    """Markup at the start, after a byte order mark, whitespace and comments such as a browser's "saved from" line."""
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        head = head.decode("utf-16", errors="ignore").encode("ascii", errors="ignore")
+    text = head.removeprefix(b"\xef\xbb\xbf").lstrip().lower()
+    while text.startswith(b"<!--"):
+        end = text.find(b"-->")
+        if end < 0:
+            return False
+        text = text[end + 3 :].lstrip()
+    if text.startswith((b"<!doctype html", b"<html")):
+        return True
+    return text.startswith(b"<?xml") and b"<html" in text
+
+
+def _html_kind(data: bytes, suffix: str) -> bool:
+    """A saved web page: HTML by content or by name, MHTML, or a Safari web archive."""
+    head = data[:1024]
+    if suffix == ".webarchive" and head.startswith(b"bplist00"):
+        return True
+    if suffix in _MHTML_SUFFIXES or (looks_like_mime(data[:4096]) and b"multipart/related" in data[:4096].lower()):
+        return True
+    return _looks_like_html(head) or (suffix in _HTML_SUFFIXES and b"\x00" not in head)
+
+
 def detect_kind(data: bytes, name: str) -> DocKind:
     head = data[:1024]
     if b"%PDF-" in head:
@@ -80,8 +108,11 @@ def detect_kind(data: bytes, name: str) -> DocKind:
         return "image"
     if head.startswith((b"Rar!", b"7z\xbc\xaf\x27\x1c", b"\x1f\x8b")):
         return "archive"
-    if Path(name).suffix.lower() in (".txt", ".md") and b"\x00" not in head:
-        return "text"
+    suffix = Path(name).suffix.lower()
+    if suffix in (".txt", ".md") and b"\x00" not in head:
+        return "text"  # as before web pages were read: a note stays a note, whatever markup it starts with
+    if _html_kind(data, suffix):
+        return "html"
     return "other"
 
 
