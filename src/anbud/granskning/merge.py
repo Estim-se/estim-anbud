@@ -130,8 +130,8 @@ def _accept(group: list[Item], outputs: list[Flag], corpus: Corpus) -> list[Item
         return None
     wanted = {_key(c) for i in group for c in i.flag.citations}
     got = [_key(c) for f in outputs for c in f.citations]
-    if set(got) != wanted:
-        return None
+    if set(got) != wanted or len({fingerprint(f) for f in outputs}) != len(outputs):
+        return None  # a citation dropped or added, or two merged flags that later steps couldn't tell apart
     searches = {_search_key(s) for i in group for s in i.flag.searches}
     merged = []
     for flag in outputs:
