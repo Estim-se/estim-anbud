@@ -2,6 +2,8 @@
 /.github/ @ibbe-futureventures
 /.claude/ @ibbe-futureventures
 /lenses/ @ibbe-futureventures
+/schemas/ @ibbe-futureventures
+/src/anbud/tools.py @ibbe-futureventures
 /evals/thresholds/ @ibbe-futureventures
 /config/providers.toml @ibbe-futureventures
 /config/prices.toml @ibbe-futureventures
