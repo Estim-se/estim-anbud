@@ -102,7 +102,7 @@ def test_a_call_streams_the_plain_request_with_the_shared_tools() -> None:
     assert map_params["max_tokens"] == 64 and map_params["output_config"] == {"effort": "low"}
     assert map_params["tool_choice"] == {"type": "auto"}
     assert map_params["tools"] == lens_params["tools"] == verifier_params["tools"]
-    assert len(map_params["tools"]) == 9
+    assert len(map_params["tools"]) == 10
     assert "tools" not in cards_params and "tool_choice" not in cards_params
     for params in fake.sent:
         assert not {"thinking", "temperature", "top_p", "top_k"} & params.keys()
@@ -256,7 +256,7 @@ def test_compile_check_calls_each_model_once(monkeypatch: pytest.MonkeyPatch, ca
     monkeypatch.setattr(schema_check, "make_sdk_client", lambda config, key: SimpleNamespace(messages=fake))
     assert schema_check.main(["--compile"]) == 0
     assert sorted(p["model"] for p in fake.sent) == ["claude-opus-5-5", "claude-sonnet-5-5"]
-    assert all(len(p["tools"]) == 9 and p["max_tokens"] == 64 for p in fake.sent)
+    assert all(len(p["tools"]) == 10 and p["max_tokens"] == 64 for p in fake.sent)
     out = capsys.readouterr().out
     assert "accepted" in out and "sk-test-value" not in out
 

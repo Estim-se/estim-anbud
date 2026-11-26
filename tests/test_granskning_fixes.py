@@ -164,7 +164,7 @@ def test_the_report_cap_comes_from_settings() -> None:
         max_shown=settings.max_shown,
         cost_usd=1.234,
     )
-    assert "Högst 5 flaggor visas" in render_html(report)
+    assert "Högst 5 prissatta flaggor och 10 krav utan prisuppgift visas" in render_html(report)
     about = build_workbook(report)["Om rapporten"]
     assert ("Modellkostnad (USD)", 1.23) in [(r[0].value, r[1].value) for r in about.iter_rows()]
 

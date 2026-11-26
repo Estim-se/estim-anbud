@@ -28,7 +28,7 @@ class Kronor(_Model):
 
 
 Verification = Literal["verified", "sample", "failed", "not_selected"]
-Placement = Literal["shown", "generic", "minor", "refuted", "covered", "capped", "zero"]
+Placement = Literal["shown", "shown_unpriced", "generic", "minor", "refuted", "covered", "capped", "zero"]
 
 
 class Item(_Model):
