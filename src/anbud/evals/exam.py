@@ -17,7 +17,8 @@ Per tender of the split status asked for:
 3. **The estimate**, from prep sizes: each engine's own dry run (Granskning's prefix tokens, Kalkyl's cost range) and
    the old engine's measured cost per page, times a margin, per engine and in total, beside the worst case (every
    hard stop). Without `--paid` the exam stops here, after the old engine's dry run on each input.
-4. **Runs** (`--paid`, with a `--budget` at or above the estimate): Granskning on the granskning input, Kalkyl on the
+4. **Runs** (`--paid`, with a scoring plan registered with `anbud freeze plan` and a `--budget` at or above the
+   estimate): Granskning on the granskning input, Kalkyl on the
    kalkyl input, and the old engine at matched settings on both (once when they're the same). A run is not started
    when it could take the spend past the budget. Each run is frozen into the sealed ledger with the variant it used,
    its settings and whether it came after the tender's deadline.
@@ -427,6 +428,7 @@ class Report:
     prepared: int = 0
     prep_failed: int = 0
     documents: int = 0
+    skipped_by_type: dict[str, int] = field(default_factory=dict)
     pages: int = 0
     deadlines: Deadlines | None = None
     estimate_usd: dict[str, float] = field(default_factory=dict)
@@ -436,6 +438,7 @@ class Report:
     dry_runs_ok: dict[str, int] = field(default_factory=dict)
     dry_runs: dict[str, int] = field(default_factory=dict)
     paid: bool = False
+    plan: dict[str, Any] | None = None
     runs_ok: dict[str, int] = field(default_factory=dict)
     runs_failed: dict[str, int] = field(default_factory=dict)
     runs_skipped_budget: int = 0
@@ -461,6 +464,15 @@ def _summary(tender: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _skipped(tender: Path) -> Counter[str]:
+    """Prep's skipped files by type, from its documents.json (each entry's kind; the reason is never read)."""
+    try:
+        documents = json.loads((tender / "prep" / "documents.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return Counter()
+    return Counter(str(d.get("kind")) for d in documents if isinstance(d, dict) and d.get("skipped"))
+
+
 def run_exam(
     company_id: str,
     kind: str,
@@ -484,6 +496,14 @@ def run_exam(
     unknown = set(engines) - set(ENGINES)
     if unknown:
         raise ExamError(f"engines are {', '.join(ENGINES)}")
+    plan: dict[str, Any] | None = None
+    if paid:
+        try:
+            plan = freeze.current_plan(company_id, root)
+        except freeze.FreezeError as exc:
+            raise ExamError(str(exc)) from None
+        if plan is None:
+            raise ExamError("a paid exam needs a scoring plan registered first: anbud freeze plan <co> <file>")
     now = now or datetime.now(UTC)
     local_now = local_now or datetime.now()
     try:
@@ -492,6 +512,8 @@ def run_exam(
         raise ExamError(str(exc)) from None
     tenders = sorted(t for t, s in status.items() if s == KINDS[kind])
     report = Report(kind=kind, tenders=len(tenders), paid=paid)
+    if plan is not None:
+        report.plan = {"file": plan["file"], "sha256": plan["sha256"], "line": plan["line_number"]}
     exam = exam_dir(company_id, kind, root)
     stamp = _stamp(now)
     logs = exam / "logs" / stamp
@@ -522,8 +544,11 @@ def run_exam(
         report.prep_failed += not ok
         if ok:
             ready.append(t)
-            summary = _summary(paths.dev_tender_dir(company_id, t, variant_root(company_id, kind, "granskning", root)))
+            tender = paths.dev_tender_dir(company_id, t, variant_root(company_id, kind, "granskning", root))
+            summary = _summary(tender)
             report.documents += int(summary.get("documents") or 0)
+            for k, n in _skipped(tender).items():
+                report.skipped_by_type[k] = report.skipped_by_type.get(k, 0) + n
             report.pages += sum((summary.get("pages_by_kind") or {}).values())
 
     # 3. The estimate, from the engines' own dry runs and prep sizes.
@@ -616,6 +641,7 @@ def run_exam(
                     "input": VARIANT_LABELS[variant],
                     "after_deadline": after[t],
                     "settings": one.settings,
+                    "plan": report.plan,
                 }
             }
             try:
@@ -665,7 +691,10 @@ def _say(r: Report, say: Callable[[str], None]) -> None:
         f"quarantine: answer keys held in {r.held_tenders} of {r.quarantined} ({_counts(r.held)}); "
         f"{r.amendments_to_kalkyl} amendments given to Kalkyl; {r.same_input} tenders with one input for both"
     )
-    say(f"prep: {r.prepared} prepared, {r.prep_failed} stopped; {r.documents} documents, {r.pages} pages")
+    say(
+        f"prep: {r.prepared} prepared, {r.prep_failed} stopped; {r.documents} documents (skipped by type: "
+        f"{_counts(r.skipped_by_type)}), {r.pages} pages (granskning input)"
+    )
     if r.deadlines is not None:
         d = r.deadlines
         nearest = f"nearest open deadline in {d.nearest_days} days" if d.nearest_days is not None else "none open"
@@ -682,6 +711,8 @@ def _say(r: Report, say: Callable[[str], None]) -> None:
     )
     for engine in sorted(r.dry_runs):
         say(f"dry runs: {engine} {r.dry_runs_ok.get(engine, 0)} of {r.dry_runs[engine]} reached the first model call")
+    if r.plan is not None:
+        say(f"scoring plan: ledger line {r.plan['line']}, sha256 {r.plan['sha256'][:12]}")
     if r.paid:
         say(
             f"runs: ok {_counts(r.runs_ok)}; failed {_counts(r.runs_failed)}; {r.runs_skipped_budget} not started "
