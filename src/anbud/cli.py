@@ -233,6 +233,7 @@ def _baseline(args: argparse.Namespace) -> int:
             app=(args.app or baseline.APP_DIR).expanduser(),
             app_ref=args.app_ref or baseline.APP_REF,
             code=provenance.code_block(state),
+            basis=args.settings,
             stop_requested=lambda marker: (root / "STOP").exists() or marker.exists(),
         )
     except (baseline.BaselineError, KeyMissing, StoreError, ValueError) as exc:
@@ -586,6 +587,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     bl.add_argument("--app", type=Path, help="the app checkout (default: ~/Documents/estim/workspace/estim)")
     bl.add_argument("--app-ref", help="the app commit to export and run (default: origin/main)")
+    bl.add_argument(
+        "--settings",
+        choices=["matched", "app-defaults"],
+        default="matched",
+        help="matched: Kalkyl's hourly rate and no markups (default); app-defaults: the script's example settings",
+    )
     cards = sub.add_parser("cards", help="case cards: counts per dev tender, sealed tenders counted only (local)")
     cards.add_argument("company_id")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
