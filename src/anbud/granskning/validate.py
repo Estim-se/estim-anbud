@@ -3,7 +3,9 @@ rejects go back to the lens once, with their reasons, through `repair_message`.
 
 Checks, per flag:
 - it parses as a `Flag`;
-- every citation names a block in the corpus, and its quote is in that block after normalisation. Line-break
+- every citation names a block in the corpus, and its quote is in that block after normalisation. A run with no
+  tender blocks at all (the calc-only control arm of a planted variant) may cite calc posts instead: the citation names
+  a post id and quotes that post's line as the prefix shows it. Every other run needs block citations. Line-break
   hyphenation is tolerated: prep joins a broken line with a space after the hyphen ("elin- stallation"), so a quote
   may give the word whole or as the block has it. A quote may skip text with "..." (each part must be there, in order);
 - every number in the claim is in one of its quotes, apart from references to clauses, sections and standards;
@@ -16,13 +18,14 @@ Reasons name block ids, numbers and searches, never document text, so they are s
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
 from pydantic import ValidationError
 
-from anbud.granskning.contracts import ToolCall
+from anbud.granskning.contracts import CalcPost, ToolCall
 from anbud.granskning.corpus import Corpus
+from anbud.granskning.prefix import post_line
 from anbud.models import Flag
 from anbud.prep.text import normalise
 
@@ -111,15 +114,32 @@ def searches_run(tool_log: list[ToolCall]) -> set[str]:
     }
 
 
-def check_flag(flag: Flag, searches: set[str], corpus: Corpus, claim_types: Collection[str] | None = None) -> list[str]:
+def cited_text(citation_id: str, corpus: Corpus, calc_posts: Mapping[str, CalcPost] | None = None) -> str | None:
+    """The text a citation's quote must come from: its block's, or, only when the corpus has no blocks at all, the
+    calc post's line."""
+    block = corpus.get(citation_id)
+    if block is not None:
+        return block.text
+    if calc_posts and not corpus.blocks and citation_id in calc_posts:
+        return post_line(calc_posts[citation_id])
+    return None
+
+
+def check_flag(
+    flag: Flag,
+    searches: set[str],
+    corpus: Corpus,
+    claim_types: Collection[str] | None = None,
+    calc_posts: Mapping[str, CalcPost] | None = None,
+) -> list[str]:
     reasons: list[str] = []
     if claim_types is not None and flag.claim_type not in claim_types:
         reasons.append(f"claim_type {flag.claim_type!r} is not one of the claim types in the system prompt")
     for i, citation in enumerate(flag.citations):
-        block = corpus.get(citation.block_id)
-        if block is None:
+        text = cited_text(citation.block_id, corpus, calc_posts)
+        if text is None:
             reasons.append(f"citation {i + 1}: block {citation.block_id} does not exist")
-        elif not quote_matches(citation.quote, block.text):
+        elif not quote_matches(citation.quote, text):
             reasons.append(f"citation {i + 1}: the quote is not in block {citation.block_id}")
     quoted = _numbers_in([c.quote for c in flag.citations])
     missing = [n for n in claim_numbers(flag.claim) if not (_number_forms(n) & quoted)]
@@ -145,12 +165,12 @@ def _reject(index: int, reasons: list[str], item: Any) -> dict[str, Any]:
 
 
 def flag_validator(
-    corpus: Corpus, claim_types: Collection[str] | None = None
+    corpus: Corpus, claim_types: Collection[str] | None = None, calc_posts: Mapping[str, CalcPost] | None = None
 ) -> Callable[[list[dict[str, Any]], list[ToolCall]], tuple[list[Flag], list[dict[str, Any]]]]:
     """`validate_flags` bound to a corpus, in the shape the tool loop's `Validator` takes."""
 
     def validator(raw: list[dict[str, Any]], tool_log: list[ToolCall]) -> tuple[list[Flag], list[dict[str, Any]]]:
-        return validate_flags(raw, tool_log, corpus, claim_types)
+        return validate_flags(raw, tool_log, corpus, claim_types, calc_posts)
 
     return validator
 
@@ -160,6 +180,7 @@ def validate_flags(
     tool_log: list[ToolCall],
     corpus: Corpus,
     claim_types: Collection[str] | None = None,
+    calc_posts: Mapping[str, CalcPost] | None = None,
 ) -> tuple[list[Flag], list[dict[str, Any]]]:
     """The flags that pass every check, and the rejects as {"index", "reasons", "reason", "flag"}: `reasons` a list,
     `reason` the same joined (the tool loop's repair message reads it), `flag` the raw input. With `claim_types`, a
@@ -173,7 +194,7 @@ def validate_flags(
         except ValidationError as error:
             rejects.append(_reject(index, _schema_reasons(error), item))
             continue
-        reasons = check_flag(flag, searches, corpus, claim_types)
+        reasons = check_flag(flag, searches, corpus, claim_types, calc_posts)
         if reasons:
             rejects.append(_reject(index, reasons, item))
         else:

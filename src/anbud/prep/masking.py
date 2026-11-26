@@ -199,6 +199,11 @@ class Masker:
 
     def cells(self, cells: list[Cell]) -> tuple[str, list[Span]]:
         """A sheet row: string cells are masked, numeric cells never; cells in a name column become role tokens."""
+        parts, spans = self.cell_parts(cells)
+        return SEP.join(parts), spans
+
+    def cell_parts(self, cells: list[Cell]) -> tuple[list[str], list[Span]]:
+        """`cells`, with each masked cell on its own; spans are offsets in the joined text."""
         parts: list[str] = []
         spans: list[Span] = []
         offset = 0
@@ -215,4 +220,4 @@ class Masker:
             spans += [Span(s.kind, s.start + offset, s.end + offset, s.original) for s in cell_spans]
             parts.append(masked)
             offset += len(masked)
-        return SEP.join(parts), spans
+        return parts, spans

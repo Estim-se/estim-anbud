@@ -242,6 +242,7 @@ def run_pipeline(
     settings: Settings | None = None,
     concurrency: int = 3,
     on_progress: Callable[[str], None] | None = None,
+    arm: str | None = None,
     summary_file: str = "granskning.json",
     code: dict[str, Any] | None = None,
     checks: bool = True,
@@ -262,7 +263,7 @@ def run_pipeline(
     corpus = add_cards(corpus, cards)
 
     toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob, catalog=catalog)
-    validator = flag_validator(corpus, set(CLAIM_TYPES))
+    validator = flag_validator(corpus, set(CLAIM_TYPES), {p.id: p for p in calc})
     result = run_granskning(
         client,
         corpus,
@@ -310,7 +311,9 @@ def run_pipeline(
     ordered = ranked.shown + ranked.unpriced + ranked.generic + ranked.logged
     files = dict(finished.paths)
     files["inputs"] = run_dir / "inputs.json"
-    inputs = RunInputs(company_id=client.company_id, tender_id=tender_id, prep_dir=str(prep_dir), calc_posts=calc)
+    inputs = RunInputs(
+        company_id=client.company_id, tender_id=tender_id, prep_dir=str(prep_dir), calc_posts=calc, arm=arm
+    )
     store.write_file(files["inputs"], canonical(inputs.model_dump(mode="json")))
     files["flags"] = run_dir / "flags.json"
     _write(store, files["flags"], [i.flag.model_dump(mode="json") for i in ordered])

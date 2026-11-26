@@ -67,6 +67,26 @@ def test_posts_are_typed_with_stable_ids(tmp_path: Path) -> None:
     assert untyped[0].text == "Belysning: Material: 31700 | Arbete: 18" and untyped[0].amount is None
 
 
+def test_subtotal_and_total_rows_are_not_posts(tmp_path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Nr", "Benämning", "Antal", "Enhet", "À-pris", "Tim", "Belopp"])
+    ws.append(["1", "Belysning"])
+    ws.append(["1.1", "Trapphusarmatur", 35, "st", 900, 17.5, 31500])
+    ws.append([None, "Summa Belysning", None, None, None, 17.5, 31500])
+    ws.append(["2", "Kanalisation"])
+    ws.append(["2.1", "Kabelstege", 120, "m", 250, 24, 30000])
+    ws.append([None, "Delsumma", None, None, None, 24, 30000])
+    ws.append([None, "Totalt", None, None, None, 41.5, 61500])
+    ws.append([None, "Total:", None, None, None, None, 61500])
+    ws.append(["3.1", "Totalt antal ljuspunkter enligt ritning", 40, "st", 100, 8, 4000])
+    wb.save(tmp_path / "calc.xlsx")
+    posts = parse_calc(tmp_path / "calc.xlsx")
+    assert [p.text for p in posts] == ["Trapphusarmatur", "Kabelstege", "Totalt antal ljuspunkter enligt ritning"]
+    assert [p.section for p in posts] == ["Belysning", "Kanalisation", "Kanalisation"]
+    assert sum(p.amount or 0 for p in posts) == 65500
+
+
 def test_calc_files_skip_lock_and_hidden_files(tmp_path: Path) -> None:
     calc_dir = tmp_path / "calc" / "export"
     calc_dir.mkdir(parents=True)
