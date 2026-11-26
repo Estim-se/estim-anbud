@@ -26,7 +26,7 @@ def test_a_missing_post_is_priced_from_the_catalog_and_labelled_default() -> Non
     k = price(basis(item="armatur trapphus", quantity=24), catalog(), POSTS, S)
     assert k.priced and k.point == 24 * (1 * 500 + 1000)
     assert k.low == round(k.point * 0.75) and k.high == round(k.point * 1.25)
-    assert k.default_catalog and "Syntetisk katalog" in k.basis and "Armatur trapphus" in k.basis
+    assert k.default_catalog and "Syntetisk katalog" in k.label and "Armatur trapphus" in k.label
     assert price(basis(item="Armatur trapphuset"), catalog(), POSTS, S).priced  # a close name
     assert not price(basis(item="Laddbox"), catalog(), POSTS, S).priced
     own = price(basis(item="Vägguttag"), catalog(default=False), POSTS, S)

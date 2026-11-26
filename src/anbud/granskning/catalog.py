@@ -51,6 +51,9 @@ class Catalog(_Model):
     label: str = Field(description="Shown next to every figure priced from it")
     currency: str = "SEK"
     hourly_rate: float = Field(ge=0, description="SEK per hour; 0 means not set")
+    hourly_rate_from_calc: bool = Field(
+        default=False, description="Set at run time when the rate is the customer's own, from their calc"
+    )
     items: list[CatalogItem] = Field(default_factory=list)
 
     @property
@@ -117,7 +120,7 @@ def with_calc_rate(catalog: Catalog, posts: Iterable[CalcPost]) -> Catalog:
     if rate is None:
         return catalog
     label = _ASSUMED_RATE.sub("", catalog.label) + f", timpris {rate:g} kr/h från kundens kalkyl"
-    return catalog.model_copy(update={"hourly_rate": rate, "label": label})
+    return catalog.model_copy(update={"hourly_rate": rate, "label": label, "hourly_rate_from_calc": True})
 
 
 def catalog_path(name: str, root: Path | None = None) -> Path:

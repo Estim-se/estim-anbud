@@ -22,6 +22,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from anbud.granskning.contracts import LensResult, ToolCall, fingerprint
+from anbud.granskning.merge import code_merge
 from anbud.granskning.toolbox import Toolbox
 from anbud.model_client import BudgetExceeded, ModelClient, ModelError, PrefixDrift, ReplayMiss, RunStopped
 from anbud.models import Flag
@@ -202,40 +203,76 @@ def pydantic_validator(raw_flags: list[dict], tool_log: list[ToolCall]) -> tuple
 
 
 class FlagSubmission:
-    """Collects a lens's flags across its submit and its one repair."""
+    """Collects a lens's flags across its submit and its one repair.
+
+    Every reject is recorded, from both attempts, with the attempt number. Two findings with the same fingerprint
+    (same cited blocks, same claim type) can't both stand: on the first attempt neither is kept and the lens is asked
+    to combine them; on the final attempt code combines them, keeping both claims, and records the later one's money
+    basis as a reject so it isn't lost. An exact repeat of a kept finding is ignored.
+    """
 
     def __init__(self, lens_id: str, validator: Validator) -> None:
         self.lens_id = lens_id
         self.validator = validator
-        self.flags: list[Flag] = []
         self.rejected: list[dict] = []
-        self._seen: set[str] = set()
+        self.attempts = 0
+        self._kept: dict[str, Flag] = {}
+
+    @property
+    def flags(self) -> list[Flag]:
+        return list(self._kept.values())
+
+    @staticmethod
+    def _index(items: list[Any], flag: Flag) -> int | None:
+        return next(
+            (i for i, item in enumerate(items) if isinstance(item, dict) and item.get("claim") == flag.claim), None
+        )
 
     def __call__(self, raw: Any, tool_log: list[ToolCall], final: bool) -> SubmitOutcome:
+        self.attempts += 1
         items = raw.get("flags") if isinstance(raw, dict) else None
         if not isinstance(items, list):
+            self.rejected.append(
+                {"index": None, "flag": raw, "reason": "input has no flags list", "attempt": self.attempts}
+            )
             if final:
-                self.rejected.append({"index": None, "flag": raw, "reason": "input has no flags list"})
                 return SubmitOutcome(True, "Received, but the input had no flags list.")
             return SubmitOutcome(False, 'submit_flags takes {"flags": [...]}, a list of findings (empty if none).')
         items = [dict(i, lens_id=self.lens_id) if isinstance(i, dict) else i for i in items]
         accepted, bad = self.validator(items, tool_log)
-        added = 0
+        bad = list(bad)
         for flag in accepted:
             key = fingerprint(flag)
-            if key not in self._seen:
-                self._seen.add(key)
-                self.flags.append(flag)
-                added += 1
+            kept = self._kept.get(key)
+            if kept is None:
+                self._kept[key] = flag
+            elif kept == flag:
+                continue
+            elif final:
+                self._kept[key] = code_merge([kept, flag])
+                reason = "same cited blocks and claim type as another finding; merged by code, its money basis unused"
+                bad.append({"index": self._index(items, flag), "flag": flag.model_dump(mode="json"), "reason": reason})
+            else:
+                del self._kept[key]
+                reason = (
+                    "this finding and another cite the same blocks with the same claim_type, so neither is kept; "
+                    "submit them again as one finding with one claim and one money basis, or cite the blocks that "
+                    "set them apart"
+                )
+                for duplicate in (kept, flag):
+                    dumped = duplicate.model_dump(mode="json")
+                    bad.append({"index": self._index(items, duplicate), "flag": dumped, "reason": reason})
+        self.rejected.extend(dict(item, attempt=self.attempts) for item in bad)
         if not bad or final:
-            self.rejected.extend(bad)
-            return SubmitOutcome(True, f"Received {added} findings." + (f" {len(bad)} failed checks." if bad else ""))
+            failed = f" {len(bad)} failed checks." if bad else ""
+            return SubmitOutcome(True, f"{len(self._kept)} findings kept." + failed)
         lines = [
-            f"{added} findings passed and are kept. {len(bad)} failed the checks below. Call submit_flags once more "
-            "with only those findings, corrected; leave out any you can't support. This is your one repair."
+            f"{len(self._kept)} findings passed and are kept. {len(bad)} failed the checks below. Call submit_flags "
+            "once more with only those findings, corrected; leave out any you can't support. This is your one repair."
         ]
         for item in bad:
-            lines.append(f"- finding {item.get('index')}: {item.get('reason')}")
+            where = f"finding {item['index']}" if item.get("index") is not None else "a finding"
+            lines.append(f"- {where}: {item.get('reason')}")
         return SubmitOutcome(False, "\n".join(lines))
 
 

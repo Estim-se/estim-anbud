@@ -60,7 +60,8 @@ def _need(inputs: dict[str, float], *names: str) -> list[float]:
     return [inputs[n] for n in names]
 
 
-def _formula(basis: MoneyBasis, catalog: Catalog | None, settings: Settings) -> tuple[float, str]:
+def _formula(basis: MoneyBasis, catalog: Catalog | None, settings: Settings) -> tuple[float, str, bool]:
+    """(amount, basis text, whether the catalog's hourly rate was read)."""
     x = _inputs(basis)
     if basis.formula == "vite_per_week":
         (weeks,) = _need(x, "weeks")
@@ -75,12 +76,12 @@ def _formula(basis: MoneyBasis, catalog: Catalog | None, settings: Settings) -> 
             cap = x["contract_sum"] * x["cap_percent"] / 100
         capped = cap is not None and amount > cap
         amount = min(amount, cap) if cap is not None else amount
-        return amount, f"Vite: {weeks:g} veckor" + (", begränsat av vitestaket" if capped else "")
+        return amount, f"Vite: {weeks:g} veckor" + (", begränsat av vitestaket" if capped else ""), False
     if basis.formula == "security":
         total, pct, months = _need(x, "contract_sum", "percent", "months")
         cost = x.get("cost_percent_per_year", settings.guarantee_cost_percent_per_year)
         amount = total * pct / 100 * cost / 100 * months / 12
-        return amount, f"Säkerhet: {pct:g} % av kontraktssumman i {months:g} månader, kostnad {cost:g} % per år"
+        return amount, f"Säkerhet: {pct:g} % av kontraktssumman i {months:g} månader, kostnad {cost:g} % per år", False
     if basis.formula == "index_drift":
         (material,) = _need(x, "material_amount")
         if "change_percent" in x:
@@ -88,18 +89,22 @@ def _formula(basis: MoneyBasis, catalog: Catalog | None, settings: Settings) -> 
         else:
             annual, months = _need(x, "annual_percent", "months")
             pct = annual * months / 12
-        return material * pct / 100, f"Indexförändring: {pct:g} % på materialbeloppet"
+        return material * pct / 100, f"Indexförändring: {pct:g} % på materialbeloppet", False
     if basis.formula == "wage_step":
         (hours,) = _need(x, "hours")
+        read_rate = False
         if "increase_per_hour" in x:
             increase = x["increase_per_hour"]
         else:
             (pct,) = _need(x, "increase_percent")
-            rate = x.get("hourly_rate", catalog.hourly_rate if catalog else 0.0)
+            if "hourly_rate" in x:
+                rate = x["hourly_rate"]
+            else:
+                rate, read_rate = _rate(catalog), True
             if not rate:
                 raise _Unpriced("saknar timpris")
             increase = rate * pct / 100
-        return hours * increase, f"Lönesteg: {hours:g} timmar efter lönehöjningen"
+        return hours * increase, f"Lönesteg: {hours:g} timmar efter lönehöjningen", read_rate
     raise _Unpriced("okänd avtalsformel")
 
 
@@ -122,37 +127,44 @@ def _catalog_cost(basis: MoneyBasis, catalog: Catalog | None, post: CalcPost | N
     return item, cost
 
 
+Source = str | None  # "catalog" (an item or the catalog's rate), "calc" (the calc's own rate), or None
+
+
+def _rate_source(catalog: Catalog | None) -> Source:
+    return "calc" if catalog is not None and catalog.hourly_rate_from_calc else "catalog"
+
+
 def _priced(
     basis: MoneyBasis, catalog: Catalog | None, posts: dict[str, CalcPost], settings: Settings
-) -> tuple[float, str, bool]:
-    """(point, basis text, whether the catalog was used)."""
+) -> tuple[float, str, Source]:
+    """(point, basis text, where any rate or price came from)."""
     post = posts.get(basis.post_ref) if basis.post_ref else None
     if basis.kind == "contract_formula":
-        amount, text = _formula(basis, catalog, settings)
-        return amount, text, basis.formula == "wage_step" and "hourly_rate" not in _inputs(basis)
+        amount, text, read_rate = _formula(basis, catalog, settings)
+        return amount, text, _rate_source(catalog) if read_rate else None
     if basis.kind == "hours_gap":
         if basis.hours is None:
             raise _Unpriced("saknar timmar")
-        return basis.hours * _rate(catalog), f"Timmar som fattas: {basis.hours:g} h", True
+        return basis.hours * _rate(catalog), f"Timmar som fattas: {basis.hours:g} h", _rate_source(catalog)
     if basis.kind == "quantity_gap":
         if basis.quantity is None:
             raise _Unpriced("saknar mängd")
         unit = basis.unit or (post.unit if post else None) or "st"
         if post is not None and post.amount is not None and post.quantity:
-            return basis.quantity * post.amount / post.quantity, f"Mängd som fattas: {basis.quantity:g} {unit}", False
+            return basis.quantity * post.amount / post.quantity, f"Mängd som fattas: {basis.quantity:g} {unit}", None
         if post is not None and post.unit_price is not None:
-            return basis.quantity * post.unit_price, f"Mängd som fattas: {basis.quantity:g} {unit}", False
+            return basis.quantity * post.unit_price, f"Mängd som fattas: {basis.quantity:g} {unit}", None
         item, cost = _catalog_cost(basis, catalog, post)
-        return basis.quantity * cost, f"Mängd som fattas: {basis.quantity:g} {unit} {item.name}", True
+        return basis.quantity * cost, f"Mängd som fattas: {basis.quantity:g} {unit} {item.name}", "catalog"
     # missing_post
     quantity = basis.quantity if basis.quantity is not None else 1.0
     try:
         item, cost = _catalog_cost(basis, catalog, None)
     except _Unpriced:
         if basis.hours is not None:
-            return basis.hours * _rate(catalog), f"Saknad post: {basis.hours:g} h arbete", True
+            return basis.hours * _rate(catalog), f"Saknad post: {basis.hours:g} h arbete", _rate_source(catalog)
         raise
-    return quantity * cost, f"Saknad post: {quantity:g} {basis.unit or item.unit} {item.name}", True
+    return quantity * cost, f"Saknad post: {quantity:g} {basis.unit or item.unit} {item.name}", "catalog"
 
 
 def price(
@@ -163,19 +175,22 @@ def price(
 ) -> Kronor:
     settings = settings or Settings()
     try:
-        point, text, used_catalog = _priced(basis, catalog, calc_posts or {}, settings)
+        point, text, origin = _priced(basis, catalog, calc_posts or {}, settings)
     except _Unpriced as why:
-        return Kronor(priced=False, basis=basis.kind, reason=str(why))
+        return Kronor(priced=False, basis=basis, reason=str(why))
     spread = settings.spread.get(basis.kind, 0.0)
-    source = catalog if used_catalog else None
+    source = catalog if origin == "catalog" else None
     if source is not None:
         text += f" ({source.label})"
+    elif origin == "calc" and catalog is not None:
+        text += f" (timpris {catalog.hourly_rate:g} kr/h från kundens kalkyl)"
     return Kronor(
         priced=True,
         point=round(point),
         low=round(point * (1 - spread)),
         high=round(point * (1 + spread)),
-        basis=text,
+        basis=basis,
+        label=text,
         catalog=source.name if source else None,
         default_catalog=bool(source and source.default),
     )

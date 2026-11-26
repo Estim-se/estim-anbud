@@ -32,13 +32,16 @@ def price_items(
     items: list[Item], catalog: Catalog | None, calc_posts: dict[str, CalcPost], settings: Settings
 ) -> list[Item]:
     """Kronor for each item: from the verifier's corrected money basis when it gave one and didn't refute the flag,
-    otherwise from the flag's own."""
+    otherwise from the flag's own, or, when that can't be priced, from the first merged lens flag whose basis can."""
     out = []
     for item in items:
-        basis = item.flag.money_basis
         if item.verdict and item.verdict.verdict != "refuted" and item.verdict.corrected_money_basis:
-            basis = item.verdict.corrected_money_basis
-        kronor = price(basis, catalog, calc_posts, settings)
+            bases = [item.verdict.corrected_money_basis]
+        else:
+            bases = [item.flag.money_basis]
+            bases += [f.money_basis for f in item.source_flags if f.money_basis not in bases]
+        priced = [price(basis, catalog, calc_posts, settings) for basis in bases]
+        kronor = next((k for k in priced if k.priced), priced[0])
         out.append(item.model_copy(update={"kronor": kronor, "minor": is_minor(kronor, item.flag, settings)}))
     return out
 
@@ -152,6 +155,11 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
     for call in result.tool_log:
         if call.refused is not None:
             counts["refused"] += 1
+            continue
+        if call.tool == "law_lookup":  # counted as a lookup even when the harness has no law corpus yet
+            counts["law_lookup"] += 1
+            if call.error is not None and call.error != "not_available":
+                counts["failed"] += 1
             continue
         if call.error is not None:
             counts["failed"] += 1
