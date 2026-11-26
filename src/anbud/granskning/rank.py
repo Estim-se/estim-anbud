@@ -26,6 +26,7 @@ from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
 from anbud.granskning.kronor import is_minor, price, ranking_kronor
 from anbud.granskning.settings import Settings
+from anbud.models import MoneyBasis
 
 NOT_ALL_CLEAR = (
     "Täckningen visar bara vad granskningen läste och sökte. Den betyder inte att underlaget saknar fel eller risker."
@@ -36,14 +37,14 @@ def price_items(
     items: list[Item], catalog: Catalog | None, calc_posts: dict[str, CalcPost], settings: Settings
 ) -> list[Item]:
     """Kronor for each item: from the verifier's corrected money basis when it gave one and didn't refute the flag,
-    otherwise from the flag's own, or, when that can't be priced, from the first merged lens flag whose basis can."""
+    then from the flag's own, then from the merged lens flags', the first that prices."""
     out = []
     for item in items:
+        own = [item.flag.money_basis]
+        own += [f.money_basis for f in item.source_flags if f.money_basis not in own]
+        bases = list(own)
         if item.verdict and item.verdict.verdict != "refuted" and item.verdict.corrected_money_basis:
-            bases = [item.verdict.corrected_money_basis]
-        else:
-            bases = [item.flag.money_basis]
-            bases += [f.money_basis for f in item.source_flags if f.money_basis not in bases]
+            bases.insert(0, _keep_catalog_id(item.verdict.corrected_money_basis, own))
         priced = [price(basis, catalog, calc_posts, settings) for basis in bases]
         kronor = next((k for k in priced if k.priced), priced[0])
         out.append(item.model_copy(update={"kronor": kronor, "minor": is_minor(kronor, item.flag, settings)}))
@@ -63,6 +64,15 @@ def factor(item: Item, settings: Settings, action_rates: dict[str, float] | None
     if item.verdict and not item.verdict.electrical_scope:
         value *= settings.other_trade
     return value
+
+
+def _keep_catalog_id(corrected: MoneyBasis, own: list[MoneyBasis]) -> MoneyBasis:
+    """The verifier's correction keeps the lens's catalog id when it names the same kind and item: the verifier never
+    sees the catalog, so it can't be expected to repeat the id."""
+    if corrected.catalog_id is not None:
+        return corrected
+    same = next((b for b in own if b.catalog_id and b.kind == corrected.kind and b.item == corrected.item), None)
+    return corrected.model_copy(update={"catalog_id": same.catalog_id}) if same else corrected
 
 
 def score(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
@@ -212,6 +222,9 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
             if call.error is not None and call.error != "not_available":
                 counts["failed"] += 1
             continue
+        if call.tool == "catalog_search" and call.error == "no_catalog":  # a search, not a failure: no catalog loaded
+            counts["catalog_search"] += 1
+            continue
         if call.error is not None:
             counts["failed"] += 1
             continue
@@ -287,6 +300,6 @@ def coverage(
 def summary(ranked: Ranked) -> dict[str, Any]:
     """Counts for the run log: ids and numbers only."""
     placements: dict[str, int] = {}
-    for item in ranked.shown + ranked.generic + ranked.logged:
+    for item in ranked.shown + ranked.unpriced + ranked.generic + ranked.logged:
         placements[item.placement or "none"] = placements.get(item.placement or "none", 0) + 1
     return {"placements": placements, "shown": [i.fingerprint for i in ranked.shown]}

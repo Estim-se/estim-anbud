@@ -8,14 +8,15 @@ from _granskning_synth import basis, catalog, corpus, flag, lens_result
 from openpyxl import Workbook
 
 from anbud import tools
+from anbud.granskning.catalog import CatalogItem
 from anbud.granskning.contracts import ToolCall
 from anbud.granskning.items import Item
 from anbud.granskning.kronor import price
 from anbud.granskning.lenses import load_lenses
 from anbud.granskning.merge import items_from_results
 from anbud.granskning.prefix import brief_text
-from anbud.granskning.rank import coverage, lens_coverage, price_items, rank, unpriced_queue
-from anbud.granskning.report import build_report, build_workbook, column_keys, render_html
+from anbud.granskning.rank import coverage, lens_coverage, price_items, rank, summary, unpriced_queue
+from anbud.granskning.report import Column, build_report, build_workbook, column_keys, render_html
 from anbud.granskning.settings import load_settings
 from anbud.granskning.toolbox import Toolbox
 from anbud.granskning.verify import select
@@ -110,8 +111,9 @@ def test_both_reports_show_the_unpriced_list_and_nothing_not_refuted_is_hidden()
     report = _report()
     page = render_html(report)
     assert "Krav utan prisuppgift (4)" in page and "Bekräftat krav." in page
-    outside = 20 - 15 + 1  # the priced overflow and the covered flag
-    assert f"{outside} flaggor som inte motbevisats ryms inte i listorna ovan" in page and "Alla flaggor" in page
+    note = "5 flaggor ryms inte i listorna ovan"  # the priced overflow only: the covered flag isn't capped
+    assert note in page and "fliken Alla flaggor" in page
+    assert page.index("Generiska fynd") < page.index(note)  # after both lists and the generic section
     wb = build_workbook(report)
     assert len(_rows(wb, "Krav utan prisuppgift", "claim")) == 4
     every = dict(zip(_rows(wb, "Alla flaggor", "claim"), _rows(wb, "Alla flaggor", "placement"), strict=True))
@@ -120,9 +122,8 @@ def test_both_reports_show_the_unpriced_list_and_nothing_not_refuted_is_hidden()
     assert every["Generiskt utan pris."] == "Generisk" and every["Redan i kalkylen."] == "Täcks redan av kalkylen"
 
 
-def test_the_html_count_is_only_what_is_outside_the_lists() -> None:
-    page = render_html(_report(max_shown=30))
-    assert "1 flaggor som inte motbevisats ryms inte i listorna ovan" in page  # only the covered flag
+def test_the_html_note_counts_capped_flags_only() -> None:
+    assert "ryms inte i listorna" not in render_html(_report(max_shown=30))  # nothing capped; covered isn't
 
 
 def test_catalog_search_returns_ids_names_units_and_categories_never_prices() -> None:
@@ -218,3 +219,68 @@ def test_the_total_never_exceeds_top_n_plus_sampled() -> None:
                 chosen = _select(items, slots)
                 assert len(chosen) == min(len(items), 28), (priced, unpriced, slots)
                 assert sum(1 for _, how in chosen if how == "verified") == min(len(items), 25)
+
+
+def test_a_verifier_correction_keeps_the_lens_catalog_id() -> None:
+    lens_basis = basis(item="Belysning i trapphusen", catalog_id="i1", quantity=2)
+    f = flag("contract", "Belysning saknas.", claim_type="u7", money_basis=lens_basis)
+    (item,) = items_from_results([lens_result("contract", [f])])
+    corrected = basis(item="Belysning i trapphusen", quantity=4)  # the verifier never sees the catalog
+    (priced,) = price_items([_verdict(item, "partly", corrected_money_basis=corrected)], catalog(), {}, S)
+    assert priced.kronor.priced and priced.kronor.point == 4 * 1500 and priced.kronor.basis.catalog_id == "i1"
+    renamed = basis(item="Något annat", quantity=4)  # a different item: the id isn't carried, the lens's basis prices
+    (fallback,) = price_items([_verdict(item, "partly", corrected_money_basis=renamed)], catalog(), {}, S)
+    assert fallback.kronor.priced and fallback.kronor.point == 2 * 1500 and fallback.kronor.basis == lens_basis
+
+
+def test_a_search_without_a_catalog_is_a_search_not_a_failure() -> None:
+    log = [ToolCall(role="lens", turn=1, tool="catalog_search", input={"query": "armatur"}, error="no_catalog")]
+    cov = lens_coverage(lens_result("contract", [], tool_log=log), corpus())
+    assert (cov.catalog_searches, cov.failed_calls) == (1, 0)
+    bad = [ToolCall(role="lens", turn=1, tool="catalog_search", input={}, error="invalid_input")]
+    assert lens_coverage(lens_result("contract", [], tool_log=bad), corpus()).failed_calls == 1
+
+
+def test_the_run_summary_counts_the_unpriced_list() -> None:
+    placements = summary(rank(list(_items().values()), S))["placements"]
+    assert placements["shown_unpriced"] == 4 and placements["shown"] == 15
+
+
+def test_the_any_word_fallback_tokenizes_like_the_catalog_and_skips_short_words() -> None:
+    base = catalog()
+    cable = CatalogItem(id="k1", name="Kabel EL 3x1,5", unit="m", hours=0.1)
+    box = Toolbox(corpus(), [], catalog=base.model_copy(update={"items": [*base.items, cable]}))
+    assert "stays unpriced" in box.run("catalog_search", {"query": "el i rymden"}).content  # "el" alone doesn't match
+    assert box.run("catalog_search", {"query": "TRAPPHUS, el"}).result_ids == ["i1"]  # punctuation and case as search
+    assert box.run("catalog_search", {"query": "kabel till rymden"}).result_ids == ["k1"]
+
+
+def test_an_id_naming_an_unpriced_item_lets_the_name_price_the_flag() -> None:
+    k = price(basis(item="Vägguttag", catalog_id="i5", quantity=2), catalog(), {}, S)  # i5 has no figures
+    assert k.priced and k.point == 2 * (0.5 * 500 + 100) and "Vägguttag" in k.label
+    alone = price(basis(item="Avgift utan pris", catalog_id="i5"), catalog(), {}, S)
+    assert not alone.priced and alone.reason == "katalogposten saknar pris, eller katalogen saknar timpris"
+
+
+def test_catalog_searches_show_in_both_coverage_views() -> None:
+    log = [ToolCall(role="lens", turn=1, tool="catalog_search", input={"query": "armatur"}, result_ids=["i1"])]
+    report = build_report(
+        run_id="run-1",
+        company_id="co-001",
+        tender_id="t-0001",
+        ranked=rank([], S),
+        coverage=coverage([lens_result("contract", [], tool_log=log)], corpus()),
+        corpus=corpus(),
+        catalog=catalog(),
+        materiality_sek=S.materiality_sek,
+    )
+    assert "1 katalogsökningar" in render_html(report)
+    wb = build_workbook(report)
+    assert _rows(wb, "Täckning", "catalog_searches") == [1]
+
+
+def test_review_columns_stay_off_the_all_flags_sheet() -> None:
+    reviewer = (Column("decision", "Beslut", 12),)
+    wb = build_workbook(_report(), extra_columns=reviewer)
+    assert "decision" in column_keys(wb, "Flaggor") and "decision" in column_keys(wb, "Krav utan prisuppgift")
+    assert "decision" not in column_keys(wb, "Alla flaggor")

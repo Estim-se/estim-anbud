@@ -156,10 +156,6 @@ def not_refuted(report: Report) -> list[Item]:
     return [i for i in items if i.placement != "refuted"]
 
 
-def outside_lists(report: Report) -> list[Item]:
-    return [i for i in report.logged if i.placement != "refuted"]
-
-
 def verdict_text(item: Item) -> str:
     if item.verdict is None:
         return VERIFICATION[item.verification]
@@ -245,8 +241,9 @@ def render_html(report: Report) -> str:
         note = " Priserna är Estims standardvärden, inte företagets egna." if report.default_catalog else ""
         parts.append(f'<p class="meta">Kronor beräknade med {_e(report.catalog)}.{_e(note)}</p>')
     parts.append(
-        f'<p class="meta">Högst {report.max_shown} flaggor visas. Under {_e(sek(report.materiality_sek))} räknas en '
-        "flagga som mindre, om den inte har en avtalsrisk.</p>"
+        f'<p class="meta">Högst {report.max_shown} prissatta flaggor och {report.max_unpriced_shown} krav utan '
+        f"prisuppgift visas. Under {_e(sek(report.materiality_sek))} räknas en flagga som mindre, om den inte har en "
+        "avtalsrisk.</p>"
     )
     parts.append(f"<h2>Flaggor ({len(report.shown)})</h2>")
     parts += [_flag_html(n, item, report) for n, item in enumerate(report.shown, 1)] or ["<p>Inga flaggor visas.</p>"]
@@ -257,16 +254,16 @@ def render_html(report: Report) -> str:
             f"{report.max_unpriced_shown} visas, ordnade efter verifieringens utfall och sedan allvar.</p>"
         )
         parts += [_flag_html(n, item, report) for n, item in enumerate(report.unpriced, 1)]
-    hidden = outside_lists(report)
-    if hidden:
-        parts.append(
-            f'<p class="meta">{len(hidden)} flaggor som inte motbevisats ryms inte i listorna ovan. Alla finns på '
-            "fliken Alla flaggor i XLSX-filen, med var de hamnade och varför.</p>"
-        )
     if report.generic:
         parts.append(f"<h2>Generiska fynd ({len(report.generic)})</h2>")
         parts.append('<p class="muted">Normal omfattning som handlingarna inte nämner. Redovisas separat.</p>')
         parts += [_flag_html(n, item, report) for n, item in enumerate(report.generic, 1)]
+    capped = [i for i in report.logged if i.placement == "capped"]
+    if capped:
+        parts.append(
+            f'<p class="meta">{len(capped)} flaggor ryms inte i listorna ovan. Alla flaggor som inte motbevisats finns '
+            "på fliken Alla flaggor i XLSX-filen, med var de hamnade och varför.</p>"
+        )
     parts.append("<h2>Täckning</h2>")
     parts.append(f"<p><strong>{_e(cov.note)}</strong></p>")
     parts.append(f"<p>{cov.documents} dokument i underlaget.</p>")
@@ -284,7 +281,8 @@ def render_html(report: Report) -> str:
         )
         parts.append(
             f'<p class="muted">{lens.turns} varv · {lens.blocks_read} block lästa · {len(lens.searches)} sökningar · '
-            f"{lens.tiles_viewed} ritningsrutor · {lens.calc_calls} kalkyluppslag · {lens.law_lookups} lagrum</p>"
+            f"{lens.tiles_viewed} ritningsrutor · {lens.calc_calls} kalkyluppslag · {lens.law_lookups} lagrum · "
+            f"{lens.catalog_searches} katalogsökningar</p>"
         )
         if lens.documents_opened:
             parts.append(f"<p>Öppnade: {_e(', '.join(lens.documents_opened))}</p>")
@@ -373,6 +371,7 @@ COVERAGE_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("tiles_viewed", "Ritningsrutor", 10),
     ("calc_calls", "Kalkyluppslag", 10),
     ("law_lookups", "Lagrum", 8),
+    ("catalog_searches", "Katalogsökningar", 10),
     ("not_checked", "Inte kontrollerat", 70),
 )
 
@@ -418,15 +417,15 @@ def build_workbook(
     cols = [*columns, *extra_columns]
     keys: list[tuple[str, list[str]]] = []
     sheets = (
-        ("Flaggor", report.shown),
-        ("Krav utan prisuppgift", report.unpriced),
-        ("Generiska", report.generic),
-        ("Loggade", report.logged),
-        ("Alla flaggor", not_refuted(report)),
+        ("Flaggor", report.shown, cols),
+        ("Krav utan prisuppgift", report.unpriced, cols),
+        ("Generiska", report.generic, cols),
+        ("Loggade", report.logged, cols),
+        ("Alla flaggor", not_refuted(report), list(columns)),  # an index, not a labelling sheet: no review columns
     )
-    for title, items in sheets:
-        _flag_sheet(wb, title, items, report, cols)
-        keys.append((title, [c.key for c in cols]))
+    for title, items, sheet_cols in sheets:
+        _flag_sheet(wb, title, items, report, sheet_cols)
+        keys.append((title, [c.key for c in sheet_cols]))
     ws = wb.create_sheet("Täckning")
     _header(ws, [(label, width) for _, label, width in COVERAGE_COLUMNS])
     for row, lens in enumerate(report.coverage.lenses, 2):

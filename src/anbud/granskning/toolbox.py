@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from anbud.granskning.catalog import Catalog, CatalogItem
+from anbud.granskning.catalog import Catalog, CatalogItem, tokens
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.prefix import block_line, defuse, post_line, provenance
@@ -178,8 +178,8 @@ class Toolbox:
             )
         found = self.catalog.search(args.query)
         if not found:  # every word didn't match: fall back to items that hold any of them
-            words = set(args.query.casefold().split())
-            found = [i for i in self.catalog.items if words & set(i.name.casefold().split())]
+            words = {w for w in tokens(args.query) if len(w) > 2}  # "el", "i", "av" would match half the catalog
+            found = [i for i in self.catalog.items if words & tokens(i.name)]
         if not found:
             return ToolOutput(
                 "No catalog item matches. Try other words; if nothing fits, name the item in money_basis.item and "
