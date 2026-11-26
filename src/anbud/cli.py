@@ -197,6 +197,22 @@ def _kalkyl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cards(args: argparse.Namespace) -> int:
+    from anbud.evals.cards import CardError, write
+
+    try:
+        target, cards = write(args.company_id)
+    except (CardError, ValueError) as exc:
+        print(f"anbud cards: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    split = cards["split"]
+    print(
+        f"anbud cards: {split['dev']} dev cards, {split['heldout']} held-out and {split['prospective']} prospective "
+        f"counted, written to notes/{args.company_id}/{target.name}"
+    )
+    return 0
+
+
 def _stop(args: argparse.Namespace) -> int:
     from anbud.store import StoreError, request_stop
 
@@ -364,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser("plant", help="a planted variant of a dev tender: plants, both control arms and the answer key")
     sub.add_parser("plant-score", help="score runs on a planted variant's arms against its answer key")
+    cards = sub.add_parser("cards", help="case cards: counts per dev tender, sealed tenders counted only (local)")
+    cards.add_argument("company_id")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
     stop.add_argument("company_id", nargs="?")
     stop.add_argument("run_id", nargs="?")
@@ -404,6 +422,8 @@ def main(argv: list[str] | None = None) -> int:
         return _eval(args)
     if args.command == "stop":
         return _stop(args)
+    if args.command == "cards":
+        return _cards(args)
     if args.command == "prep":
         return _prep(args)
     if args.command == "intake":
