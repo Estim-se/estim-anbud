@@ -27,7 +27,9 @@ requirement already states that item for that room type.
 **Posts.** Requirement lines are grouped by scope, catalog item (or, without one, the normalised description), type
 code, unit family and the object kind they multiply by. Inside a post, lines are grouped by location: the same
 quantity stated twice counts once, a record marked additive adds, and different quantities for the same location are
-a conflict priced at the lower value with a visible note. Locations add up. Quantities from per-space rules
+a conflict priced at the lower value with a visible note. Locations add up. A line per object multiplies the whole
+count of its kind, so its location never splits it: per-object lines are one group, and naming a room twice never
+counts its objects twice. Quantities from per-space rules
 (`DerivedQuantity`, common spaces) are posts of their own, labelled with the rule's source.
 
 **Catalog mapping.** A post's catalog item must exist and its unit must be in the same family as the post's (counts,
@@ -522,7 +524,9 @@ class Post:
 def _post_quantity(lines: list[Line]) -> tuple[Decimal | None, list[str]]:
     by_loc: dict[str, list[Line]] = defaultdict(list)
     for ln in lines:
-        by_loc[_norm(ln.record.record.location)].append(ln)
+        # A line per object multiplies the whole count of its kind, so a location never splits it: every such line
+        # covers the same objects, and adding two of them would count the objects twice.
+        by_loc["" if ln.per is not None else _norm(ln.record.record.location)].append(ln)
     total: Decimal | None = None
     notes: list[str] = []
     for loc, items in sorted(by_loc.items()):

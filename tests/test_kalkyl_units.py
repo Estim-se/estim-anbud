@@ -236,6 +236,22 @@ def test_posts_multiply_per_object_merge_duplicates_and_add_additive(catalog) ->
     assert posts["kabelstege"].quantity == Decimal(40) and any("Konflikt" in n for n in posts["kabelstege"].notes)
 
 
+def test_per_object_lines_never_add_up_across_locations(catalog) -> None:
+    """Two citations of "one per apartment", one with a location and one without, are the same apartments: the
+    count is taken once. Stated quantities in different locations still add up."""
+    each = {"quantity_source": "per_object", "per_object": "apartment", "catalog_id": "uttag-dubbelt"}
+    records = _apartments(3) + [
+        req("Uttag", "per_object", "st", [cite("a1", "1 st")], quantity=1, **{**each, "location": "badrum"}),
+        req("Uttag", "per_object", "st", [cite("a2", "1 st")], quantity=1, **each),
+        req("Stege", "stated", "m", [cite("a3", "45 m")], quantity=45, catalog_id="kabelstege", location="källare"),
+        req("Stege", "stated", "m", [cite("a4", "40 m")], quantity=40, catalog_id="kabelstege", location="vind"),
+    ]
+    verified = _verified(records)
+    posts = {p.catalog_id: p for p in build_posts(verified, count_objects(verified), catalog)}
+    assert posts["uttag-dubbelt"].quantity == Decimal(3) and not posts["uttag-dubbelt"].notes
+    assert posts["kabelstege"].quantity == Decimal(85)
+
+
 def test_a_per_object_post_without_objects_is_missing_a_quantity(catalog) -> None:
     verified = _verified(
         [
