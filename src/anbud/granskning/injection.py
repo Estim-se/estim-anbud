@@ -63,11 +63,13 @@ class Injection(_Key):
 class Planted(_Key):
     id: str
     claim_type: str
+    lenses: list[str] = []
     anchors: list[Anchor]
     expected_verdict: str | None = None
 
 
 class AnswerKey(_Key):
+    lenses: list[str] = []  # the lens set recordings run with
     injections: list[Injection]
     planted: list[Planted]
 

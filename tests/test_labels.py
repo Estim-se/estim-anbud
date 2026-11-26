@@ -25,7 +25,7 @@ from anbud.granskning.labels import (
     read_review_flags,
 )
 from anbud.models import Citation, Flag, MoneyBasis
-from anbud.prep.tender import prepare
+from anbud.prep.tender import FIXTURE_EXCLUDE, prepare
 
 FIXTURE = paths.repo_root() / "fixtures" / "synthetic" / "injection-tender"
 KEY = AnswerKey.load(FIXTURE / "expected.json")
@@ -38,7 +38,7 @@ WRONG = next(t.text for t in TAXONOMY if t.code == "wrong_quote")
 @pytest.fixture
 def tender(data_root: Path) -> Path:
     folder = paths.fixture_data_dir(COMPANY, FIXTURE / "clean", data_root)
-    prepare(COMPANY, FIXTURE / "clean", folder / "prep", root=data_root)
+    prepare(COMPANY, FIXTURE / "clean", folder / "prep", root=data_root, exclude=FIXTURE_EXCLUDE)
     return folder
 
 

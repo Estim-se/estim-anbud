@@ -28,7 +28,7 @@ from anbud.granskning.injection import (
 from anbud.granskning.items import Item
 from anbud.models import Citation, Flag, MoneyBasis, Verdict
 from anbud.paths import repo_root
-from anbud.prep.tender import prepare
+from anbud.prep.tender import FIXTURE_EXCLUDE, prepare
 
 FIXTURE = repo_root() / "fixtures" / "synthetic" / "injection-tender"
 KEY = AnswerKey.load(FIXTURE / "expected.json")
@@ -48,7 +48,7 @@ def corpora(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Corpus]:
     out = {}
     for variant in ("injected", "clean"):
         prep = root / COMPANY / "fixtures" / variant / "prep"
-        prepare(COMPANY, FIXTURE / variant, prep, root=root)
+        prepare(COMPANY, FIXTURE / variant, prep, root=root, exclude=FIXTURE_EXCLUDE)
         out[variant] = Corpus.load(prep)
     return out
 
@@ -293,3 +293,19 @@ def test_run_outputs_load_what_the_pipeline_writes(tmp_path: Path, corpora: dict
         corpora["injected"], tmp_path / "items.json", tmp_path / "granskning.json", blobs.get
     )
     assert loaded.lens_results == run.lens_results and loaded.flags == run.flags and loaded.verdicts == run.verdicts
+
+
+def test_fixture_prep_leaves_the_calc_to_calc_posts(corpora: dict[str, Corpus], tmp_path: Path, monkeypatch) -> None:
+    for corpus in corpora.values():
+        assert [d["kind"] for d in corpus.documents].count("xlsx") == 0
+        assert not any(b.kind == "sheet_row" for b in corpus.blocks.values())
+    from anbud import cli, paths
+
+    monkeypatch.setenv("ANBUD_DATA_ROOT", str(tmp_path))
+    assert cli.main(["prep", COMPANY, "--fixture", str(FIXTURE / "clean")]) == 0
+    documents = json.loads((paths.fixture_data_dir(COMPANY, FIXTURE / "clean") / "prep" / "documents.json").read_text())
+    assert sorted(p for d in documents for p in d["paths"]) == [
+        "af-administrativa-foreskrifter.pdf",
+        "e-10-01-plan-trapphus.pdf",
+        "teknisk-beskrivning-el.pdf",
+    ]

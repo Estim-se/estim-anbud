@@ -37,7 +37,7 @@ def _eval(args: argparse.Namespace) -> int:
 def _prep(args: argparse.Namespace) -> int:
     from anbud import paths
     from anbud.prep.sources import SourceError
-    from anbud.prep.tender import PrepError, prepare
+    from anbud.prep.tender import FIXTURE_EXCLUDE, PrepError, prepare
     from anbud.store import StoreError
 
     try:
@@ -49,13 +49,13 @@ def _prep(args: argparse.Namespace) -> int:
         if kind == "fixture":
             inbox = args.fixture.expanduser().resolve()
             out = paths.fixture_data_dir(args.company_id, inbox) / "prep"
-            manifest = None
+            manifest, exclude = None, FIXTURE_EXCLUDE
         else:
             tender = paths.dev_tender_dir(args.company_id, args.tender_id)
-            inbox, out, manifest = tender / "inbox", tender / "prep", tender / "inbox.sha256"
+            inbox, out, manifest, exclude = tender / "inbox", tender / "prep", tender / "inbox.sha256", ()
             if not inbox.resolve().is_relative_to(tender.resolve()):
                 raise PrepError("the inbox resolves outside the tender's folder")
-        summary = prepare(args.company_id, inbox, out, manifest)
+        summary = prepare(args.company_id, inbox, out, manifest, exclude=exclude)
     except (PrepError, SourceError, StoreError) as exc:
         print(f"anbud prep: stopped: {exc}", file=sys.stderr)
         return REFUSED

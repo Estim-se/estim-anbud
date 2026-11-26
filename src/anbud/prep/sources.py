@@ -118,7 +118,8 @@ def _stream_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_folder(folder: Path, manifest: Path | None = None) -> Loaded:
+def load_folder(folder: Path, manifest: Path | None = None, exclude: tuple[str, ...] = ()) -> Loaded:
+    """The folder's files. `exclude` names top-level folders to leave out, like a fixture's `calc/`."""
     if folder.is_symlink() or not folder.is_dir():
         raise SourceError("the tender has no inbox folder, or it is a link")
     base = folder.resolve()
@@ -127,6 +128,8 @@ def load_folder(folder: Path, manifest: Path | None = None) -> Loaded:
     try:
         for path in sorted(folder.rglob("*")):
             rel = path.relative_to(folder)
+            if rel.parts[0] in exclude:
+                continue
             if any(part.startswith(".") for part in rel.parts):
                 hidden += path.is_file()
                 continue
