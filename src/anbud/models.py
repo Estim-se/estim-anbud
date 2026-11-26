@@ -73,6 +73,9 @@ class MoneyBasis(_Model):
     kind: Literal["missing_post", "quantity_gap", "hours_gap", "contract_formula"]
     post_ref: str | None = Field(default=None, description="Calc post id, if one is affected")
     item: str | None = Field(default=None, description="Catalog item or description for a missing post")
+    catalog_id: str | None = Field(
+        default=None, description="The catalog item's id from catalog_search, for a missing_post or quantity_gap"
+    )
     quantity: float | None = None
     unit: str | None = None
     hours: float | None = None

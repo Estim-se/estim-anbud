@@ -2,7 +2,7 @@
 name: trade_boundaries
 description: Electrical work placed on the electrical contractor by other trades' documents, the boundary list or the AF, or left between trades, that the calc doesn't price.
 role: lens
-tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, catalog_search, submit_flags]
 ---
 
 # Trade boundaries
