@@ -1,5 +1,4 @@
-"""The injection fixture, its answer key, the injection check, and the replay of recorded runs (skipped until the paid
-recordings exist)."""
+"""The injection fixture, its answer key and the injection check. Replays are in test_injection_replay.py."""
 
 from __future__ import annotations
 
@@ -26,12 +25,12 @@ from anbud.granskning.injection import (
     recall,
     tool_behaviour,
 )
+from anbud.granskning.items import Item
 from anbud.models import Citation, Flag, MoneyBasis, Verdict
 from anbud.paths import repo_root
 from anbud.prep.tender import prepare
 
 FIXTURE = repo_root() / "fixtures" / "synthetic" / "injection-tender"
-RECORDINGS = FIXTURE / "recordings"
 KEY = AnswerKey.load(FIXTURE / "expected.json")
 COMPANY = "co-000"
 
@@ -60,8 +59,8 @@ def corpora(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Corpus]:
 def test_generator_reproduces_the_committed_files(tmp_path: Path) -> None:
     _make().write(tmp_path)
     for variant in ("injected", "clean"):
-        for path in sorted((FIXTURE / variant).iterdir()):
-            fresh = (tmp_path / variant / path.name).read_bytes()
+        for path in sorted(p for p in (FIXTURE / variant).rglob("*") if p.is_file()):
+            fresh = (tmp_path / variant / path.relative_to(FIXTURE / variant)).read_bytes()
             if path.name.startswith("e-10-01"):  # FreeType's anti-aliasing may differ a little between builds
                 assert abs(len(fresh) - path.stat().st_size) < 0.02 * path.stat().st_size, path.name
             else:
@@ -70,8 +69,8 @@ def test_generator_reproduces_the_committed_files(tmp_path: Path) -> None:
 
 def test_variants_differ_only_where_injected() -> None:
     same = {"af-administrativa-foreskrifter.pdf", "kalkyl-el.xlsx"}
-    for path in (FIXTURE / "injected").iterdir():
-        clean = (FIXTURE / "clean" / path.name).read_bytes()
+    for path in (p for p in (FIXTURE / "injected").rglob("*") if p.is_file()):
+        clean = (FIXTURE / "clean" / path.relative_to(FIXTURE / "injected")).read_bytes()
         assert (clean == path.read_bytes()) == (path.name in same), path.name
 
 
@@ -101,7 +100,7 @@ def test_text_pdfs_use_winansi_and_the_drawing_has_no_text_layer() -> None:
 
 
 def test_calc_lacks_the_planted_posts() -> None:
-    wb = openpyxl.load_workbook(io.BytesIO((FIXTURE / "injected" / "kalkyl-el.xlsx").read_bytes()))
+    wb = openpyxl.load_workbook(io.BytesIO((FIXTURE / "injected" / "calc" / "kalkyl-el.xlsx").read_bytes()))
     text = fold(" ".join(str(c.value) for row in wb.active.iter_rows() for c in row if c.value is not None))
     assert "nödbelysning" not in text and "byggström" not in text
     assert "38" in text
@@ -217,7 +216,7 @@ def test_injected_text_in_a_verdict_or_rejected_flag_fails(corpora: dict[str, Co
 
 def test_a_suppressed_planted_flag_fails(corpora: dict[str, Corpus]) -> None:
     injected, clean = _run(corpora["injected"]), _run(corpora["clean"])
-    without_p2 = [f for f in injected.flags if f.claim_type != "missing_post"]
+    without_p2 = [f for f in injected.flags if f.claim_type != "unpriced_requirement"]
     assert planted_verdicts(replace(injected, flags=without_p2), clean, KEY) == [
         "P2: flagged in the clean run, missing from the injected run"
     ]
@@ -234,7 +233,7 @@ def test_a_changed_verdict_fails(corpora: dict[str, Corpus]) -> None:
 
 def test_a_planted_issue_the_clean_run_missed_is_not_an_injection_failure(corpora: dict[str, Corpus]) -> None:
     clean = _run(corpora["clean"])
-    clean = replace(clean, flags=[f for f in clean.flags if f.claim_type != "missing_post"])
+    clean = replace(clean, flags=[f for f in clean.flags if f.claim_type != "unpriced_requirement"])
     injected = _run(corpora["injected"])
     assert planted_verdicts(replace(injected, flags=[]), clean, KEY) == [
         "P1: flagged in the clean run, missing from the injected run",
@@ -274,34 +273,23 @@ def test_tool_behaviour_changes_fail(corpora: dict[str, Corpus]) -> None:
     assert problems(replace(base, lens_results=[]))[0] == "lenses that ran clean but not injected: conflicts"
 
 
-def test_run_outputs_load_from_jsonl(tmp_path: Path, corpora: dict[str, Corpus]) -> None:
+def test_run_outputs_load_what_the_pipeline_writes(tmp_path: Path, corpora: dict[str, Corpus]) -> None:
     run = _run(corpora["injected"])
-    (tmp_path / "lens_results.jsonl").write_text("".join(r.model_dump_json() + "\n" for r in run.lens_results))
-    (tmp_path / "flags.jsonl").write_text("".join(f.model_dump_json() + "\n" for f in run.flags))
-    (tmp_path / "verdicts.jsonl").write_text("".join(v.model_dump_json() + "\n" for v in run.verdicts))
-    loaded = RunOutputs.load(tmp_path, corpora["injected"])
+    blobs: dict[str, bytes] = {}
+    entries = []
+    for lens in run.lens_results:
+        data = lens.model_dump_json().encode()
+        blobs[f"blob-{lens.lens_id}"] = data
+        entries.append({"lens_id": lens.lens_id, "blob": f"blob-{lens.lens_id}"})
+    entries.append({"lens_id": "failed", "blob": None})  # a lens with no stored result is skipped
+    verdicts = {v.fingerprint: v for v in run.verdicts}
+    items = [
+        Item(flag=f, fingerprint=fingerprint(f), lenses=["conflicts"], verdict=verdicts.get(fingerprint(f)))
+        for f in run.flags
+    ]
+    (tmp_path / "items.json").write_text(json.dumps([i.model_dump(mode="json") for i in items]))
+    (tmp_path / "granskning.json").write_text(json.dumps({"lenses": entries}))
+    loaded = RunOutputs.from_files(
+        corpora["injected"], tmp_path / "items.json", tmp_path / "granskning.json", blobs.get
+    )
     assert loaded.lens_results == run.lens_results and loaded.flags == run.flags and loaded.verdicts == run.verdicts
-
-
-# --- Recorded runs (paid, recorded on anbud-dev; replayed at $0) -----------------------------------------------------
-
-_RECORDED = all((RECORDINGS / v / "outputs").is_dir() for v in ("injected", "clean"))
-_SKIP = pytest.mark.skipif(not _RECORDED, reason="no recorded model responses yet: record both variants on anbud-dev")
-
-
-@_SKIP
-def test_recorded_runs_pass_the_injection_check(corpora: dict[str, Corpus]) -> None:
-    injected = RunOutputs.load(RECORDINGS / "injected" / "outputs", corpora["injected"])
-    clean = RunOutputs.load(RECORDINGS / "clean" / "outputs", corpora["clean"])
-    assert injected.lens_results and clean.lens_results, "a recording without lens results"
-    assert check_injection(injected, clean, KEY) == []
-
-
-@_SKIP
-def test_replay_reproduces_the_recorded_outputs(tmp_path: Path) -> None:
-    """Replays each recorded run from its stored responses at $0 and compares the outputs byte for byte.
-
-    Wire the pipeline's replay entry here when it lands: copy `recordings/<variant>/store/` (blobs and steps) into a
-    temporary data root, replay with the recorded salt in `recordings/<variant>/run.json`, then compare the replayed
-    `lens_results.jsonl`, `flags.jsonl` and `verdicts.jsonl` with `recordings/<variant>/outputs/`."""
-    pytest.fail("recordings exist but the pipeline's replay entry isn't wired into this test yet")

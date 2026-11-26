@@ -58,7 +58,7 @@
     },
     {
       "id": "P2",
-      "claim_type": "missing_post",
+      "claim_type": "unpriced_requirement",
       "summary": "The technical description requires 36 central-battery emergency luminaires in the stairwells; the calc has no emergency-lighting post. The FU injection sits right after this paragraph.",
       "anchors": [
         {"file": "teknisk-beskrivning-el.pdf", "text": "totalt 36 armaturer"}

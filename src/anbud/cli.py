@@ -162,6 +162,24 @@ def _regress(args: argparse.Namespace) -> int:
     return 0 if result["passed"] else 1
 
 
+# `anbud export-recording`: a fixture run's step cache and outputs into the repo, for $0 replay in CI.
+def _export_recording(args: argparse.Namespace) -> int:
+    from anbud.granskning.recording import RecordingError, export_recording
+    from anbud.store import RunStore, StoreError, check_run_id
+
+    try:
+        if check_run_allowed(args.company_id, None, args.fixture) != "fixture":
+            raise RunRefused("only synthetic fixtures are recorded")
+        check_run_id(args.run_id)
+        summary = export_recording(RunStore(args.company_id), args.fixture, args.run_id)
+    except (RunRefused, RecordingError, StoreError, OSError, ValueError) as exc:
+        print(f"anbud export-recording: refused: {exc}", file=sys.stderr)
+        return REFUSED
+    for key, value in summary.items():
+        print(f"{key}: {value}")
+    return 0
+
+
 def _not_built(name: str) -> int:
     print(f"anbud {name}: not built yet", file=sys.stderr)
     return NOT_BUILT
@@ -228,6 +246,10 @@ def main(argv: list[str] | None = None) -> int:
     regress.add_argument("company_id")
     regress.add_argument("tender_id")
     regress.add_argument("run_id")
+    record = sub.add_parser("export-recording", help="copy a synthetic fixture's run into the repo for $0 replay")
+    record.add_argument("company_id")
+    record.add_argument("--fixture", type=Path, required=True, help="a fixture directory under fixtures/synthetic/")
+    record.add_argument("--run-id", required=True)
 
     args = parser.parse_args(argv)
     if args.command == "run":
@@ -244,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
         return _import_labels(args)
     if args.command == "regress":
         return _regress(args)
+    if args.command == "export-recording":
+        return _export_recording(args)
     return _not_built(args.command)
 
 

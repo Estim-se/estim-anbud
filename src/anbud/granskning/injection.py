@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,8 +31,10 @@ from pydantic import BaseModel, ConfigDict
 
 from anbud.granskning.contracts import LensResult, fingerprint
 from anbud.granskning.corpus import Corpus
+from anbud.granskning.items import Item
 from anbud.models import Block, Flag, Verdict
 from anbud.prep.text import normalise
+from anbud.store import RunStore
 from anbud.tools import ROLES, refusal
 
 VERDICT_RANK = {None: 0, "refuted": 1, "partly": 2, "confirmed": 3}
@@ -101,8 +103,8 @@ def anchor_blocks(corpus: Corpus, text: str, file: str | None = None) -> list[Bl
 
 @dataclass
 class RunOutputs:
-    """What the check reads from a stored run. `flags` are the merged flags the verifier saw; `verdicts` are keyed to
-    them by fingerprint."""
+    """What the check reads from a stored run: every lens's result with its tool log, the merged flags in report order,
+    and the verifier's verdicts, keyed to the flags by fingerprint."""
 
     corpus: Corpus
     lens_results: list[LensResult]
@@ -110,19 +112,36 @@ class RunOutputs:
     verdicts: list[Verdict] = field(default_factory=list)
 
     @classmethod
-    def load(cls, outputs_dir: Path, corpus: Corpus) -> RunOutputs:
-        """`lens_results.jsonl`, `flags.jsonl` and `verdicts.jsonl` in `outputs_dir`, one model per line."""
+    def from_files(
+        cls, corpus: Corpus, items_path: Path, summary_path: Path, get_blob: Callable[[str], bytes]
+    ) -> RunOutputs:
+        """What the pipeline writes: `items.json` (merged flags with their verdicts) and the run's `granskning.json`,
+        whose lens entries name the blobs that hold each lens's full result with its tool log."""
+        items = [Item.model_validate(i) for i in json.loads(items_path.read_text())]
+        summary = json.loads(summary_path.read_text())
+        lenses = [
+            LensResult.model_validate_json(get_blob(entry["blob"])) for entry in summary["lenses"] if entry.get("blob")
+        ]
+        return cls(corpus, lenses, [i.flag for i in items], [i.verdict for i in items if i.verdict is not None])
 
-        def lines(name: str) -> list[str]:
-            path = outputs_dir / name
-            return [ln for ln in path.read_text().splitlines() if ln.strip()] if path.exists() else []
+    @classmethod
+    def from_run(cls, store: RunStore, run_dir: Path, corpus: Corpus) -> RunOutputs:
+        """A run in a data root. `run_dir` is the run folder next to the tender, or a `replay-<n>` folder inside it;
+        the summary sits in the company's run store, as `granskning.json` or `granskning-replay-<n>.json`."""
+        replay = run_dir.name.startswith("replay-")
+        run_id = run_dir.parent.name if replay else run_dir.name
+        summary = store.run_dir(run_id) / (f"granskning-{run_dir.name}.json" if replay else "granskning.json")
+        return cls.from_files(corpus, run_dir / "items.json", summary, store.get_blob)
 
-        return cls(
-            corpus,
-            [LensResult.model_validate_json(ln) for ln in lines("lens_results.jsonl")],
-            [Flag.model_validate_json(ln) for ln in lines("flags.jsonl")],
-            [Verdict.model_validate_json(ln) for ln in lines("verdicts.jsonl")],
-        )
+    @classmethod
+    def from_recording(cls, recording: Path, corpus: Corpus) -> RunOutputs:
+        """A committed recording (see `recording.py`)."""
+
+        def blob(sha: str) -> bytes:
+            return (recording / "store" / "blobs" / sha[:2] / sha).read_bytes()
+
+        outputs = recording / "outputs"
+        return cls.from_files(corpus, outputs / "items.json", outputs / "granskning.json", blob)
 
     def all_flags(self) -> list[Flag]:
         return [f for r in self.lens_results for f in r.flags] + list(self.flags)
