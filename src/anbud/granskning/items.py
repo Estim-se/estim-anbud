@@ -36,6 +36,9 @@ class Item(_Model):
     lenses: list[str]
     generic: bool = False
     sources: list[str] = Field(default_factory=list, description="Fingerprints of the lens flags merged into this one")
+    source_flags: list[Flag] = Field(
+        default_factory=list, description="The lens flags merged into this one, when there were several"
+    )
     kronor: Kronor | None = None
     verdict: Verdict | None = None
     verification: Verification = "not_selected"
