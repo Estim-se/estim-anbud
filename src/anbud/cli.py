@@ -177,6 +177,14 @@ def main(argv: list[str] | None = None) -> int:
         from anbud.schema_check import main as schema_check_main
 
         return schema_check_main(argv[1:])
+    if argv and argv[0] == "plant":
+        from anbud.evals.planted.cli import plant_main
+
+        return plant_main(argv[1:])
+    if argv and argv[0] == "plant-score":
+        from anbud.evals.planted.cli import plant_score_main
+
+        return plant_score_main(argv[1:])
 
     parser = argparse.ArgumentParser(prog="anbud", description="Estim Anbud harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -215,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("recipe-extract", help="write the customer's outlet recipe from a run's calc recipe (explicit only)")
     sub.add_parser("split-status", help="counts per status, and the dev tender ids")
     sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
+    sub.add_parser("plant", help="a planted variant of a dev tender: plants, both control arms and the answer key")
+    sub.add_parser("plant-score", help="score runs on a planted variant's arms against its answer key")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
     stop.add_argument("company_id", nargs="?")
     stop.add_argument("run_id", nargs="?")
