@@ -1,12 +1,13 @@
-"""The exam on a synthetic sealed store: quarantine inside the exam, two inputs per tender, prep, the estimate, the old
-engine's dry run, deadlines, and (with a fake runner) paid runs frozen into the sealed ledger within the budget.
-Every tender, file and name here is invented."""
+"""The exam on a synthetic sealed store: quarantine inside the exam, two inputs per tender, prep and why it stopped, the
+estimate and the prefix sizes, the old engine's dry run, deadlines, and (with a fake runner) paid runs frozen into the
+sealed ledger within the budget. Every tender, file and name here is invented."""
 
 from __future__ import annotations
 
 import hashlib
 import io
 import json
+import os
 import shutil
 import zipfile
 from datetime import UTC, datetime
@@ -17,7 +18,7 @@ from conftest import assert_no_fake_names
 from test_baseline import ENGINE, LIB, fake_app, git
 from test_intake_blind import notice_page
 
-from anbud import cli, paths
+from anbud import cli, intake, paths
 from anbud.evals import exam, freeze
 from anbud.evals import split_heldout as sh
 
@@ -120,6 +121,9 @@ def test_a_dry_exam_quarantines_prepares_estimates_and_prints_aggregates_only(
     assert 0 < report.estimate_total <= report.worst_case_usd
     assert report.baseline_runs == 5 and report.dry_runs_ok == {"baseline": 5}
     assert "dry runs: baseline 5 of 5 reached the first model call" in printed
+    assert report.prefix_tokens["runs"] == 3 and 0 < report.prefix_tokens["median"] <= report.prefix_tokens["max"]
+    assert report.prefix_tokens["over_context"] == report.prefix_tokens["over_large"] == 0
+    assert "granskning prefix (dry-run estimate, before page cards): median " in printed
 
     # Deadlines: one open in 12 days, one passed (warned), one unknown.
     assert "deadlines: 1 open, nearest open deadline in 12 days; 1 passed; 1 unknown" in printed
@@ -146,18 +150,27 @@ def test_a_dry_exam_quarantines_prepares_estimates_and_prints_aggregates_only(
 class FakeEngines(exam.Engines):
     """Prep writes a summary; runs write outputs and a record, cost what they're told, and never call a model."""
 
-    def __init__(self, costs: dict[str, float | None]) -> None:
+    def __init__(
+        self,
+        costs: dict[str, float | None],
+        stops: dict[str, str] | None = None,
+        tokens: dict[str, int] | None = None,
+    ) -> None:
         self.costs = costs
+        self.stops = stops or {}
+        self.tokens = tokens or {}
         self.calls: list[tuple[str, str]] = []
 
-    def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> bool:
+    def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> str | None:
+        if tender_id in self.stops:
+            return self.stops[tender_id]
         prep = paths.dev_tender_dir(company_id, tender_id, vroot) / "prep"
         prep.mkdir(parents=True, exist_ok=True)
         (prep / "summary.json").write_text(json.dumps({"documents": 2, "pages_by_kind": {"text": 50}}))
-        return True
+        return None
 
     def granskning_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> int | None:
-        return 10_000
+        return self.tokens.get(tender_id, 10_000)
 
     def kalkyl_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> float | None:
         return 1.0
@@ -244,6 +257,15 @@ def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget
     # on each input ($10 stop). The estimate fits $40, but a run that could pass it by its hard stop isn't started:
     # the last tender's Granskning and old-engine runs.
     assert report.spent_usd <= 40.0 and report.runs_skipped_budget == 2
+    assert report.prefix_tokens == {
+        "runs": 3,
+        "median": 10_000,
+        "max": 10_000,
+        "over_context": 0,
+        "over_large": 0,
+        "context": 1_000_000,
+        "large": 200_000,
+    }
     assert sum(report.runs_ok.values()) == report.frozen == len(runner.calls)
     records = [json.loads(line) for line in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
     assert len(records) == report.frozen and all(r["kind"] == "freeze" for r in records)
@@ -257,3 +279,99 @@ def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget
     plans = freeze.verify(freeze.ledger_file("co-002")).kinds
     assert plans == {"preregistration": 1}  # the plan only: no run is frozen in the plain ledger
     assert "frozen runs came after their tender's deadline" in "\n".join(lines)
+
+
+def test_prep_stops_are_counted_by_category_and_prefix_sizes_summarised(data_root: Path) -> None:
+    sealed_store(data_root)
+    runner = FakeEngines(
+        {"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0},
+        stops={"t-0003": "security_marking"},
+        tokens={"t-0002": 250_000, "t-0004": 1_200_000},
+    )
+    lines: list[str] = []
+    report = exam.run_exam("co-002", "prospective", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
+    printed = "\n".join(lines)
+    assert report.prepared == 2 and report.prep_failed == 1 and report.prep_stops == {"security_marking": 1}
+    assert "prep: 2 prepared, 1 stopped (security_marking 1); " in printed
+    assert report.prefix_tokens["median"] == 725_000 and report.prefix_tokens["max"] == 1_200_000
+    assert report.prefix_tokens["over_context"] == 1 and report.prefix_tokens["over_large"] == 2
+    assert (
+        "granskning prefix (dry-run estimate, before page cards): median 725,000 tokens, max 1,200,000; "
+        "of 2 runs 1 over the context (1,000,000), 2 over 200,000"
+    ) in printed
+    stopped = paths.dev_tender_dir("co-002", "t-0003", exam.variant_root("co-002", "prospective", "kalkyl"))
+    assert not (stopped / "prep").exists()  # a tender whose first input stopped isn't prepared a second time
+
+
+@pytest.mark.parametrize(
+    ("code", "stderr", "category"),
+    [
+        (0, "", None),
+        (3, "anbud prep: refused: a held-out tender\n", "refused"),
+        (
+            3,
+            "anbud prep: stopped: 2 security marking(s) (hemlig), the first in document x, block y.\n",
+            "security_marking",
+        ),
+        (3, "anbud prep: stopped: two files share a block-id prefix; block ids would collide\n", "id_collision"),
+        (3, "anbud prep: stopped: an image is larger than the pixel or page limit\n", "image_limit"),
+        (
+            3,
+            "anbud prep: stopped: the inbox, manifest or output folder is in held-out or sealed storage",
+            "sealed_storage",
+        ),
+        (3, "anbud prep: stopped: the inbox doesn't match its intake manifest (1 unexpected, 0 missing)\n", "manifest"),
+        (3, "anbud prep: stopped: the tender has no inbox folder, or it is a link\n", "manifest"),
+        (3, "anbud prep: stopped: a file in the inbox can't be read\n", "unreadable_file"),
+        (3, "anbud prep: stopped: MemoryError while reading the tender\n", "read_error"),
+        (3, "anbud prep: stopped: a write outside the company's folder\n", "other_stop"),
+        (1, "Traceback (most recent call last):\nKeyError: 'x'\n", "crash"),
+        (-9, "", "crash"),
+    ],
+)
+def test_a_prep_stop_is_categorised_from_its_one_stderr_line(code: int, stderr: str, category: str | None) -> None:
+    assert exam.prep_stop(code, stderr) == category
+
+
+def test_every_prep_stop_fragment_is_one_prep_still_writes() -> None:
+    """The categories match prep's own messages; a reworded message fails here, not silently as `other_stop`."""
+    src = Path(__file__).resolve().parents[1] / "src" / "anbud"
+    text = "".join(p.read_text() for p in [*sorted((src / "prep").glob("*.py")), src / "cli.py", src / "store.py"])
+    for fragment, _ in exam.PREP_STOPS:
+        assert fragment in text
+
+
+def _dev_tender(vroot: Path, tender_id: str, inbox_files: dict[str, bytes], *, dev: bool = True) -> Path:
+    tender = paths.dev_tender_dir("co-002", tender_id, vroot)
+    for rel, data in inbox_files.items():
+        (tender / "inbox" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tender / "inbox" / rel).write_bytes(data)
+    (tender / "inbox.sha256").write_text(intake._manifest(tender / "inbox"))
+    if dev:
+        exam._ensure_dev(vroot, "co-002", tender_id)
+    return tender
+
+
+def test_real_prep_stops_on_synthetic_files_get_their_category(data_root: Path, tmp_path: Path) -> None:
+    """`anbud prep` in a child process, as the exam runs it, on invented files that make it stop."""
+    vroot = data_root / "variant"
+    runner = exam.Engines(data_root / "logs", tmp_path, "HEAD", None)
+    text = b"Teknisk beskrivning.\n\nForty sockets in the hall.\n"
+    _dev_tender(vroot, "t-0001", {"beskrivning.txt": text})
+    _dev_tender(vroot, "t-0002", {"beskrivning.txt": text, "pm.txt": b"HEMLIG\n\nNot for the bidders.\n"})
+    late = _dev_tender(vroot, "t-0003", {"beskrivning.txt": text})
+    (late / "inbox" / "added-after-intake.txt").write_bytes(b"A file the manifest doesn't list.\n")
+    _dev_tender(vroot, "t-0005", {"beskrivning.txt": text}, dev=False)  # not a dev tender in this data root
+    expected = {"t-0001": None, "t-0002": "security_marking", "t-0003": "manifest", "t-0005": "refused"}
+    if os.geteuid() != 0:  # root reads a file without read permission
+        locked = _dev_tender(vroot, "t-0004", {"beskrivning.txt": text, "låst.txt": b"Locked.\n"})
+        (locked / "inbox" / "låst.txt").chmod(0)
+        expected["t-0004"] = "unreadable_file"
+    try:
+        got = {t: runner.prep(vroot, "co-002", t, f"prep-{t}.log") for t in expected}
+    finally:
+        for path in vroot.rglob("låst.txt"):
+            path.chmod(0o600)
+    assert got == expected
+    assert (paths.dev_tender_dir("co-002", "t-0001", vroot) / "prep" / "summary.json").is_file()
+    assert sorted(p.name for p in (data_root / "logs").iterdir()) == sorted(f"prep-{t}.log" for t in expected)
