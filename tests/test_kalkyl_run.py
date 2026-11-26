@@ -327,6 +327,9 @@ def test_the_cli_runs_with_a_fake_sdk(tender: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test-value")
     monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: fake_sdk())
+    from anbud.granskning import provenance
+
+    monkeypatch.setattr(provenance, "git_state", lambda root=None: provenance.GitState("a" * 40, False, None))
     assert cli.main(["kalkyl", "co-001", "t-0001", "--catalog", "synthetic", "--run-id", "kalkyl-cli"]) == 0
     out = capsys.readouterr().out
     assert "posts_priced: 4" in out and "sk-test-value" not in out
@@ -335,3 +338,32 @@ def test_the_cli_runs_with_a_fake_sdk(tender: Path, monkeypatch: pytest.MonkeyPa
 
 def test_good_answers_cover_the_synthetic_tender() -> None:
     assert set(GOOD) == {"aaaaaa-000001", "bbbbbb-000001"}
+
+
+def test_the_summary_records_code_and_input_hashes(tender: Path) -> None:
+    code = {"harness_sha": "0" * 40, "dirty": False}
+    summary = _run(fake_sdk(), code=code)
+    assert summary["code"] == code
+    inputs = summary["inputs"]
+    assert set(inputs) == {"blocks", "cells", "tiles", "catalog", "customer_recipe", "default_recipe"}
+    assert len(inputs["blocks"]) == 64 and len(inputs["catalog"]) == 64
+    assert "/" not in json.dumps(inputs)  # hashes only, never a path
+
+
+def test_a_paid_kalkyl_run_is_refused_on_a_dirty_tree(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from anbud import cli
+    from anbud.granskning import provenance
+
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.setattr(provenance, "git_state", lambda root=None: provenance.GitState("a" * 40, True, "b" * 64))
+    monkeypatch.setattr(cli, "check_run_allowed", lambda *a, **k: "dev")
+
+    def no_key(*a: object, **k: object) -> str:
+        raise AssertionError("the key must not be read on a dirty tree")
+
+    monkeypatch.setattr("anbud.model_client.keychain_key", no_key)
+    assert cli.main(["kalkyl", "co-001", "t-0001", "--catalog", "synthetic"]) == cli.REFUSED
+    assert "clean tree" in capsys.readouterr().err

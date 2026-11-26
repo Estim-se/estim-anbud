@@ -15,6 +15,7 @@ Writes, under `<tender>/kalkyl/<run_id>/`:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -133,6 +134,25 @@ def load_bound_recipe(company_id: str, catalog: Catalog, root: Path | None = Non
         raise KalkylError(str(exc)) from None
 
 
+def _file_sha(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def input_hashes(company_id: str, tender: Path, catalog_name: str, root: Path | None = None) -> dict[str, str | None]:
+    """sha256 of every input file the run reads, by role. File names only, never a path or a tender name."""
+    from anbud.kalkyl.recipe import customer_path, default_path
+
+    base = (root or paths.data_root()).expanduser()
+    return {
+        "blocks": _file_sha(tender / "prep" / "blocks.jsonl"),
+        "cells": _file_sha(tender / "prep" / CELLS_FILE),
+        "tiles": _file_sha(tender / "prep" / "tiles.json"),
+        "catalog": _file_sha(base / "catalogs" / f"{catalog_name}.json"),
+        "customer_recipe": _file_sha(customer_path(company_id, root)),
+        "default_recipe": _file_sha(default_path(root)),
+    }
+
+
 def new_run_id(tender_id: str) -> str:
     return f"kalkyl-{tender_id}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
@@ -147,9 +167,13 @@ def run_dev_tender(
     root: Path | None = None,
     config: Config | None = None,
     kalkyl: KalkylConfig | None = None,
+    code: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run Kalkyl on a dev tender (the caller has checked it is one) and write the outputs. Returns counts only.
-    With `sdk=None` the run is a replay: every answer must come from the run's step cache or the card store."""
+    With `sdk=None` the run is a replay: every answer must come from the run's step cache or the card store.
+
+    `code` is the provenance block (harness commit, dirty flag, config hashes); the summary also records sha256
+    hashes of the inputs read (blocks, cells, catalog, recipe), so a frozen run can be traced to what it ran on."""
     config = config or load_config()
     kalkyl = kalkyl or load_kalkyl_config()
     tender = paths.dev_tender_dir(company_id, tender_id, root)
@@ -174,6 +198,8 @@ def run_dev_tender(
         store.write_file(out / "cards_masking.json", canonical([m.model_dump(mode="json") for m in cards.cards.masked]))
     summary = {
         "run_id": run_id,
+        "code": code,
+        "inputs": input_hashes(company_id, tender, catalog_name or kalkyl.default_catalog, root),
         "catalog": catalog.name,
         "tiles": len(corpus.tiles),
         "cards": dict(cards.sources),

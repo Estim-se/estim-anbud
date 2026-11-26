@@ -74,7 +74,7 @@ def _kalkyl(args: argparse.Namespace) -> int:
     """Kalkyl in shadow on a dev tender. Paid unless --dry-run or --replay; never in CI."""
     import os
 
-    from anbud.config import load_config
+    from anbud.config import CONFIG_DIR, load_config
     from anbud.kalkyl.catalog import CatalogError
     from anbud.kalkyl.run import KalkylError, plan, run_dev_tender
     from anbud.model_client import KeyMissing, keychain_key, make_sdk_client
@@ -94,15 +94,24 @@ def _kalkyl(args: argparse.Namespace) -> int:
         if args.dry_run:
             summary = plan(args.company_id, args.tender_id, catalog_name=args.catalog)
         else:
+            from anbud.granskning import provenance
+
+            state = provenance.git_state()
+            code = provenance.code_block(state)
+            code["kalkyl_config_sha256"] = provenance._sha((CONFIG_DIR / "kalkyl.toml").read_bytes())
             sdk = None
             if not args.replay:
                 if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
                     print("anbud kalkyl: refused: paid calls never run in CI", file=sys.stderr)
                     return REFUSED
+                refusal = provenance.paid_refusal(state)
+                if refusal:
+                    print(f"anbud kalkyl: refused: {refusal}", file=sys.stderr)
+                    return REFUSED
                 config = load_config()
                 sdk = make_sdk_client(config, keychain_key(account=config.workspace))
             summary = run_dev_tender(
-                args.company_id, args.tender_id, sdk=sdk, catalog_name=args.catalog, run_id=args.run_id
+                args.company_id, args.tender_id, sdk=sdk, catalog_name=args.catalog, run_id=args.run_id, code=code
             )
     except (KalkylError, CatalogError, StoreError, KeyMissing, IntakeStop) as exc:
         print(f"anbud kalkyl: stopped: {exc}", file=sys.stderr)
