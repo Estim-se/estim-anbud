@@ -165,6 +165,7 @@ def run_pipeline(
     concurrency: int = 3,
     on_progress: Callable[[str], None] | None = None,
     summary_file: str = "granskning.json",
+    code: dict[str, Any] | None = None,
 ) -> PipelineResult:
     settings = settings or load_settings()
     say = on_progress or (lambda _msg: None)
@@ -192,6 +193,7 @@ def run_pipeline(
         concurrency=concurrency,
         on_progress=say,
         summary_file=summary_file,
+        code=code,
     )
 
     if catalog is not None:

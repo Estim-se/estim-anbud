@@ -233,6 +233,14 @@ def system_blocks(corpus: Corpus, calc: Iterable[CalcPost]) -> list[dict[str, An
     ]
 
 
+CHARS_PER_TOKEN = 1.6  # fitted on a paid run's measured prefix; every run summary records chars and tokens to re-fit
+
+
+def prefix_chars(blocks: list[dict[str, Any]]) -> int:
+    return sum(len(b.get("text", "")) for b in blocks)
+
+
 def estimate_tokens(blocks: list[dict[str, Any]]) -> int:
-    """A rough token count for budgeting before the first call: about 3.5 characters per token for Swedish text."""
-    return int(sum(len(b.get("text", "")) for b in blocks) / 3.5)
+    """An estimate of the prefix's tokens before the first call measures it. Tender text with ids, tables and
+    numbers runs far denser than prose: about 1.6 characters per token."""
+    return int(prefix_chars(blocks) / CHARS_PER_TOKEN)

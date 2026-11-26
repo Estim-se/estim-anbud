@@ -41,6 +41,7 @@ def _dirs(args: argparse.Namespace, kind: str) -> tuple[Path, Path, Path]:
 
 def run_command(args: argparse.Namespace, kind: str) -> int:
     from anbud.config import load_config
+    from anbud.granskning import provenance
     from anbud.granskning.calc import load_calc
     from anbud.granskning.catalog import load_named_catalog
     from anbud.granskning.corpus import Corpus
@@ -82,14 +83,21 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     except FileNotFoundError:
         catalog = None
         print("anbud run: no catalog file; kronor prices contract formulas and calc posts only", file=sys.stderr)
+    state = provenance.git_state()
+    code = provenance.code_block(state)
     if args.dry_run:
-        return dry_run(corpus, calc, lenses, catalog, config.budgets)
+        return dry_run(corpus, calc, lenses, catalog, config.budgets, code)
     store = RunStore(args.company_id)
     run_dir = runs_dir / run_id
     if args.replay:
         sdk = None
         run_dir = replay_dir(run_dir)  # never over the run it replays
     else:
+        refusal = provenance.paid_refusal(state)
+        if refusal is not None:
+            print(f"anbud run: {refusal}", file=sys.stderr)
+            return PAID_REFUSED
+        store.open_run(run_id, code=code)  # a new run's manifest records its code; a resumed run keeps the first
         try:
             sdk = make_sdk_client(config, keychain_key(account=config.workspace))
         except KeyMissing as exc:
@@ -110,6 +118,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             prep_dir=prep_dir,
             run_dir=run_dir,
             summary_file=f"granskning-{run_dir.name}.json" if args.replay else "granskning.json",
+            code=code,
             catalog=catalog,
             settings=settings,
             concurrency=args.concurrency,
@@ -119,7 +128,8 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
         print(f"anbud run: stopped: {exc}", file=sys.stderr)
         return PAID_REFUSED
     g = result.granskning
-    print(f"prefix about {g.prefix_tokens} tokens; lens caps {g.caps}")
+    how = "measured" if g.prefix_measured else "estimated"
+    print(f"prefix {g.prefix_tokens} tokens ({how}); lens caps {g.caps}")
     print(f"  map: {g.map.outcome.status}, ${g.map.outcome.cost_usd:.2f}")
     for lens in g.lenses:
         error = f" ({lens.error})" if lens.error else ""
@@ -148,11 +158,13 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     return 0
 
 
-def dry_run(corpus: Any, calc: list[Any], lenses: list[Any], catalog: Any, budgets: dict[str, Any]) -> int:
+def dry_run(
+    corpus: Any, calc: list[Any], lenses: list[Any], catalog: Any, budgets: dict[str, Any], code: dict[str, Any]
+) -> int:
     """Counts for a run that makes no model call: the prefix as the map would send it before page cards add their
     blocks, the tiles the cards would read, and the lens tier the estimate picks. No key, no store writes."""
     from anbud.granskning.catalog import calc_hourly_rate
-    from anbud.granskning.prefix import estimate_tokens, system_blocks
+    from anbud.granskning.prefix import CHARS_PER_TOKEN, estimate_tokens, system_blocks
     from anbud.granskning.run import lens_caps
 
     blocks = system_blocks(corpus, calc)
@@ -160,9 +172,19 @@ def dry_run(corpus: Any, calc: list[Any], lenses: list[Any], catalog: Any, budge
     tokens = estimate_tokens(blocks)
     caps = lens_caps(budgets, tokens)
     print(f"dry run: {len(corpus.blocks)} blocks, {len(corpus.documents)} documents, {len(calc)} calc posts")
-    print(f"  system blocks: {len(blocks)}, chars {sizes} = {sum(sizes)}, about {tokens} tokens (before page cards)")
+    print(f"  system blocks: {len(blocks)}, chars {sizes} = {sum(sizes)}")
+    print(
+        f"  estimated prefix: {tokens} tokens at {CHARS_PER_TOKEN} chars/token, before page cards add their text; "
+        "a paid run measures it on the first call"
+    )
     print(f"  tiles for page cards: {len(corpus.tiles)}")
-    print(f"  lens tier: {caps.max_turns} turns, ${caps.max_usd:.2f} per lens; {len(lenses)} lenses")
+    print(
+        f"  lens tier (from the estimate): {caps.max_turns} turns, ${caps.max_usd:.2f} per lens; {len(lenses)} lenses"
+    )
+    dirty = f"dirty, diff {code['diff_sha256'][:12]}" if code["dirty"] and code["diff_sha256"] else "clean"
+    sha = (code["harness_sha"] or "none")[:12]
+    paid = "allowed" if code["harness_sha"] and not code["dirty"] else "refused on this tree"
+    print(f"  harness {sha}, {dirty}; a paid run is {paid}")
     rate = calc_hourly_rate(calc)
     if catalog is None:
         print("  catalog: none")
