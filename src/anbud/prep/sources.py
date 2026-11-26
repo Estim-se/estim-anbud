@@ -108,10 +108,10 @@ def detect_kind(data: bytes, name: str) -> DocKind:
     if head.startswith((b"Rar!", b"7z\xbc\xaf\x27\x1c", b"\x1f\x8b")):
         return "archive"
     suffix = Path(name).suffix.lower()
+    if suffix in (".txt", ".md") and b"\x00" not in head:
+        return "text"  # as before web pages were read: a note stays a note, whatever markup it starts with
     if _html_kind(data, suffix):
         return "html"
-    if suffix in (".txt", ".md") and b"\x00" not in head:
-        return "text"
     return "other"
 
 

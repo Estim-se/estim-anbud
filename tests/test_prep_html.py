@@ -94,6 +94,8 @@ def test_web_pages_are_detected_by_content_or_by_name() -> None:
     assert detect_kind(b"<div>a fragment</div>", "page.HTM") == "html"
     assert detect_kind(b"<div>\x00</div>", "page.html") == "other"
     assert detect_kind(b"<div>a fragment</div>", "page.txt") == "text"
+    assert detect_kind(b"<html><body>notes</body></html>", "notes.txt") == "text"
+    assert detect_kind(b"<!DOCTYPE html><p>x</p>", "notes.md") == "text"
     assert detect_kind(mhtml("<p>x</p>"), "x") == "html"
     assert detect_kind(b"anything", "saved.mht") == "html"
     assert detect_kind(webarchive(b"<p>x</p>"), "saved.webarchive") == "html"
@@ -246,8 +248,8 @@ def test_a_page_titled_as_an_answer_with_no_h1_is_withheld_whole() -> None:
 
 
 def test_deep_nesting_and_broken_markup_do_not_crash() -> None:
-    builder, _ = read(page("<div>" * 5000 + "Djup text." + "</div>" * 5000 + "<p>Efter.</p>"))
-    assert texts(builder)[-2:] == ["Djup text.", "Efter."]
+    builder, withheld = read(page("<div>" * 5000 + "Djup text." + "</div>" * 5000 + "<p>Efter.</p>"))
+    assert texts(builder) == ["Annons", "Efter."] and withheld == 1  # text past the cap can't be checked
     builder, _ = read("<html><body><p>Öppen <b>fet <i>kursiv<p>Nästa &bogus; &amp &#99999999; <td>cell")
     assert builder.blocks and all(b.text for b in builder.blocks)
     builder, _ = read(f"<p title='{'x' * 1_000_000}'>Lång attribut.</p>")
@@ -271,6 +273,88 @@ def test_markup_the_parser_rejects_is_unreadable(data_root: Path, monkeypatch: p
     assert [d["kind"] for d in docs] == ["html", "html"]
     assert {d["skipped"] for d in docs} == {"unreadable, damaged or password-protected"}
     assert summary["withheld_sections"] == 0 and summary["block_chars"] == 0
+
+
+def test_a_heading_that_is_never_shown_does_not_end_a_withheld_section() -> None:
+    for inner in ("<nav><h2>Meny</h2></nav>", "<template><h2>Mall</h2></template>", "<h2></h2>", "<h2> <br> </h2>"):
+        builder, withheld = read(
+            page(
+                f"<h1>A</h1><h2>Frågor och svar</h2><p>Svar ett.</p>{inner}<p>Svar två.</p>"
+                "<h2>Dokument</h2><p>Kvar.</p>"
+            )
+        )
+        assert withheld == 1 and texts(builder) == ["A", "Dokument", "Kvar."], inner
+
+
+def test_a_labelled_heading_that_ends_a_section_is_still_withheld() -> None:
+    builder, withheld = read(
+        page("<h1>A</h1><h2>Frågor och svar</h2><p>Svar.</p><h2 class='question-list'>Övrigt</h2><p>Mer svar.</p>")
+    )
+    assert withheld == 2 and texts(builder) == ["A"]
+
+
+def test_a_summary_or_legend_in_a_table_cell_withholds_its_element() -> None:
+    builder, withheld = read(
+        page(
+            "<h1>A</h1><table><tr><td>Före</td><td><details><summary>Frågor och svar</summary><p>Svar.</p></details>"
+            "<fieldset><legend>Rättelse</legend><p>Rättat.</p></fieldset></td></tr><tr><td>Nästa rad</td></tr></table>"
+        )
+    )
+    assert withheld == 2 and texts(builder) == ["A", "Före", "Nästa rad"]
+
+
+def test_unclosed_inline_elements_past_the_depth_cap_keep_the_answer_key_withheld() -> None:
+    for opener in ("<a name=x>", "<font size=2>", "<span>"):
+        flood = opener * 1100
+        builder, withheld = read(
+            page(
+                f"<h1>A</h1>{flood}<h2>Frågor och svar</h2><p>Svar.</p>"
+                "<h2>Dokument</h2><p>Kvar.</p><div class='question-list'>Mer.</div>"
+            )
+        )
+        assert withheld == 2 and texts(builder) == ["A", "Dokument", "Kvar."], opener
+
+
+def test_unclosed_options_do_not_swallow_the_rest_of_the_page() -> None:
+    builder, withheld = read(page("<h1>A</h1><select>" + "<option>Val" * 1100 + "</select><p>Efter listan.</p>"))
+    assert withheld == 0 and texts(builder) == ["A", "Efter listan."]
+
+
+def test_text_opened_past_the_depth_cap_is_withheld_and_counted() -> None:
+    flood = "<div>" * 1100
+    builder, withheld = read(page(f"<h1>A</h1>{flood}<h2>Frågor och svar</h2><p>Svar.</p>"))
+    assert withheld == 1 and texts(builder) == ["A"]
+
+
+def test_a_page_mostly_in_utf8_with_one_stray_byte_stays_utf8() -> None:
+    body = "<h1>A</h1><h2>Ändring 1</h2><p>Dolt.</p><h2>Rättelse</h2><p>Dolt två.</p><h2>Övrigt</h2><p>Kvar.</p>"
+    raw = page(body, head="").encode() + b"<p>Citat \x93fr\xe5n Word\x94.</p>"
+    builder, withheld = read(raw)
+    assert withheld == 2 and texts(builder)[:3] == ["A", "Övrigt", "Kvar."]
+
+
+def test_a_head_left_open_does_not_swallow_the_body() -> None:
+    builder, _ = read("<html><head><title>T</title><meta charset=utf-8><body><h1>Rubrik</h1><p>Text.</p>")
+    assert texts(builder) == ["Rubrik", "Text."]
+    builder, _ = read("<html><head><title>T</title><h1>Rubrik</h1><p>Text.</p>")
+    assert texts(builder) == ["Rubrik", "Text."]
+    builder, _ = read("<html><head><title>T</title>Lös text.")
+    assert texts(builder) == ["T", "Lös text."]
+
+
+def test_hidden_text_in_a_table_row_is_its_own_hidden_block() -> None:
+    builder, _ = read(
+        page(
+            "<h1>A</h1><table><tr><td><span style='display:none'>20261126</span>26 nov</td><td>Synlig</td></tr></table>"
+        )
+    )
+    rows = [(b.text, b.hidden) for b in builder.blocks if b.kind == "table_row"]
+    assert rows == [("26 nov | Synlig", False), ("20261126", True)]
+
+
+def test_a_charset_whose_codec_rejects_replacement_falls_back() -> None:
+    builder, _ = read(page("<h1>Åtgärd</h1>", head="<meta charset='idna'>"))
+    assert texts(builder) == ["Åtgärd"]
 
 
 # -- end to end

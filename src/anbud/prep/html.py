@@ -12,8 +12,11 @@
   When the page has no h1, its title stands in as one, under the same rule.
 - Hidden elements (the hidden attribute, aria-hidden, inline display:none or visibility:hidden) become hidden blocks.
 - The parser is event-based and the element stack is an explicit list with a depth cap, so deep or broken markup
-  can't exhaust the stack. Elements opened past the cap are counted, not tracked: a close tag then closes one of them
-  first, so a withheld element is never closed early by markup nested past the cap.
+  can't exhaust the stack. At the cap, unclosed inline elements that change nothing (an `a`, `font` or `span` left
+  open) are folded into their parent and only counted, so their close tags still match. If the stack is still full,
+  elements opened past the cap are counted, not tracked: a close tag then closes one of them first, so a withheld
+  element is never closed early, and their text is withheld and counted, because headings and labels past the cap
+  can't be tracked.
 
 Layout tables (a whole page inside a table, still common on older platforms) are detected when a cell holds a heading
 or another table: from there the row is read as ordinary blocks instead of one long row.
@@ -59,11 +62,14 @@ _IMPLIED: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "thead": (frozenset(("thead", "tbody", "tfoot")), frozenset(("table",))),
     "tbody": (frozenset(("thead", "tbody", "tfoot")), frozenset(("table",))),
     "tfoot": (frozenset(("thead", "tbody", "tfoot")), frozenset(("table",))),
+    "option": (frozenset(("option",)), frozenset(("select", "datalist", "optgroup"))),
 }
 _P = frozenset(("p",))
 _P_AND_HEADINGS = frozenset(("p", *_HEADINGS))
 _HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
 _LABEL_ATTRS = frozenset(("id", "class", "aria-label", "title"))
+# What a head holds. Any other start tag, or text, starts the body, since `</head>` is optional.
+_HEAD_CONTENT = frozenset("title meta link style script noscript base template".split())
 
 _META_CHARSET = re.compile(rb"<meta[^>]*?charset\s*=\s*[\"']?\s*([A-Za-z0-9_.:-]{1,40})", re.IGNORECASE)
 _XML_ENCODING = re.compile(rb"<\?xml[^>]*?encoding\s*=\s*[\"']([A-Za-z0-9_.:-]{1,40})", re.IGNORECASE)
@@ -105,12 +111,22 @@ def decode(raw: bytes, declared: str | None = None) -> str:
     if codec:
         try:
             return raw.decode(codec, errors="replace")
-        except LookupError:  # a codec that isn't a text encoding
+        except (LookupError, UnicodeError):  # a codec that isn't a text encoding, or can't replace what it can't read
             pass
+    return _utf8_or_cp1252(raw)
+
+
+def _utf8_or_cp1252(raw: bytes) -> str:
+    """UTF-8 when most of the page's non-ASCII text reads as UTF-8: one stray Windows-1252 byte pasted from Word must
+    not turn every å, ä and ö into mojibake, which the answer-key rule would no longer recognise."""
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return raw.decode("cp1252", errors="replace")
+        pass
+    text = raw.decode("utf-8", errors="replace")
+    bad = text.count("\ufffd")
+    good = sum(1 for c in text if c > "\x7f") - bad
+    return text if good > bad else raw.decode("cp1252", errors="replace")
 
 
 def _mhtml_pages(data: bytes) -> list[str]:
@@ -137,16 +153,33 @@ def _webarchive_page(data: bytes) -> str:
     return decode(raw, encoding if isinstance(encoding, str) else None)
 
 
+def _cells_text(cells: list[list[str]]) -> str:
+    texts = (" ".join("".join(c).split()) for c in cells)
+    return " | ".join(c for c in texts if c)
+
+
 @dataclass(eq=False)
 class _Row:
-    depth: int  # stack length with the row's own element on top
+    """A table row's text. Hidden text in a visible row is kept apart, as sheets.py does with hidden columns, so a
+    visible row isn't marked hidden and what the sender hid doesn't blend into what they showed."""
+
     hidden: bool
     cells: list[list[str]] = field(default_factory=list)
+    hidden_cells: list[list[str]] = field(default_factory=list)
     layout: bool = False
 
-    def text(self) -> str:
-        cells = (" ".join("".join(c).split()) for c in self.cells)
-        return " | ".join(c for c in cells if c)
+    def new_cell(self) -> None:
+        self.cells.append([])
+        self.hidden_cells.append([])
+
+    def pieces(self) -> list[Piece]:
+        out = []
+        if text := _cells_text(self.cells):
+            out.append(Piece("table_row", text, hidden=self.hidden))
+        if text := _cells_text(self.hidden_cells):
+            out.append(Piece("table_row", text, hidden=True))
+        self.cells, self.hidden_cells = [], []
+        return out
 
 
 @dataclass(eq=False)
@@ -162,6 +195,8 @@ class _Frame:
     label: _Frame | None = None  # the summary or legend this text is in
     title: bool = False
     row: _Row | None = None
+    plain: bool = False  # inline and changes nothing: may be folded into its parent at the depth cap
+    folded: dict[str, int] | None = None  # plain children folded into this frame, by tag, still open
 
 
 @dataclass(eq=False)
@@ -196,6 +231,10 @@ class _Page(HTMLParser):
         self.root = _Frame("#root")
         self.stack: list[_Frame] = [self.root]
         self.overflow = 0  # elements opened past MAX_DEPTH and not yet closed
+        self.overflow_counted = False  # text past the cap was withheld, and counted, since overflow last began
+        self.plain_open = 0  # plain frames on the stack
+        self.head: _Frame | None = None
+        self.candidate: _Frame | None = None  # a heading that ends the withheld section if it shows any text
         self.rows: list[_Row] = []
         self.section: _Section | None = None
         self.pieces: list[Piece] = []
@@ -212,6 +251,10 @@ class _Page(HTMLParser):
             if tag in ("br", "wbr", "hr"):
                 self._text(" ")
             return
+        if self.head is not None and (tag == "body" or (tag not in _HEAD_CONTENT and self.stack[-1].tag != "title")):
+            self._leave_head()
+        if not self.overflow and len(self.stack) > MAX_DEPTH and self.plain_open >= MAX_DEPTH // 8:
+            self._fold_plain()
         if self.overflow or len(self.stack) > MAX_DEPTH:
             self.overflow += 1
             return
@@ -220,8 +263,6 @@ class _Page(HTMLParser):
         if tag == "h1" and not parent.skip:
             self.has_h1 = True
         level = _HEADINGS.get(tag)
-        if level is not None and self.section and level <= self.section.level:
-            self.section = None
         values = dict(attrs)
         frame = _Frame(
             tag,
@@ -235,20 +276,37 @@ class _Page(HTMLParser):
         )
         if tag in _LABELS:
             frame.label = frame
-        if not frame.withheld and not frame.skip and not self.section and _labels_answer(values):
+        # A heading may end the withheld section, but only once it shows text: one in a nav, a template or an empty
+        # one is never emitted, so it can't end anything.
+        ends_section = bool(
+            level is not None and self.section and level <= self.section.level and not (frame.skip or frame.withheld)
+        )
+        if not frame.withheld and not frame.skip and (not self.section or ends_section) and _labels_answer(values):
             frame.withheld = True
             self.withheld += 1
+            ends_section = False
+        if ends_section:
+            self.candidate = frame
+        frame.plain = (
+            tag not in _BLOCK
+            and tag not in _SKIP
+            and tag not in _LABELS
+            and tag not in _IMPLIED
+            and (frame.hidden, frame.withheld) == (parent.hidden, parent.withheld)
+        )
         row = self._active_row()
-        if row and (level is not None or tag == "table"):
-            self._end_row_cells(row)  # a layout table: read the rest of this row as blocks
+        if row and (level is not None or tag == "table" or tag in _LABELS):
+            self._end_row_cells(row)  # a layout table, or a label to classify: read the rest of this row as blocks
         self._boundary(frame)
         self.stack.append(frame)
-        row = self._active_row()
+        self.plain_open += frame.plain
+        if tag == "head" and self.head is None:
+            self.head = frame
         if tag == "tr":
-            frame.row = _Row(len(self.stack), frame.hidden)
+            frame.row = _Row(frame.hidden)
             self.rows.append(frame.row)
-        elif tag in ("td", "th") and row and len(self.stack) == row.depth + 1:
-            row.cells.append([])
+        elif tag in ("td", "th") and row and parent.row is row:
+            row.new_cell()
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
@@ -260,13 +318,20 @@ class _Page(HTMLParser):
             return
         if self.overflow:
             self.overflow -= 1
+            self.overflow_counted = self.overflow_counted and self.overflow > 0
             return
-        for i in range(len(self.stack) - 1, 0, -1):
-            if self.stack[i].tag == tag:
+        for i in range(len(self.stack) - 1, -1, -1):
+            frame = self.stack[i]
+            if frame.folded and frame.folded.get(tag):  # a folded child is nested inside this frame's children
+                frame.folded[tag] -= 1
+                return
+            if i and frame.tag == tag:
                 self._pop_to(i)
                 return
 
     def handle_data(self, data: str) -> None:
+        if self.head is not None and self.stack[-1] is self.head and data.strip():
+            self._leave_head()
         self._text(data)
 
     def close(self) -> None:
@@ -293,13 +358,38 @@ class _Page(HTMLParser):
             if name in stops:
                 return
 
+    def _leave_head(self) -> None:
+        head, self.head = self.head, None
+        if head in self.stack:
+            self._pop_to(self.stack.index(head))
+
+    def _fold_plain(self) -> None:
+        """At the depth cap, fold unclosed plain inline elements into the nearest frame kept below them. They change
+        no flag, so their text reads the same; their close tags still match through the parent's count."""
+        kept = [self.stack[0]]
+        for frame in self.stack[1:]:
+            if frame.plain:
+                owner = kept[-1]
+                owner.folded = owner.folded or {}
+                owner.folded[frame.tag] = owner.folded.get(frame.tag, 0) + 1
+                for tag, count in (frame.folded or {}).items():
+                    owner.folded[tag] = owner.folded.get(tag, 0) + count
+            else:
+                kept.append(frame)
+        self.stack, self.plain_open = kept, 0
+
     def _pop_to(self, index: int) -> None:
         while len(self.stack) > index:
             frame = self.stack[-1]
             self._boundary(frame)
             self.stack.pop()
+            self.plain_open -= frame.plain
             if self.section and self.section.container is frame:
                 self.section = None
+            if frame is self.candidate:
+                self.candidate = None
+            if frame is self.head:
+                self.head = None
             if frame.row is not None:
                 self._end_row(frame.row)
 
@@ -312,6 +402,7 @@ class _Page(HTMLParser):
         row = self._active_row()
         if row and row.cells:
             row.cells[-1].append(" ")
+            row.hidden_cells[-1].append(" ")
         else:
             self._flush()
 
@@ -325,14 +416,18 @@ class _Page(HTMLParser):
         if top.title:
             self.title.append(data)
             return
-        if top.skip or top.withheld or self.section:
+        if top.skip or top.withheld or (self.section and self.candidate not in self.stack):
+            return
+        if self.overflow:
+            if data.strip() and not self.overflow_counted:
+                self.withheld += 1
+                self.overflow_counted = True
             return
         row = self._active_row()
         if row:
             if not row.cells:
-                row.cells.append([])
-            row.cells[-1].append(data)
-            row.hidden = row.hidden or top.hidden
+                row.new_cell()
+            (row.hidden_cells if top.hidden and not row.hidden else row.cells)[-1].append(data)
             return
         if not self.buf:
             self.buf_frame = top
@@ -344,6 +439,7 @@ class _Page(HTMLParser):
         if not text:
             return
         if frame.heading is not None:
+            self.section = self.candidate = None  # text in a heading of the section's level or higher ends it
             if classify(text):
                 self.withheld += 1
                 self.section = _Section(frame.heading, self._container(frame))
@@ -360,10 +456,13 @@ class _Page(HTMLParser):
     def _withhold_labelled(self, label: _Frame) -> None:
         """The summary or legend's element (details, fieldset) is withheld from here on; its label is dropped."""
         owner = label.parent or self.root
+        on_stack = {id(f) for f in self.stack}
+        while owner is not self.root and id(owner) not in on_stack:  # folded at the depth cap: its kept parent
+            owner = owner.parent or self.root
         if owner is self.root or owner.withheld:
             return
         self.withheld += 1
-        for frame in self.stack[self.stack.index(owner) :] if owner in self.stack else []:
+        for frame in self.stack[self.stack.index(owner) :]:
             frame.withheld = True
 
     def _container(self, frame: _Frame) -> _Frame | None:
@@ -373,9 +472,7 @@ class _Page(HTMLParser):
         return node
 
     def _end_row_cells(self, row: _Row) -> None:
-        if text := row.text():
-            self.pieces.append(Piece("table_row", text, hidden=row.hidden))
-        row.cells = []
+        self.pieces += row.pieces()
         row.layout = True
 
     def _end_row(self, row: _Row) -> None:
@@ -383,8 +480,8 @@ class _Page(HTMLParser):
             self.rows.remove(row)
         if row.layout:
             self._flush()
-        elif text := row.text():
-            self.pieces.append(Piece("table_row", text, hidden=row.hidden))
+        else:
+            self.pieces += row.pieces()
 
     # -- result
 
