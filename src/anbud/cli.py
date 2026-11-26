@@ -91,7 +91,10 @@ def _intake(args: argparse.Namespace) -> int:
         print(line)
     if result.failed:
         print(f"anbud intake: {len(result.failed)} not placed: {'; '.join(result.failed)}", file=sys.stderr)
-        print("anbud intake: each one is back in the incoming folder; run intake again", file=sys.stderr)
+        print(
+            "anbud intake: each one is back in the incoming folder, or the next intake puts it back; run intake again",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
@@ -105,6 +108,8 @@ def intake_report(result: Any, cutoff: Any = None) -> list[str]:
         f"  zips: {u.archives_unpacked} unpacked, {u.archives_kept} kept as delivered; {u.entries} entries, "
         f"{u.entries_skipped} skipped (links, escaping paths, hidden or system files)",
     ]
+    if result.rows_without_folder:
+        lines.append(f"  metadata.csv: {result.rows_without_folder} rows name no folder here and no registered tender")
     if n.tenders:
         found = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in n.found.items())
         lines += [

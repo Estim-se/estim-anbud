@@ -1,8 +1,9 @@
 """Words that mark a file, a folder or a section as part of an answer key.
 
 The answer keys for a public tender are the buyer's own questions and answers, its amendments, and the award decision
-and opening protocol. They must never reach a run as input: intake moves matching files to `answers/<co>/<t>/` before
-prep, and prep withholds matching sections of a notice page. One rule serves both, so they can't disagree.
+and opening protocol. They must never reach a run as input: blind intake moves matching files of a dev tender to
+`answers/<co>/<t>/intake/` before prep, and prep withholds matching sections of a notice page. One rule serves both,
+so they can't disagree.
 
 Matching is on whole words after folding (case, accents, punctuation), so a word that only contains a term doesn't
 match: the Swedish word for a request for tenders contains the word for "question" and must not be caught.

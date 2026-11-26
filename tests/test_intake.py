@@ -231,9 +231,12 @@ def test_a_bad_csv_or_any_unexpected_error_prints_no_name(
     data_root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     incoming = build_incoming(data_root)
-    (incoming / "metadata.csv").write_bytes(b"folder,client\nFiktivbolaget\0,x\n")
+    header = "folder,client,property_owner,project_family,prospective,forced_dev\n"
+    huge = "Fiktivbolaget " * 20_000  # past the csv module's field limit: csv.Error
+    (incoming / "metadata.csv").write_text(f'{header}"{huge}",x,,,no,no\n', encoding="utf-8")
     assert cli.main(["intake", "co-002", str(incoming), "--new-ledger"]) == cli.REFUSED
     printed = capsys.readouterr()
+    assert "Error" in printed.err
     assert_no_fake_names(printed.out, printed.err)
 
     def boom(*args: object, **kwargs: object) -> None:
@@ -292,6 +295,7 @@ def test_a_crash_between_the_two_renames_is_recovered(data_root: Path, monkeypat
     staging = tender.parent / ".staging-t-0001"
     (staging / "originals").mkdir(parents=True)  # now the harder case: killed with the delivery inside staging
     fingerprint = intake_module.folder_fingerprint(incoming / DEV_FOLDER)
+    (staging / "source.path").write_text(str(incoming / DEV_FOLDER), encoding="utf-8")
     os.rename(incoming / DEV_FOLDER, staging / "originals" / fingerprint)
     result = intake("co-002", incoming)
     assert result.dev == 1 and not result.failed and not staging.exists()
@@ -376,15 +380,81 @@ def test_a_new_delivery_under_a_registered_name_is_refused_before_any_write(data
     assert folder.is_dir()
 
 
-def test_the_same_delivery_again_is_recognised(data_root: Path) -> None:
+def test_a_recreated_folder_under_a_registered_name_is_refused(data_root: Path) -> None:
+    """Telling a copy from the original would mean listing it, and a held-out folder is never listed."""
     incoming = build_incoming(data_root)
     intake("co-002", incoming, new_ledger=True)
-    ledger = paths.ledger_path("co-002").read_bytes()
-    make_folder(incoming, "Tender fem")  # identical names and sizes
-    result = intake("co-002", incoming)
-    assert result.already_in == 1 and result.counts()["dev"] == 0
-    assert paths.ledger_path("co-002").read_bytes() == ledger
-    assert (incoming / "Tender fem").is_dir()  # left where it is
+    make_folder(incoming, "Tender fem")  # identical names and sizes, but a new folder
+    with pytest.raises(IntakeError, match="name of a registered tender"):
+        intake("co-002", incoming)
+
+
+def test_folders_are_never_listed_before_the_split(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    incoming = build_incoming(data_root)
+    status = expected_status()
+    sealed = {incoming / name for i, name in enumerate(FOLDERS, 1) if status[f"t-{i:04d}"] != sh.DEV}
+    real_walk, real_iterdir = os.walk, Path.iterdir
+
+    def walk(top: object, *args: object, **kwargs: object) -> object:
+        assert not any(Path(top) == s or s in Path(top).parents for s in sealed), "a held-out folder was listed"
+        return real_walk(top, *args, **kwargs)
+
+    def iterdir(self: Path) -> object:
+        assert not any(self == s or s in self.parents for s in sealed), "a held-out folder was listed"
+        return real_iterdir(self)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "walk", walk)
+        patched.setattr(Path, "iterdir", iterdir)
+        result = intake("co-002", incoming, new_ledger=True)
+    assert result.heldout + result.prospective == len(sealed)
+
+
+def test_a_calc_folder_of_any_case_stays_out_of_the_inbox(data_root: Path) -> None:
+    incoming = data_root / "incoming" / "co-002"
+    folder = incoming / DEV_FOLDER
+    (folder / "Calc").mkdir(parents=True)
+    (folder / "Calc" / "kalkyl.txt").write_text("kalkyl", encoding="utf-8")
+    (folder / "beskrivning.txt").write_text("text", encoding="utf-8")
+    write_csv(incoming, {DEV_FOLDER: FOLDERS[DEV_FOLDER]})
+    intake("co-002", incoming, new_ledger=True)
+    tender = paths.dev_tender_dir("co-002", "t-0001")
+    assert sorted(p.name for p in (tender / "inbox").iterdir()) == ["beskrivning.txt"]
+    assert (tender / "calc" / "kalkyl.txt").exists()
+
+
+def test_recovery_puts_a_delivery_back_where_it_came_from(data_root: Path) -> None:
+    incoming, tender = only_dev(data_root)
+    intake("co-002", incoming, new_ledger=True)  # makes the ledger
+    other = data_root / "incoming" / "elsewhere"
+    other.mkdir()
+    write_csv(other, {})
+    staging = tender.parent / ".staging-t-0009"
+    (staging / "originals").mkdir(parents=True)
+    origin = incoming / "Avbruten"
+    (staging / "originals" / "fp").mkdir()
+    (staging / "source.path").write_text(str(origin), encoding="utf-8")
+    intake("co-002", other)
+    assert origin.is_dir() and not staging.exists() and not list(other.glob("Avbruten"))
+
+
+def test_a_csv_row_with_no_folder_is_counted(data_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    incoming, _ = only_dev(data_root)
+    write_csv(incoming, {DEV_FOLDER: FOLDERS[DEV_FOLDER], "Felstavad": FOLDERS["Tender fem"]})
+    assert cli.main(["intake", "co-002", str(incoming), "--new-ledger"]) == 0
+    assert "1 rows name no folder here and no registered tender" in capsys.readouterr().out
+
+
+def test_backslash_directory_entries_dont_spoil_a_zip(data_root: Path) -> None:
+    incoming, tender = only_dev(data_root)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("ritn\\", "")  # a directory entry written with a backslash
+        zf.writestr("ritn\\plan.txt", "plan")
+    (incoming / DEV_FOLDER / "docs" / "bs.zip").write_bytes(buf.getvalue())
+    result = intake("co-002", incoming, new_ledger=True)
+    assert (tender / "inbox" / "bs" / "ritn" / "plan.txt").read_text() == "plan"
+    assert result.unpack.archives_kept == 0
 
 
 # Finding 7: one lock for the registry across companies, and temp files of their own.

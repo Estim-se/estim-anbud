@@ -29,7 +29,9 @@ Intake then:
    `originals/<fingerprint>`. One rename then puts the tender in place. On any error the staging folder is removed and
    the delivery is back where it was, so a rerun simply tries again.
 
-A folder's fingerprint is a hash of its file names and sizes, so held-out files are never opened. The screen gets
+A folder's fingerprint is the identity of the folder itself (one `stat`, no listing), so a held-out folder is never
+opened or listed: the same folder, moved back after a failed placement, is the same tender; a new folder under a
+registered name is refused. A zip's fingerprint is the hash of its bytes. The screen gets
 counts and tender ids only: folder and file names are customer and project names, and no error message carries one.
 """
 
@@ -204,7 +206,11 @@ def _next_ids(taken: set[str], count: int) -> list[str]:
 
 def _walk(folder: Path) -> Iterator[tuple[Path, tuple[str, ...]]]:
     """Regular files under a folder with their relative parts, sorted, never through a link, ignored names left out."""
-    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+
+    def unreadable(error: OSError) -> None:
+        raise error  # a folder that can't be read would silently drop its files from the inbox
+
+    for dirpath, dirnames, filenames in os.walk(folder, onerror=unreadable, followlinks=False):
         here = Path(dirpath)
         rel = here.relative_to(folder).parts
         dirnames[:] = sorted(d for d in dirnames if not is_ignored((*rel, d)) and not (here / d).is_symlink())
@@ -225,17 +231,19 @@ def _manifest(folder: Path) -> str:
 
 
 def folder_fingerprint(folder: Path) -> str:
-    """A hash of every file's name and size: tells deliveries apart without opening a single file."""
-    digest = hashlib.sha256(b"anbud-folder-v1\0")
-    for path, parts in _walk(folder):
-        digest.update(nfc("/".join(parts)).encode("utf-8", "surrogatepass") + b"\0")
-        digest.update(str(path.stat().st_size).encode() + b"\0")
-    return digest.hexdigest()
+    """The folder's own identity: device, inode and, where the system keeps one, birth time. One `stat` of the folder,
+    nothing inside it listed or opened. A rename keeps it, so a delivery moved back after a failed placement is
+    recognised; a copy is a new delivery."""
+    st = folder.stat()
+    birth = getattr(st, "st_birthtime", None)
+    return hashlib.sha256(f"anbud-folder-v2\0{st.st_dev}\0{st.st_ino}\0{birth!r}".encode()).hexdigest()
 
 
 def _copy_tree(source: Path, target: Path, skip_top: frozenset[str] = frozenset()) -> None:
+    """Copy regular files. `skip_top` holds casefolded top-level names to leave out: a disk that ignores case finds
+    `Calc/` when asked for `calc/`, so the comparison must ignore case too."""
     for path, parts in _walk(source):
-        if parts[0] in skip_top:
+        if parts[0].casefold() in skip_top:
             continue
         dest = target.joinpath(*parts)
         private_dirs(dest.parent)
@@ -298,18 +306,19 @@ def _safe_unzip(archive: Path, target: Path, stats: UnpackStats) -> list[Path]:
     written: list[Path] = []
     try:
         with zipfile.ZipFile(archive) as zf:
-            infos = [i for i in zf.infolist() if not i.is_dir()]
+            infos = [i for i in zf.infolist() if not i.is_dir() and not i.filename.endswith("\\")]
             if stats.entries + len(infos) > MAX_ENTRIES or stats.bytes + sum(i.file_size for i in infos) > MAX_UNZIPPED:
                 raise _Keep
             if any(i.flag_bits & 0x1 for i in infos):
                 raise _Keep  # encrypted
             private_dirs(target)
+            skipped = 0
             for info in infos:
                 name = PurePosixPath(_entry_name(info).replace("\\", "/"))
                 parts = tuple(p for p in name.parts if p not in ("", "."))
                 link = (info.external_attr >> 16) & 0o170000 == 0o120000
                 if not parts or name.is_absolute() or ".." in parts or ":" in parts[0] or link or is_ignored(parts):
-                    stats.entries_skipped += 1
+                    skipped += 1
                     continue
                 dest = _free(target.joinpath(*(_short(p) for p in parts)))
                 private_dirs(dest.parent)
@@ -319,6 +328,7 @@ def _safe_unzip(archive: Path, target: Path, stats: UnpackStats) -> list[Path]:
                 written.append(dest)
             stats.entries += len(infos)
             stats.bytes += sum(i.file_size for i in infos)
+            stats.entries_skipped += skipped
     except (_Keep, zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, RuntimeError, EOFError, OSError):
         # RuntimeError: encrypted entries; NotImplementedError: Deflate64 and other methods zipfile can't read;
         # OSError: a damaged stream (zlib) or a name the disk refuses. The message may name a file, so it is dropped.
@@ -420,6 +430,7 @@ class Result:
     notices: NoticeStats = field(default_factory=NoticeStats)
     held: dict[str, int] = field(default_factory=dict)  # files held back as answer keys, by kind (dev tenders)
     tenders_with_held: int = 0
+    rows_without_folder: int = 0  # metadata.csv rows that name neither a folder here nor a registered tender
 
     def counts(self) -> dict[str, int]:
         return {"dev": self.dev, "heldout": self.heldout, "prospective": self.prospective, "burned": self.burned}
@@ -440,7 +451,7 @@ def _staging(company_id: str, tender_id: str, root: Path | None) -> Path:
     return paths.company_dir(company_id, root) / "dev" / f".staging-{tender_id}"
 
 
-def _recover(company_id: str, incoming: Path, names: dict[str, str], base: Path, root: Path | None) -> None:
+def _recover(company_id: str, base: Path, root: Path | None) -> None:
     """Undo placements a crash interrupted: the delivery goes back to the incoming folder under its registered name,
     and the staging folders are removed, so this run places the tender again. Only intake's own `.staging-` folders
     are looked at."""
@@ -451,10 +462,11 @@ def _recover(company_id: str, incoming: Path, names: dict[str, str], base: Path,
         originals = staging / "originals"
         delivered = sorted(originals.iterdir()) if originals.is_dir() else []
         if delivered:
-            name = names.get(tender_id)
-            if len(delivered) != 1 or not name or (incoming / name).exists():
+            record = staging / "source.path"
+            back = Path(record.read_text(encoding="utf-8")) if record.is_file() else None
+            if len(delivered) != 1 or back is None or back.exists() or not back.parent.is_dir():
                 raise IntakeError(f"{tender_id} has an interrupted placement that needs a person; nothing was moved")
-            os.rename(delivered[0], incoming / name)
+            os.rename(delivered[0], back)  # to the incoming folder it came from, whichever this run was given
         shutil.rmtree(staging)
     answers = base / "answers" / company_id
     for staging in _glob(answers, ".staging-t-*"):
@@ -480,17 +492,18 @@ def _place_dev(delivery: Delivery, company_id: str, root: Path | None, result: R
     moved = staging / "originals" / delivery.fingerprint
     try:
         source = delivery.path
-        docs = source / "docs" if (source / "docs").is_dir() and not (source / "docs").is_symlink() else source
+        folders = {p.name.casefold(): p for p in source.iterdir() if p.is_dir() and not p.is_symlink()}
+        docs, calc = folders.get("docs", source), folders.get("calc")
         _copy_tree(docs, staging / "inbox", skip_top=frozenset({"calc"}) if docs is source else frozenset())
         private_dirs(staging / "inbox")
-        calc = source / "calc"
-        if calc.is_dir() and not calc.is_symlink():
+        if calc is not None:
             _copy_tree(calc, staging / "calc")
         unpack_all(staging / "inbox", stats)
         _write_private(staging / "inbox.sha256", _manifest(staging / "inbox"))
         if (staging / "calc").is_dir():
             _write_private(staging / "calc.sha256", _manifest(staging / "calc"))
         private_dirs(moved.parent)
+        _write_private(staging / "source.path", str(source))  # where _recover puts it back after a crash
         os.rename(source, moved)  # the commit begins: the delivery leaves the incoming folder...
         try:
             os.rename(staging, target)  # ...and the tender appears, whole, in one rename
@@ -522,6 +535,7 @@ def _place_heldout(delivery: Delivery, base: Path, company_id: str) -> None:
     private_dirs(moved.parent)
     try:
         _write_private(staging / "intake.json", _intake_record(delivery, None, None))
+        _write_private(staging / "source.path", str(delivery.path))
         os.rename(delivery.path, moved)
         try:
             os.rename(staging, target)
@@ -614,6 +628,7 @@ def _place_dev_zip(delivery: Delivery, company_id: str, base: Path, root: Path |
         if lines:
             _write_private(answers_staging / "intake.sha256", "\n".join(lines) + "\n")
         private_dirs(moved.parent)
+        _write_private(staging / "source.path", str(delivery.path))
         if lines:  # the held files go to answers/ first, so the tender never appears with them missing elsewhere
             private_dirs(answers)
             os.rename(answers_staging / "intake", held_final)
@@ -653,7 +668,7 @@ def _check_ledger(ledger: Path, new_ledger: bool) -> None:
         raise IntakeError("this company has no ledger yet; for its first intake, add --new-ledger")
 
 
-def _folder_deliveries(incoming: Path) -> list[Delivery]:
+def _folder_deliveries(incoming: Path, registered: set[str], result: Result) -> list[Delivery]:
     rows = read_rows(incoming / "metadata.csv")
     present = {
         nfc(p.name): p for p in incoming.iterdir() if p.is_dir() and not p.is_symlink() and not is_ignored([p.name])
@@ -664,7 +679,8 @@ def _folder_deliveries(incoming: Path) -> list[Delivery]:
     deliveries = []
     for r in rows:
         if r.folder not in present:
-            continue  # already taken in on an earlier run
+            result.rows_without_folder += r.folder not in registered  # a typo, or a folder not delivered yet
+            continue  # otherwise taken in on an earlier run
         if r.prospective and r.forced_dev:
             raise IntakeError(f"metadata.csv line {r.line}: a tender can't be both prospective and forced dev")
         keys = sh.group_keys(r.client, r.property_owner, r.project_family, r.line)
@@ -800,18 +816,20 @@ def intake(
     # One lock for the registry, which every company shares, then the company's ledger lock (the order `anbud split`
     # can't break: it takes the ledger lock only). Both are held until every tender is placed.
     with _locked(base / "registry.lock"):
-        _check_ledger(ledger, new_ledger)
+        if ledger.parent.is_symlink():
+            raise IntakeError("the split folder is a link; it must be a plain folder in the company folder")
         private_dirs(ledger.parent)
         with _locked(ledger.parent / "ledger.lock"):
+            _check_ledger(ledger, new_ledger)  # under the lock, so `anbud split --new-ledger` can't race it
             registry = load_registry(registry_path)
             tenders = registry.setdefault("tenders", {}).setdefault(company_id, {})
             hashes = registry.setdefault("hashes", {}).setdefault(company_id, {})
-            _recover(company_id, incoming, tenders, base, root)
+            _recover(company_id, base, root)
             blind = not (incoming / "metadata.csv").exists()
             if blind:
                 deliveries = _zip_deliveries(incoming, now or datetime.now())
             else:
-                deliveries = _folder_deliveries(incoming)
+                deliveries = _folder_deliveries(incoming, {nfc(v) for v in tenders.values()}, result)
             todo = _identify(deliveries, tenders, hashes, base, company_id, root, result)
             state = sh.load_ledger(ledger)
             cutoff = training_cutoff() if blind else None
