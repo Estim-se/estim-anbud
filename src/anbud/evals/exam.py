@@ -14,6 +14,8 @@ Per tender of the split status asked for:
    Each variant is a data root of its own, `sealed/exam/<co>/<kind>/<variant>/`, with the tender laid out as a dev
    tender there, so the engines run unchanged with `ANBUD_DATA_ROOT` pointing at it.
 2. **Prep** of both variants ($0). A tender that stops is counted by why, from prep's one stop line (`prep_stop`).
+   A stop on a security marking is kept in the tender's exam record: later passes neither quarantine nor prepare that
+   tender again, and still count it as stopped. A person decides whether it may be processed at all.
 3. **The estimate**, from prep sizes: each engine's own dry run (Granskning's prefix tokens, Kalkyl's cost range) and
    the old engine's measured cost per page, times a margin, per engine and in total, beside the worst case (every
    hard stop), and the prefix sizes: median, max, and how many are over the context and over a large-prefix mark.
@@ -62,6 +64,7 @@ VARIANT_LABELS = {
     "kalkyl": "with the amendments; without Q&A and award",
 }
 CHILD_ENV_DROP = ("ANBUD_EVAL_LANE", "ANBUD_DATA_ROOT")
+KEPT_STOPS = ("security_marking",)  # prep stops a later pass doesn't retry; the tender isn't read again
 
 
 class ExamError(RuntimeError):
@@ -143,6 +146,27 @@ def deadlines(found: dict[str, datetime | None], now: datetime) -> Deadlines:
 # --- Quarantine ---------------------------------------------------------------------------------------------------
 
 
+def _record_path(company_id: str, kind: str, tender_id: str, root: Path | None) -> Path:
+    return exam_dir(company_id, kind, root) / "tenders" / f"{paths.check_tender_id(tender_id)}.json"
+
+
+def kept_stop(company_id: str, kind: str, tender_id: str, root: Path | None = None) -> dict[str, Any] | None:
+    """The tender's exam record when an earlier pass kept its prep stop (`KEPT_STOPS`), else None."""
+    path = _record_path(company_id, kind, tender_id, root)
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) and record.get("prep_stop") in KEPT_STOPS else None
+
+
+def keep_stop(company_id: str, kind: str, tender_id: str, record: dict[str, Any], stop: str, root: Path | None) -> None:
+    record["prep_stop"] = stop
+    intake._write_private(_record_path(company_id, kind, tender_id, root), json.dumps(record, indent=1, sort_keys=True))
+
+
 def _delivery(company_id: str, tender_id: str, root: Path | None) -> tuple[str, Path]:
     """("zip", the original zip) for a zip delivery, ("folder", the tender folder) for a folder moved unopened."""
     base = _sealed_tender(company_id, tender_id, root)
@@ -185,7 +209,7 @@ def quarantine(company_id: str, kind: str, tender_id: str, root: Path | None = N
     """Unpack one sealed tender, hold its answer keys and lay out both inputs. Done once per delivery: a tender whose
     inputs are already laid out from the same delivery is left as it is."""
     exam = exam_dir(company_id, kind, root)
-    record_path = exam / "tenders" / f"{tender_id}.json"
+    record_path = _record_path(company_id, kind, tender_id, root)
     source_kind, source = _delivery(company_id, tender_id, root)
     fingerprint = _fingerprint(source_kind, source)
     tenders = {
@@ -458,6 +482,7 @@ class Report:
     prepared: int = 0
     prep_failed: int = 0
     prep_stops: dict[str, int] = field(default_factory=dict)  # by category, one per tender that stopped
+    prep_stops_kept: int = 0  # of those, stops kept from an earlier pass: the tender wasn't read again
     documents: int = 0
     skipped_by_type: dict[str, int] = field(default_factory=dict)
     pages: int = 0
@@ -576,7 +601,8 @@ def run_exam(
     records: dict[str, dict[str, Any]] = {}
     ready: list[str] = []
     for t in tenders:
-        record = quarantine(company_id, kind, t, root)
+        kept = kept_stop(company_id, kind, t, root)
+        record = kept or quarantine(company_id, kind, t, root)
         records[t] = record
         report.quarantined += 1
         report.held_tenders += bool(record["held"])
@@ -585,11 +611,18 @@ def run_exam(
         report.amendments_to_kalkyl += record["amendments_to_kalkyl"]
         report.same_input += record["same_input"]
         stop = None
-        for v in VARIANTS:
-            stop = runner.prep(variant_root(company_id, kind, v, root), company_id, t, f"prep-{t}-{v}.log")
-            if stop is not None:
-                report.prep_stops[stop] = report.prep_stops.get(stop, 0) + 1
-                break
+        if kept is not None:
+            stop = str(kept["prep_stop"])
+            report.prep_stops_kept += 1
+        else:
+            for v in VARIANTS:
+                stop = runner.prep(variant_root(company_id, kind, v, root), company_id, t, f"prep-{t}-{v}.log")
+                if stop is not None:
+                    break
+            if stop in KEPT_STOPS:
+                keep_stop(company_id, kind, t, record, stop, root)
+        if stop is not None:
+            report.prep_stops[stop] = report.prep_stops.get(stop, 0) + 1
         ok = stop is None
         report.prepared += ok
         report.prep_failed += not ok
@@ -745,7 +778,8 @@ def _say(r: Report, say: Callable[[str], None]) -> None:
         f"quarantine: answer keys held in {r.held_tenders} of {r.quarantined} ({_counts(r.held)}); "
         f"{r.amendments_to_kalkyl} amendments given to Kalkyl; {r.same_input} tenders with one input for both"
     )
-    stops = f" ({_counts(r.prep_stops)})" if r.prep_stops else ""
+    kept = f"; {r.prep_stops_kept} kept from an earlier pass, not read again" if r.prep_stops_kept else ""
+    stops = f" ({_counts(r.prep_stops)}{kept})" if r.prep_stops else ""
     say(
         f"prep: {r.prepared} prepared, {r.prep_failed} stopped{stops}; {r.documents} documents (skipped by type: "
         f"{_counts(r.skipped_by_type)}), {r.pages} pages (granskning input)"

@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import zipfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,7 +30,7 @@ BUN = shutil.which("bun")
 SECRET_WORDS = ("Fiktivbolaget", "Ändring", "FoS", "Annons", "Tilldelning", "Dnr", "t-000", "202100")
 
 
-def tender_zip(deadline: str) -> bytes:
+def tender_zip(deadline: str, *, marked: bool = False) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr(
@@ -41,12 +42,15 @@ def tender_zip(deadline: str) -> bytes:
         zf.writestr("Kompletteringar/Ändring 1.txt", "Ändring: 40 uttag i stället för 30.")
         zf.writestr("Tilldelningsbeslut.txt", "Tilldelning till Fiktivbolaget.")
         zf.writestr("Ritningar/E-10.dwg", b"AC1027" + bytes(64))  # prep skips drawings and counts them
+        if marked:  # an invented classification marking: prep stops the whole tender on it
+            zf.writestr("Förfrågningsunderlag/PM skydd.txt", "HEMLIG\n\nInventerat innehåll.\n")
     return buf.getvalue()
 
 
-def sealed_store(data_root: Path) -> None:
+def sealed_store(data_root: Path, marked: tuple[str, ...] = ()) -> None:
     """Three prospective tenders, laid out as intake leaves them: two zips (one open, one past its deadline) and one
-    folder delivery with no notice; and one held-out tender the prospective exam never touches."""
+    folder delivery with no notice; and one held-out tender the prospective exam never touches. A zip tender in
+    `marked` holds a document with a security marking."""
     statuses = {"t-0001": sh.HELDOUT, "t-0002": sh.PROSPECTIVE, "t-0003": sh.PROSPECTIVE, "t-0004": sh.PROSPECTIVE}
     sh.append_events(
         paths.ledger_path("co-002"),
@@ -54,7 +58,7 @@ def sealed_store(data_root: Path) -> None:
     )
     for t, deadline in (("t-0001", "2026-06-01"), ("t-0002", "2026-12-13 12:00"), ("t-0003", "2026-11-20")):
         folder = data_root / "heldout" / "co-002" / t
-        data = tender_zip(deadline)
+        data = tender_zip(deadline, marked=t in marked)
         (folder / "originals").mkdir(parents=True)
         (folder / "originals" / f"{hashlib.sha256(data).hexdigest()}.zip").write_bytes(data)
         iso = datetime.fromisoformat(deadline.replace(" ", "T")).isoformat()
@@ -375,3 +379,65 @@ def test_real_prep_stops_on_synthetic_files_get_their_category(data_root: Path, 
     assert got == expected
     assert (paths.dev_tender_dir("co-002", "t-0001", vroot) / "prep" / "summary.json").is_file()
     assert sorted(p.name for p in (data_root / "logs").iterdir()) == sorted(f"prep-{t}.log" for t in expected)
+
+
+class PrepOnly(exam.Engines):
+    """Real prep, as the exam runs it; estimates without a child process, and no old engine."""
+
+    def __init__(self, logs: Path, app: Path) -> None:
+        super().__init__(logs, app, "HEAD", None)
+        self.prepped: list[str] = []
+
+    def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> str | None:
+        self.prepped.append(tender_id)
+        return super().prep(vroot, company_id, tender_id, log_name)
+
+    def granskning_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> int | None:
+        return 10_000
+
+
+def test_a_security_marking_stop_is_kept_and_the_tender_never_read_again(
+    data_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sealed_store(data_root, marked=("t-0002",))
+    runner = PrepOnly(data_root / "logs", tmp_path)
+
+    def exam_pass(say: Callable[[str], None]) -> exam.Report:
+        return exam.run_exam(
+            "co-002", "prospective", engines=("granskning",), runner=runner, now=NOW, local_now=LOCAL_NOW, say=say
+        )
+
+    first = exam_pass(lambda _: None)
+    assert first.prepared == 2 and first.prep_stops == {"security_marking": 1} and first.prep_stops_kept == 0
+    assert runner.prepped.count("t-0002") == 1  # stopped on its first input; the second isn't prepared
+    record = json.loads((exam.exam_dir("co-002", "prospective") / "tenders" / "t-0002.json").read_text())
+    assert record["prep_stop"] == "security_marking"
+
+    quarantined: list[str] = []
+    real_quarantine = exam.quarantine
+
+    def watched(company_id: str, kind: str, tender_id: str, root: Path | None = None) -> dict:
+        quarantined.append(tender_id)
+        return real_quarantine(company_id, kind, tender_id, root)
+
+    monkeypatch.setattr(exam, "quarantine", watched)
+    runner.prepped.clear()
+    lines: list[str] = []
+    again = exam_pass(lines.append)
+    assert "t-0002" not in quarantined and "t-0002" not in runner.prepped  # neither unpacked nor read again
+    assert sorted(runner.prepped) == ["t-0003", "t-0003", "t-0004", "t-0004"]
+    assert again.prepared == 2 and again.prep_stops == {"security_marking": 1} and again.prep_stops_kept == 1
+    assert again.quarantined == first.quarantined == 3 and again.held == first.held
+    assert "1 stopped (security_marking 1; 1 kept from an earlier pass, not read again)" in "\n".join(lines)
+
+
+def test_any_other_prep_stop_is_retried_on_the_next_pass(data_root: Path) -> None:
+    sealed_store(data_root)
+    runner = FakeEngines({"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0}, stops={"t-0003": "manifest"})
+    for _ in range(2):
+        report = exam.run_exam(
+            "co-002", "prospective", engines=("granskning",), runner=runner, now=NOW, say=lambda _: None
+        )
+        assert report.prep_stops == {"manifest": 1} and report.prep_stops_kept == 0
+    record = json.loads((exam.exam_dir("co-002", "prospective") / "tenders" / "t-0003.json").read_text())
+    assert "prep_stop" not in record
