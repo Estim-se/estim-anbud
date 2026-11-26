@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from anbud.models import Flag, Verdict
+from anbud.models import Flag, MoneyBasis, Verdict
 
 
 class _Model(BaseModel):
@@ -20,7 +20,8 @@ class Kronor(_Model):
     point: float | None = None
     low: float | None = None
     high: float | None = None
-    basis: str = Field(description="How the figure was computed, in Swedish, with no catalog price in it")
+    basis: MoneyBasis = Field(description="The money basis that was priced, or that couldn't be")
+    label: str = Field(default="", description="How the figure was computed, in Swedish, with no catalog price in it")
     catalog: str | None = None
     default_catalog: bool = False
     reason: str | None = Field(default=None, description="Why it couldn't be priced")

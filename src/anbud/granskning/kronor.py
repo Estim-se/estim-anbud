@@ -177,7 +177,7 @@ def price(
     try:
         point, text, origin = _priced(basis, catalog, calc_posts or {}, settings)
     except _Unpriced as why:
-        return Kronor(priced=False, basis=basis.kind, reason=str(why))
+        return Kronor(priced=False, basis=basis, reason=str(why))
     spread = settings.spread.get(basis.kind, 0.0)
     source = catalog if origin == "catalog" else None
     if source is not None:
@@ -189,7 +189,8 @@ def price(
         point=round(point),
         low=round(point * (1 - spread)),
         high=round(point * (1 + spread)),
-        basis=text,
+        basis=basis,
+        label=text,
         catalog=source.name if source else None,
         default_catalog=bool(source and source.default),
     )

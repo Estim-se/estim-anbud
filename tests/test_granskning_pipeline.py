@@ -205,7 +205,7 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert kronor[items["contract_vite"]["fingerprint"]].point == 100_000
     presence = kronor[items["unpriced_requirement"]["fingerprint"]]
     assert presence.point == 40 * (0.8 * 700 + 600)  # the calc's own hourly rate, not the catalog's 500
-    assert "från kundens kalkyl" in presence.basis and "antaget" not in presence.basis
+    assert "från kundens kalkyl" in presence.label and "antaget" not in presence.label
     assert items["trade_boundary"]["placement"] == "refuted"
     assert items["generic_scope"]["placement"] == "generic"
     inputs = RunInputs.model_validate_json((run_dir / "inputs.json").read_text())

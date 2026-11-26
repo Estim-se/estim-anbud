@@ -95,7 +95,7 @@ def test_same_fingerprint_flags_from_two_lenses_keep_both_claims_and_bases() -> 
     assert item.flag.claim == "Byggström: avtalsrisk. / Byggström saknas i kalkylen."
     assert item.source_flags == [a, b] and item.lenses == ["contract", "generic_scope"]
     (priced,) = price_items([item], catalog(), {}, load_settings())
-    assert priced.kronor.priced and "Byggström per etapp" in priced.kronor.basis  # the second lens's basis prices
+    assert priced.kronor.priced and "Byggström per etapp" in priced.kronor.label  # the second lens's basis prices
 
 
 def test_a_model_merge_must_keep_to_the_taxonomy() -> None:
@@ -128,7 +128,7 @@ def test_only_a_catalog_value_marks_a_figure_as_the_catalogs() -> None:
     own_rate = with_calc_rate(default, [CalcPost(id="c-1", text="Timpris montör", unit_price=700)])
     from_calc = price(hours, own_rate, {}, settings)
     assert from_calc.point == 7000 and not from_calc.default_catalog and from_calc.catalog is None
-    assert "timpris 700 kr/h från kundens kalkyl" in from_calc.basis
+    assert "timpris 700 kr/h från kundens kalkyl" in from_calc.label
     per_hour = {"hours": 100, "increase_per_hour": 10}
     flat = price(basis(kind="contract_formula", formula="wage_step", formula_inputs=per_hour), default, {}, settings)
     assert flat.point == 1000 and not flat.default_catalog and flat.catalog is None
@@ -167,3 +167,22 @@ def test_the_report_cap_comes_from_settings() -> None:
     assert "Högst 5 flaggor visas" in render_html(report)
     about = build_workbook(report)["Om rapporten"]
     assert ("Modellkostnad (USD)", 1.23) in [(r[0].value, r[1].value) for r in about.iter_rows()]
+
+
+def test_kronor_basis_is_always_the_money_basis_and_the_label_is_its_own_field() -> None:
+    settings = load_settings()
+    hours = basis(kind="hours_gap", hours=10)
+    priced = price(hours, catalog(), {}, settings)
+    assert priced.basis == hours and priced.label.startswith("Timmar som fattas: 10 h")
+    unpriced_basis = basis(kind="missing_post", item="Finns inte någonstans")
+    unpriced = price(unpriced_basis, catalog(), {}, settings)
+    assert not unpriced.priced and unpriced.basis == unpriced_basis and unpriced.label == "" and unpriced.reason
+    dumped = json.loads(priced.model_dump_json())
+    assert dumped["basis"]["kind"] == "hours_gap" and isinstance(dumped["label"], str)
+    cite = [("aaa111-000004", "Byggström tillhandahålls av beställaren")]
+    second = basis(item="Byggström per etapp")
+    a = flag("contract", "Byggström.", cites=cite, money_basis=basis(kind="contract_formula", formula="vite_per_week"))
+    b = flag("generic_scope", "Byggström saknas.", cites=cite, money_basis=second)
+    (item,) = items_from_results([lens_result("contract", [a]), lens_result("generic_scope", [b], generic=True)])
+    (ranked,) = price_items([item], catalog(), {}, settings)
+    assert ranked.kronor.basis == second  # names which lens's basis priced the merged flag

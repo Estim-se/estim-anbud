@@ -192,7 +192,7 @@ def _flag_html(n: int, item: Item, report: Report) -> str:
         f"<h3>{n}. {_e(f.claim)}</h3>",
         "<div>" + "".join(f'<span class="tag">{_e(t)}</span>' for t in tags) + "</div>",
         f"<p><strong>{_e(kronor_text(item))}</strong>"
-        + (f' <span class="muted">{_e(item.kronor.basis)}</span>' if item.kronor and item.kronor.priced else "")
+        + (f' <span class="muted">{_e(item.kronor.label)}</span>' if item.kronor and item.kronor.priced else "")
         + "</p>",
     ]
     for c in f.citations:
@@ -300,7 +300,7 @@ def _basis(item: Item) -> str:
     k = item.kronor
     if k is None:
         return ""
-    return k.basis if k.priced else (k.reason or "")
+    return k.label if k.priced else (k.reason or "")
 
 
 FLAG_COLUMNS: tuple[Column, ...] = (
