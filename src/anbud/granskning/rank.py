@@ -92,13 +92,19 @@ def unpriced_order(item: Item, rate: float = 1.0) -> tuple[int, bool, bool, int,
     return outcome, not item.flag.contractual_exposure, other_trade, -len(item.lenses), -rate, item.fingerprint
 
 
+def unpriced_queue(items: list[Item], settings: Settings, action_rates: dict[str, float] | None = None) -> list[Item]:
+    """The flags for "Krav utan prisuppgift", in its order. Before verification every outcome is unverified, so the
+    order is severity alone; the verifier's reserved slots are drawn from the front of this queue."""
+    queue = [i for i in items if _unpriced_candidate(i, factor(i, settings, action_rates))]
+    return sorted(queue, key=lambda i: unpriced_order(i, action_rate(i, settings, action_rates)))
+
+
 def rank(items: list[Item], settings: Settings, action_rates: dict[str, float] | None = None) -> Ranked:
     scored = [i.model_copy(update={"score": score(i, settings, action_rates)}) for i in items]
     scored.sort(key=lambda i: (-i.score, i.fingerprint))
     ranked = Ranked()
-    candidate = {i.fingerprint for i in scored if _unpriced_candidate(i, factor(i, settings, action_rates))}
-    unpriced = [i for i in scored if i.fingerprint in candidate]
-    unpriced.sort(key=lambda i: unpriced_order(i, action_rate(i, settings, action_rates)))
+    unpriced = unpriced_queue(scored, settings, action_rates)
+    candidate = {i.fingerprint for i in unpriced}
     for n, item in enumerate(unpriced):
         placement = "shown_unpriced" if n < settings.max_unpriced_shown else "capped"
         placed = item.model_copy(update={"placement": placement})

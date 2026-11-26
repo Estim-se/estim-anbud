@@ -15,7 +15,7 @@ from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
 from anbud.granskning.kronor import ranking_kronor
 from anbud.granskning.merge import merge
-from anbud.granskning.rank import Ranked, coverage, price_items, rank
+from anbud.granskning.rank import Ranked, coverage, price_items, rank, unpriced_queue
 from anbud.granskning.report import Report, build_report, write_reports
 from anbud.granskning.settings import Settings, load_settings
 from anbud.granskning.verify import VerifierLoop, run_verifier, select
@@ -61,6 +61,8 @@ def finish(
         settings.verifier_top_n,
         settings.verifier_sampled,
         seed,
+        reserved=unpriced_queue(provisional, settings, action_rates),
+        reserved_slots=settings.verifier_unpriced_slots,
     )
     verified = {
         i.fingerprint: i for i in run_verifier(chosen, corpus, system_blocks, verifier_loop, set(posts), parallel)

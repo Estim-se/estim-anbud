@@ -25,6 +25,7 @@ class Settings:
     default_action_rate: float = 1.0
     verifier_top_n: int = 25
     verifier_sampled: int = 3
+    verifier_unpriced_slots: int = 7
     verifier_max_turns: int = 3
     verifier_max_usd: float = 0.40
     verifier_max_tokens: int = 12000
@@ -56,6 +57,7 @@ def load_settings(directory: Path = CONFIG_DIR) -> Settings:
         verifier_top_n=int(verifier.get("top_n", 25)),
         verifier_sampled=int(verifier.get("sampled_below_cut", 3)),
         verifier_max_turns=int(verifier.get("max_turns", 3)),
+        verifier_unpriced_slots=int(g["verifier"].get("unpriced_slots", 7)),
         verifier_max_usd=float(g["verifier"]["max_usd"]),
         verifier_max_tokens=int(g["verifier"]["max_tokens"]),
         verifier_effort=str(g["verifier"]["effort"]),

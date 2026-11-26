@@ -14,10 +14,11 @@ from anbud.granskning.kronor import price
 from anbud.granskning.lenses import load_lenses
 from anbud.granskning.merge import items_from_results
 from anbud.granskning.prefix import brief_text
-from anbud.granskning.rank import coverage, lens_coverage, price_items, rank
+from anbud.granskning.rank import coverage, lens_coverage, price_items, rank, unpriced_queue
 from anbud.granskning.report import build_report, build_workbook, column_keys, render_html
 from anbud.granskning.settings import load_settings
 from anbud.granskning.toolbox import Toolbox
+from anbud.granskning.verify import select
 from anbud.models import Verdict
 
 S = load_settings()
@@ -168,3 +169,52 @@ def test_a_flag_nothing_in_the_catalog_fits_stays_unpriced_and_is_shown() -> Non
 def test_catalog_searches_count_in_coverage() -> None:
     log = [ToolCall(role="lens", turn=1, tool="catalog_search", input={"query": "armatur"}, result_ids=["i1"])]
     assert lens_coverage(lens_result("contract", [], tool_log=log), corpus()).catalog_searches == 1
+
+
+def _pool(priced: int, unpriced: int) -> list[Item]:
+    hours = basis(kind="hours_gap", hours=500)
+    flags = [flag("contract", f"Pris {n}.", claim_type=f"p{n:02}", money_basis=hours) for n in range(priced)]
+    flags += [
+        flag("contract", f"Krav {n}.", claim_type=f"u{n:02}", money_basis=NOWHERE, contractual_exposure=n == 3)
+        for n in range(unpriced)
+    ]
+    return price_items(items_from_results([lens_result("contract", flags)]), catalog(), {}, S)
+
+
+def _select(items: list[Item], slots: int) -> list[tuple[Item, str]]:
+    kronor = {i.fingerprint: (i.kronor.high if i.kronor and i.kronor.priced else S.unpriced_sek) for i in items}
+    return select(
+        items, lambda i: kronor[i.fingerprint], 25, 3, "run-1", reserved=unpriced_queue(items, S), reserved_slots=slots
+    )
+
+
+def test_the_verifier_reserves_slots_for_unpriced_flags_without_calling_more_often() -> None:
+    assert S.verifier_unpriced_slots == 7 and (S.verifier_top_n, S.verifier_sampled) == (25, 3)
+    items = _pool(priced=40, unpriced=12)
+    chosen = _select(items, 7)
+    assert len(chosen) == 25 + 3
+    top = [i for i, how in chosen if how == "verified"]
+    unpriced_top = [i.flag.claim_type for i in top if not i.kronor.priced]
+    assert len(top) == 25 and len(unpriced_top) == 7
+    assert unpriced_top[0] == "u03"  # the queue's order: contractual exposure first
+    assert sum(1 for i in top if i.kronor.priced) == 18  # the rest by kronor, as before
+    assert len({i.fingerprint for i, _ in chosen}) == 28  # nothing verified twice
+
+
+def test_slots_the_unpriced_flags_cant_fill_go_back_to_the_priced_side() -> None:
+    chosen = _select(_pool(priced=40, unpriced=2), 7)
+    top = [i for i, how in chosen if how == "verified"]
+    assert len(chosen) == 28 and len(top) == 25
+    assert sum(1 for i in top if not i.kronor.priced) == 2 and sum(1 for i in top if i.kronor.priced) == 23
+    none = _select(_pool(priced=40, unpriced=0), 7)
+    assert sum(1 for i, how in none if how == "verified") == 25
+
+
+def test_the_total_never_exceeds_top_n_plus_sampled() -> None:
+    for priced in (0, 3, 25, 60):
+        for unpriced in (0, 5, 30):
+            for slots in (0, 7, 25, 40):
+                items = _pool(priced, unpriced)
+                chosen = _select(items, slots)
+                assert len(chosen) == min(len(items), 28), (priced, unpriced, slots)
+                assert sum(1 for _, how in chosen if how == "verified") == min(len(items), 25)
