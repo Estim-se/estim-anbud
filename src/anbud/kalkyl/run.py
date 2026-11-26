@@ -34,6 +34,8 @@ from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.pipeline import KalkylResult, run_kalkyl
 from anbud.kalkyl.price import calc_posts
 from anbud.kalkyl.recipe import BoundRecipe, RecipeError, bind, load_recipe
+from anbud.kalkyl.repetition import RepetitionError, load_repetition
+from anbud.kalkyl.repetition import customer_path as repetition_path
 from anbud.kalkyl.settings import EXTRACT, MATCH, KalkylConfig, load_kalkyl_config
 from anbud.kalkyl.tables import load_cells
 from anbud.kalkyl.xlsx import write_workbook
@@ -107,6 +109,9 @@ def result_json(result: KalkylResult) -> bytes:
                 "per_object": sorted({ln.per for ln in p.lines if ln.per}),
                 "recipe": next((ln.recipe for ln in p.lines if ln.recipe), None),
                 "assumed_per_object": any(ln.assumed for ln in p.lines),
+                "hours_flat": p.hours_flat,
+                "repetition_factor": p.repetition_factor,
+                "installed_unit_price": p.installed_unit_price,
                 "object_rows": p.rows,
             }
         )
@@ -151,6 +156,7 @@ def input_hashes(company_id: str, tender: Path, catalog_name: str, root: Path | 
         "catalog": _file_sha(base / "catalogs" / f"{catalog_name}.json"),
         "customer_recipe": _file_sha(customer_path(company_id, root)),
         "default_recipe": _file_sha(default_path(root)),
+        "customer_repetition": _file_sha(repetition_path(company_id, root)),
     }
 
 
@@ -203,7 +209,11 @@ def run_dev_tender(
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
     corpus, cards = with_cards(client, store, corpus, tender_id)
     cells = load_cells(tender / "prep" / CELLS_FILE)
-    result = run_kalkyl(corpus, catalog, client, kalkyl, cells=cells, recipe=recipe)
+    try:
+        repetition = load_repetition(company_id, root)
+    except RepetitionError as exc:
+        raise KalkylError(str(exc)) from None
+    result = run_kalkyl(corpus, catalog, client, kalkyl, cells=cells, recipe=recipe, repetition=repetition)
     meta = {"company_id": company_id, "tender_id": tender_id, "run_id": run_id, "cost_usd": budget.spent}
     workbook, rows = write_workbook(result, corpus, catalog, meta)
     result.calc_posts = calc_posts(result.posts, rows)
@@ -222,6 +232,7 @@ def run_dev_tender(
         "tiles": len(corpus.tiles),
         "cards": dict(cards.sources),
         "tiles_unread": len(cards.failed),
+        "repetition": repetition.label if repetition else None,
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
         "persist_failures": client.persist_failures,
@@ -241,6 +252,7 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
     prep_dir = paths.dev_tender_dir(company_id, tender_id, root) / "prep"
     corpus = load_corpus(prep_dir)
     cells = load_cells(prep_dir / CELLS_FILE)
+    repetition = load_repetition(company_id, root)
     try:
         catalog: Catalog | None = load(catalog_name or kalkyl.default_catalog, root)
     except CatalogError:
@@ -278,6 +290,7 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
         "scope_lines": sum(len(c.scope_ids) for c in chunks),
         "rows_with_cells": len(cells),
         "recipe": recipe.label if recipe else None,
+        "repetition": repetition.label if repetition else None,
         "recipe_items": len(recipe.counts) if recipe else 0,
         "recipe_items_unbound": recipe.unbound if recipe else 0,
         "block_chars": sum(c.chars for c in chunks),

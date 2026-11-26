@@ -18,3 +18,9 @@ concurrency = 4
 effort = "medium"
 max_tokens = 8000
 batch_size = 60
+
+[repetition] # hours per unit fall with repetition on one site; a customer's references/repetition.toml replaces this
+# Tiers: [first unit, factor on hours], applied like tax brackets within one post, count units only.
+# Placeholder values, not calibrated to any tender: the company replaces them with its own norm table.
+label = "Estims standardantagande för serieeffekt (ej kundens normtabell)"
+tiers = [[1, 1.0], [11, 0.9], [51, 0.85], [201, 0.8]]

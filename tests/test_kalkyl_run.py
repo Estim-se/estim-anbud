@@ -183,7 +183,7 @@ def test_a_dev_tender_run_writes_a_priced_calc(tender: Path) -> None:
     assert by_text["Lägenhetscentral"].amount is None  # R3 said none: listed, not guessed
     assert "Rörarbeten" not in by_text  # other trade: not a calc line
     result = json.loads((out / "result.json").read_text())
-    assert Decimal(result["totals"]["total"]) == Decimal("58953.00")
+    assert Decimal(result["totals"]["total"]) == Decimal("58095.00")  # with the default repetition tiers
     assert Decimal(result["totals"]["options_total"]) == Decimal("63600.00")
     # Prompts carry no catalog price, and every call went to Sonnet with Kalkyl's own tools.
     for params in sdk.messages.sent:
@@ -214,7 +214,16 @@ def test_the_xlsx_has_the_label_on_every_sheet_citations_and_ej_omhandertaget(te
     rows = [dict(zip(heads, (c.value for c in row), strict=True)) for row in calc.iter_rows(min_row=5) if row[1].value]
     downlight = next(r for r in rows if r["Post"] == "Downlight")
     assert downlight["Källa (block)"] == "aaaaaa-000005" and "24 st" in downlight["Citat"]
-    assert downlight["Summa"] == pytest.approx(22560.0) and downlight["Typkod"] == "L1"
+    assert downlight["Summa"] == pytest.approx(21832.0) and downlight["Typkod"] == "L1"  # 24 st: units 11-24 at 0.9
+    assert downlight["Serieeffekt (timfaktor)"] < 1 and downlight["Installerat pris per enhet"] == pytest.approx(
+        21832 / 24, abs=0.01
+    )
+    assert "Serieeffekt: timmar ×" in downlight["Anmärkning"]
+    overview = {r[0].value: r[1].value for r in wb["Översikt"].iter_rows(min_row=2) if r[0].value}
+    assert (
+        overview["Serieeffekt"].startswith("Estims standardantagande")
+        and overview["Avdrag för serieeffekt (timmar)"] < 0
+    )
     central = next(r for r in rows if r["Post"] == "Lägenhetscentral")
     assert central["Status"] == "Saknar pris" and "R3" in central["Anmärkning"]
     unresolved = [c.value for c in wb["Ej omhändertaget"]["A"][4:]]
@@ -349,7 +358,8 @@ def test_the_summary_records_code_and_input_hashes(tender: Path) -> None:
     summary = _run(fake_sdk(), code=code)
     assert summary["code"] == code
     inputs = summary["inputs"]
-    assert set(inputs) == {"blocks", "cells", "tiles", "catalog", "customer_recipe", "default_recipe"}
+    names = {"blocks", "cells", "tiles", "catalog", "customer_recipe", "default_recipe", "customer_repetition"}
+    assert set(inputs) == names
     assert len(inputs["blocks"]) == 64 and len(inputs["catalog"]) == 64
     assert "/" not in json.dumps(inputs)  # hashes only, never a path
 

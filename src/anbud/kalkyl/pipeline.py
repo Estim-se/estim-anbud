@@ -30,6 +30,7 @@ from anbud.kalkyl.price import (
 )
 from anbud.kalkyl.recipe import BoundRecipe
 from anbud.kalkyl.records import Rejected, Uncovered, VerifiedRecord
+from anbud.kalkyl.repetition import Repetition
 from anbud.kalkyl.rooms import with_descriptor
 from anbud.kalkyl.settings import EXTRACT, MATCH, KalkylConfig
 from anbud.kalkyl.tables import Cells
@@ -50,6 +51,7 @@ class KalkylResult:
     paths: dict[str, tuple[str, ...]]
     calc_posts: list[CalcPost] = field(default_factory=list)
     recipe: BoundRecipe | None = None
+    repetition: Repetition | None = None
     rooms_from_rows: int = 0  # apartment rows whose rooms code read from the row's own descriptor
     object_lists: list[ObjectList] = field(default_factory=list)  # sheets that are object lists by the app's rule
 
@@ -108,6 +110,7 @@ class KalkylResult:
             "posts_from_recipe": sum(1 for p in self.posts if any(ln.recipe for ln in p.lines)),
             "posts_assumed_per_object": sum(1 for p in self.posts if p.assumed),
             "posts_assumed_priced": self.totals.assumed_priced,
+            "posts_with_repetition": sum(1 for p in self.posts if p.repetition_factor is not None),
             "posts_priced": self.totals.priced,
             "posts_missing_price": self.totals.missing_price,
             "posts_missing_quantity": self.totals.missing_quantity,
@@ -167,6 +170,7 @@ def run_kalkyl(
     cells: Cells | None = None,
     recipe: BoundRecipe | None = None,
     common_spaces: CommonSpaceRules | None = None,
+    repetition: Repetition | None = None,
 ) -> KalkylResult:
     chunks = make_chunks(corpus, kalkyl.chunk_max_chars, kalkyl.chunk_max_quantity_lines)
     paths = heading_paths(corpus)
@@ -183,7 +187,7 @@ def run_kalkyl(
         stats: dict[str, Any] = {"sent": 0, "matched": 0, "none": 0, "refused": 0, "calls": 0, "error": "halted"}
     else:
         stats = match_posts(client, posts, catalog, kalkyl.roles[MATCH], kalkyl.match_batch)
-    price_posts(posts, catalog)
+    price_posts(posts, catalog, repetition)
     return KalkylResult(
         chunks=chunks,
         chunk_results=results,
@@ -196,6 +200,7 @@ def run_kalkyl(
         match_stats=stats,
         paths=paths,
         recipe=recipe,
+        repetition=repetition,
         rooms_from_rows=filled,
         object_lists=lists,
     )

@@ -107,6 +107,8 @@ CALC_COLUMNS = [
     ("Källa (block)", 18),
     ("Citat", 60),
     ("Räknade objektrader (block)", 40),
+    ("Serieeffekt (timfaktor)", 12),
+    ("Installerat pris per enhet", 14),
 ]
 MAX_ROW_IDS = 400  # block ids listed in one cell; beyond that the cell gives the count and Objektmodell has the rest
 
@@ -158,6 +160,8 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
             (block, None),
             (quote, None),
             (_rows_cell(p), None),
+            (p.repetition_factor, NUM),
+            (p.installed_unit_price, KR),
         ]
         for col, (value, fmt) in enumerate(values, 1):
             if value is not None:
@@ -175,6 +179,11 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
     for label, value, fmt in (
         ("Material", t.material, KR),
         ("Timmar", t.hours, HOURS),
+        (
+            f"varav avdrag för serieeffekt ({result.repetition.label if result.repetition else 'ingen tabell'})",
+            -t.repetition_hours,
+            HOURS,
+        ),
         ("Arbete", t.labour, KR),
         ("Summa (exkl. optioner)", t.total, KR),
         ("varav oklar entreprenadgräns", t.unclear_total, KR),
@@ -204,6 +213,12 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Material", t.material, KR),
         ("Arbete", t.labour, KR),
         ("Timmar", t.hours, HOURS),
+        ("Avdrag för serieeffekt (timmar)", -t.repetition_hours, HOURS),
+        (
+            "Serieeffekt",
+            result.repetition.label if result.repetition else "ingen tabell: timmar per enhet är fasta",
+            None,
+        ),
         ("varav oklar entreprenadgräns", t.unclear_total, KR),
         ("varav antagna mängder", t.assumed_total, KR),
         ("Prissatta poster med antagen mängd", t.assumed_priced, None),

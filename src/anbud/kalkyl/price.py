@@ -51,6 +51,7 @@ from anbud.granskning.contracts import CalcPost
 from anbud.kalkyl.object_list import ObjectList, choose
 from anbud.kalkyl.recipe import BoundRecipe, Count
 from anbud.kalkyl.records import Contained, QuantityRecord, Scope, VerifiedRecord
+from anbud.kalkyl.repetition import Repetition
 from anbud.kalkyl.rooms import APARTMENT_ROOMS, room_types
 from anbud.kalkyl.rooms import label as rooms_label
 from anbud.kalkyl.verify import quantity_written
@@ -417,6 +418,15 @@ class Post:
     total: Decimal | None = None
     category: str = ""
     catalog_name: str = ""
+    hours_flat: Decimal | None = None  # quantity × hours per unit, before the repetition factor
+    repetition_factor: Decimal | None = None  # the average factor on hours, when below 1
+
+    @property
+    def installed_unit_price(self) -> Decimal | None:
+        """Material and labour per unit after repetition: "installerat pris per enhet", to compare line by line."""
+        if self.total is None or not self.quantity:
+            return None
+        return _round(self.total / self.quantity)
 
     @property
     def assumed(self) -> bool:
@@ -642,9 +652,10 @@ def _dec(value: float | None) -> Decimal:
     return Decimal(str(value)) if value is not None else Decimal(0)
 
 
-def price_posts(posts: list[Post], catalog: Catalog) -> None:
+def price_posts(posts: list[Post], catalog: Catalog, repetition: Repetition | None = None) -> None:
     """Priced as `granskning.catalog.Catalog.unit_cost` defines a unit (hours x rate + material), in Decimal. A missing
-    unit price counts as 0 when hours are given, and the other way round; hours without a rate can't be priced."""
+    unit price counts as 0 when hours are given, and the other way round; hours without a rate can't be priced. With a
+    repetition table, a count post's hours take its average factor (`repetition.Repetition.hours_factor`), noted."""
     for post in posts:
         item: CatalogItem | None = catalog.find(post.catalog_id) if post.catalog_id else None
         post.category = (item.category or "") if item else ""
@@ -672,7 +683,17 @@ def price_posts(posts: list[Post], catalog: Catalog) -> None:
         unit_price, hours = _dec(item.unit_price), _dec(item.hours)
         post.unit_price, post.hours_per_unit = unit_price, hours
         post.material = _round(post.quantity * unit_price)
-        post.hours = _round(post.quantity * hours)
+        post.hours_flat = _round(post.quantity * hours)
+        post.hours = post.hours_flat
+        if repetition is not None and unit_family(post.unit) == "count" and hours > 0:
+            factor = repetition.hours_factor(post.quantity)
+            if factor < 1:
+                post.repetition_factor = factor.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                post.hours = _round(post.quantity * hours * factor)
+                post.notes.append(
+                    f"Serieeffekt: timmar × {_num(post.repetition_factor)} i snitt för {_num(post.quantity)} "
+                    f"{post.unit} ({repetition.label})"
+                )
         post.labour = _round(post.hours * _dec(catalog.hourly_rate))
         post.total = post.material + post.labour
         post.status = "Prissatt"
@@ -687,6 +708,7 @@ class Totals:
     unclear_total: Decimal = Decimal(0)
     options_total: Decimal = Decimal(0)
     assumed_total: Decimal = Decimal(0)  # the part of `total` resting on an assumed count per object
+    repetition_hours: Decimal = Decimal(0)  # hours the repetition factor took off, in `total`'s posts
     priced: int = 0
     assumed_priced: int = 0
     missing_price: int = 0
@@ -715,6 +737,8 @@ def totals_of(posts: list[Post]) -> Totals:
         if p.assumed:
             t.assumed_total += p.total
             t.assumed_priced += 1
+        if p.hours_flat is not None and p.hours is not None:
+            t.repetition_hours += p.hours_flat - p.hours
     return t
 
 
