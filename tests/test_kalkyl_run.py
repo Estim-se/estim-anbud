@@ -367,3 +367,66 @@ def test_a_paid_kalkyl_run_is_refused_on_a_dirty_tree(
     monkeypatch.setattr("anbud.model_client.keychain_key", no_key)
     assert cli.main(["kalkyl", "co-001", "t-0001", "--catalog", "synthetic"]) == cli.REFUSED
     assert "clean tree" in capsys.readouterr().err
+
+
+def test_a_rebuild_from_a_base_run_answers_its_extraction_at_no_cost_and_never_writes_to_it(tender: Path) -> None:
+    paid = _run(fake_sdk())
+    base_out = tender / "kalkyl" / "kalkyl-test"
+    base_record = data_root_of(tender) / "co-001" / "runs" / "kalkyl-test"
+    before = {p: p.read_bytes() for d in (base_out, base_record) for p in d.iterdir()}
+    summary = run_dev_tender(
+        "co-001", "t-0001", sdk=None, catalog_name="synthetic", run_id="kalkyl-rebuild", base_run="kalkyl-test"
+    )
+    assert summary["complete"] and summary["cost_usd"] == 0 and summary["replay_misses"] == 0
+    assert summary["base_run"] == "kalkyl-test" and paid["base_run"] is None
+    rebuilt = tender / "kalkyl" / "kalkyl-rebuild"
+    assert (rebuilt / "posts.json").read_bytes() == (base_out / "posts.json").read_bytes()
+    assert {p: p.read_bytes() for d in (base_out, base_record) for p in d.iterdir()} == before
+
+
+def test_a_rebuild_replay_counts_requests_the_base_run_never_made(tender: Path) -> None:
+    from anbud.kalkyl.settings import KalkylConfig
+
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    _run(fake_sdk(), kalkyl=tiny)  # stopped by the budget: no extraction in its cache
+    summary = run_dev_tender(
+        "co-001", "t-0001", sdk=None, catalog_name="synthetic", run_id="kalkyl-rebuild", base_run="kalkyl-test"
+    )
+    assert summary["replay_misses"] > 0 and not summary["complete"]
+
+
+def test_a_rebuild_needs_a_stored_base_run_and_its_own_run_id(tender: Path) -> None:
+    from anbud.kalkyl.run import KalkylError
+
+    with pytest.raises(KalkylError, match="no stored run"):
+        run_dev_tender("co-001", "t-0001", sdk=None, catalog_name="synthetic", run_id="r-2", base_run="r-missing")
+    _run(fake_sdk())
+    with pytest.raises(KalkylError, match="own run id"):
+        _run(None, base_run="kalkyl-test")
+
+
+def test_the_cli_rebuild_replay_needs_no_key_and_exits_4_on_a_miss(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ledger(sh.DEV)
+    from anbud import model_client
+    from anbud.granskning import provenance
+
+    _run(fake_sdk())
+
+    def no_key(**_: Any) -> str:
+        raise AssertionError("a replay must not read a key")
+
+    monkeypatch.setattr(model_client, "keychain_key", no_key)
+    monkeypatch.setattr(provenance, "git_state", lambda root=None: provenance.GitState("a" * 40, True, "b" * 64))
+    args = ["kalkyl", "co-001", "t-0001", "--catalog", "synthetic", "--replay", "--base-run", "kalkyl-test"]
+    assert cli.main([*args, "--run-id", "kalkyl-r1"]) == 0  # a dirty tree may replay
+    assert "base_run: kalkyl-test" in capsys.readouterr().out
+    assert cli.main([*args[:-1], "kalkyl-r1", "--run-id", "kalkyl-r2"]) == 0  # a rebuild of a rebuild
+
+    from anbud.kalkyl.settings import KalkylConfig
+
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), catalog_name="synthetic", run_id="stopped", kalkyl=tiny)
+    assert cli.main([*args[:-1], "stopped", "--run-id", "kalkyl-r3"]) == cli.REPLAY_INCOMPLETE
+    assert "replay incomplete" in capsys.readouterr().err

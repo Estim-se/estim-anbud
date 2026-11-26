@@ -10,6 +10,7 @@ from anbud.runguard import RunRefused, check_run_allowed, held_out_refusal
 
 NOT_BUILT = 2
 REFUSED = 3
+REPLAY_INCOMPLETE = 4  # a replay with calls not in the step cache, as `anbud run --replay`
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -88,8 +89,8 @@ def _kalkyl(args: argparse.Namespace) -> int:
         print(f"anbud kalkyl: refused: {exc}", file=sys.stderr)
         return REFUSED
     try:
-        if args.replay and not args.run_id:
-            print("anbud kalkyl: --replay needs the --run-id of a stored run", file=sys.stderr)
+        if args.replay and not (args.run_id or args.base_run):
+            print("anbud kalkyl: --replay needs the --run-id or --base-run of a stored run", file=sys.stderr)
             return REFUSED
         if args.dry_run:
             summary = plan(args.company_id, args.tender_id, catalog_name=args.catalog)
@@ -111,13 +112,23 @@ def _kalkyl(args: argparse.Namespace) -> int:
                 config = load_config()
                 sdk = make_sdk_client(config, keychain_key(account=config.workspace))
             summary = run_dev_tender(
-                args.company_id, args.tender_id, sdk=sdk, catalog_name=args.catalog, run_id=args.run_id, code=code
+                args.company_id,
+                args.tender_id,
+                sdk=sdk,
+                catalog_name=args.catalog,
+                run_id=args.run_id,
+                code=code,
+                base_run=args.base_run,
             )
     except (KalkylError, CatalogError, StoreError, KeyMissing, IntakeStop) as exc:
         print(f"anbud kalkyl: stopped: {exc}", file=sys.stderr)
         return REFUSED
     for key, value in summary.items():
         print(f"{key}: {value}")
+    if summary.get("replay_misses"):
+        misses = summary["replay_misses"]
+        print(f"anbud kalkyl: replay incomplete: {misses} calls not in the step cache", file=sys.stderr)
+        return REPLAY_INCOMPLETE
     return 0
 
 
@@ -190,6 +201,10 @@ def main(argv: list[str] | None = None) -> int:
     kalkyl.add_argument("--run-id", help="resume or replay this run (same salt, so finished calls cost $0)")
     kalkyl.add_argument("--dry-run", action="store_true", help="chunk counts and a cost estimate, no model call ($0)")
     kalkyl.add_argument("--replay", action="store_true", help="answer every call from the run's step cache ($0)")
+    kalkyl.add_argument(
+        "--base-run",
+        help="rebuild from this stored run: a new run with its salt, so unchanged requests cost $0; never writes to it",
+    )
     sub.add_parser("replay", help="replay a stored run at $0 (phase 1)")
     sub.add_parser("guards", help="repo guards: names, document files, licensed text")
     sub.add_parser("split", help="assign new tenders to dev, held-out or prospective")

@@ -157,6 +157,14 @@ def new_run_id(tender_id: str) -> str:
     return f"kalkyl-{tender_id}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
 
 
+def base_salt(store: RunStore, run_id: str) -> str:
+    """The salt of a stored run, read without writing anything to it (a frozen run is read-only)."""
+    manifest = store.run_dir(run_id) / "run.json"
+    if not manifest.is_file():
+        raise KalkylError(f"no stored run {run_id} to rebuild from")
+    return str(json.loads(manifest.read_text())["salt"])
+
+
 def run_dev_tender(
     company_id: str,
     tender_id: str,
@@ -168,12 +176,17 @@ def run_dev_tender(
     config: Config | None = None,
     kalkyl: KalkylConfig | None = None,
     code: dict[str, Any] | None = None,
+    base_run: str | None = None,
 ) -> dict[str, Any]:
     """Run Kalkyl on a dev tender (the caller has checked it is one) and write the outputs. Returns counts only.
     With `sdk=None` the run is a replay: every answer must come from the run's step cache or the card store.
 
     `code` is the provenance block (harness commit, dirty flag, config hashes); the summary also records sha256
-    hashes of the inputs read (blocks, cells, catalog, recipe), so a frozen run can be traced to what it ran on."""
+    hashes of the inputs read (blocks, cells, catalog, recipe), so a frozen run can be traced to what it ran on.
+
+    `base_run` rebuilds from a stored run: a new run with that run's salt, so every request identical to one the base
+    run made (its extraction, unless the prompt or the chunks changed) is answered from the step cache at $0, and a
+    changed request is sent (or, in a replay, counted as a miss). Nothing is written to the base run."""
     config = config or load_config()
     kalkyl = kalkyl or load_kalkyl_config()
     tender = paths.dev_tender_dir(company_id, tender_id, root)
@@ -182,8 +195,11 @@ def run_dev_tender(
     recipe = load_bound_recipe(company_id, catalog, root)
     store = RunStore(company_id, root)
     run_id = run_id or new_run_id(tender_id)
+    if base_run is not None and run_id == base_run:
+        raise KalkylError("a rebuild needs its own run id")
+    salt = base_salt(store, base_run) if base_run is not None else None
     budget = Budget(kalkyl.hard_stop)
-    client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store)
+    client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
     corpus, cards = with_cards(client, store, corpus, tender_id)
     cells = load_cells(tender / "prep" / CELLS_FILE)
     result = run_kalkyl(corpus, catalog, client, kalkyl, cells=cells, recipe=recipe)
@@ -198,6 +214,7 @@ def run_dev_tender(
         store.write_file(out / "cards_masking.json", canonical([m.model_dump(mode="json") for m in cards.cards.masked]))
     summary = {
         "run_id": run_id,
+        "base_run": base_run,
         "code": code,
         "inputs": input_hashes(company_id, tender, catalog_name or kalkyl.default_catalog, root),
         "catalog": catalog.name,
@@ -207,6 +224,7 @@ def run_dev_tender(
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
         "persist_failures": client.persist_failures,
+        "replay_misses": client.replay_misses,
         "output": str(out),
     }
     store.write_file(out / "summary.json", json.dumps(summary, indent=2, sort_keys=True).encode())
