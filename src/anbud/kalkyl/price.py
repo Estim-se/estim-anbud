@@ -5,7 +5,8 @@ up (each cited row once); stated totals are compared with them. Totals stated fo
 without a location are whole-scope figures. When the candidates disagree, the lowest is used and a conflict note
 says so, as #73 asks. An apartment row's rooms (`contains`, from the model, a table column or the row's own
 descriptor) give room types per apartment (`rooms.room_types`), counted the same way with a breakdown per apartment
-type. Room types no row counts (a hall) come from the recipe's per-apartment figure, labelled.
+type. Room types no row counts (a hall) come from the recipe's per-apartment figure, labelled. A requirement per
+building when no record counts the buildings multiplies by at least one, as the app does, labelled an assumption.
 
 **Object list read by code.** When a sheet is an object list by the app's rule (`object_list`), that list is the
 primary source for apartments, premises (when it has premises rows), stairwells and stairwell floors (when it has an
@@ -90,6 +91,16 @@ LEVEL_LABELS = {
 }
 # A per-object requirement in a count unit that names no number ("kitchens get a stove outlet") is one per object.
 ASSUMED_PER_OBJECT = Decimal(1)
+# Kinds a count the documents state comes first for, before one code derives from the object list's groups.
+STATED_FIRST = ("building",)
+DERIVED = "härledd"
+# Kinds the app never counts as none: a requirement per building when no document states how many buildings
+# multiplies by at least one (the app's "minst 1 (antal huskroppar anges inte)").
+AT_LEAST_ONE = ("building",)
+ASSUMED_COUNT_NOTE = (
+    "Antal {many} antaget till minst 1: underlaget anger inget antal. Ersätts av ett antal i förfrågningsunderlaget "
+    "eller ett platsbesök"
+)
 ASSUMED_NOTE = (
     "Antal per objekt antaget till 1: underlaget anger inget antal. Ersätts av ett antal i förfrågningsunderlaget, "
     "kundens recept för rumstypen eller ett platsbesök"
@@ -140,7 +151,7 @@ class ObjectCount:
     record_ids: list[str] = field(default_factory=list)
     rows: list[str] = field(default_factory=list)  # the cited blocks counted: list rows, or the stated totals
     note: str | None = None  # how a derived count was reached, when it isn't plain rows or totals
-    source: str = "model"  # "code" when the object list read by code gave the count
+    source: str = "model"  # "code" when the object list read by code gave the count, "assumed" for `AT_LEAST_ONE`
     model_rows: list[str] = field(default_factory=list)  # the model's cited blocks outside the code-read list
 
 
@@ -219,11 +230,18 @@ def _per_type(by_type: dict[str, list[Decimal]]) -> str:
     return " – per lägenhetstyp: " + "; ".join(parts)
 
 
-def _from_model(kind: str, ev: _Evidence) -> ObjectCount:
-    """The model's evidence alone: when the candidates disagree, the lowest is used and the conflict says so."""
+def _from_model(kind: str, ev: _Evidence, derived: _Code | None = None) -> ObjectCount:
+    """The model's evidence: when the candidates disagree, the lowest is used and the conflict says so. A count the
+    code derived for a `STATED_FIRST` kind goes into the basis, and a conflict when it differs."""
     values = sorted({c for c, _ in ev.candidates})
     basis = "; ".join(f"{_num(c)} ({why})" for c, why in ev.candidates) + _per_type(ev.by_type)
     conflict = f"Konflikt: {' / '.join(_num(v) for v in values)} – lägsta används" if len(values) > 1 else None
+    if derived is not None:
+        basis += f"; objektlistan: {_num(derived.count)} ({derived.how})"
+        if derived.count != values[0]:
+            conflict = (
+                f"Konflikt: {_num(values[0])} enligt underlaget / {_num(derived.count)} {DERIVED} – underlaget används"
+            )
     return ObjectCount(kind, values[0], basis, conflict, ev.record_ids, ev.blocks)
 
 
@@ -246,6 +264,12 @@ def _code_counts(lst: ObjectList) -> tuple[dict[str, _Code], int]:
     if stairwells:
         rows = list(dict.fromkeys(b for bs in stairwells.values() for b in bs))
         out["stairwell"] = _Code(Decimal(len(stairwells)), rows, f"unika adresser i kolumn {lst.address_column}")
+    buildings = lst.buildings()
+    if buildings:
+        rows = list(dict.fromkeys(b for bs in buildings.values() for b in bs))
+        out["building"] = _Code(
+            Decimal(len(buildings)), rows, f"{DERIVED}: unika värden i kolumn {lst.building_column}"
+        )
     floors = lst.stairwell_floors()
     if floors:
         rows = list(dict.fromkeys(b for bs in floors.values() for b in bs))
@@ -266,6 +290,13 @@ def _code_counts(lst: ObjectList) -> tuple[dict[str, _Code], int]:
     return out, implausible
 
 
+def _derived_note(kind: str, code: _Code) -> str | None:
+    if not code.how.startswith(DERIVED):
+        return None
+    many = OBJECT_LABELS[kind][1]
+    return f"{DERIVED.capitalize()}: antal {many} anges inte i underlaget, objektlistan grupperar raderna efter {many}"
+
+
 def _from_code(kind: str, code: _Code, ev: _Evidence | None, lst: ObjectList, found: int) -> ObjectCount:
     """The code-read list's count is used. The model's list rows and stated totals stay in the basis and its records
     with the count; a model figure that differs is a conflict, and the blocks it cited outside the list are kept."""
@@ -276,7 +307,7 @@ def _from_code(kind: str, code: _Code, ev: _Evidence | None, lst: ObjectList, fo
         where += f"; {code.how}"
     basis = f"{_num(code.count)} ({where}){_per_type(code.by_type)}"
     if ev is None:
-        return ObjectCount(kind, code.count, basis, None, [], code.rows, source="code")
+        return ObjectCount(kind, code.count, basis, None, [], code.rows, note=_derived_note(kind, code), source="code")
     basis += "; modellen: " + "; ".join(f"{_num(c)} ({why})" for c, why in ev.candidates) + _per_type(ev.by_type)
     differ = sorted({c for c, _ in ev.candidates if c != code.count})
     conflict = None
@@ -299,13 +330,32 @@ def count_objects(
     code, code_implausible = _code_counts(chosen) if chosen else ({}, 0)
     out: dict[str, ObjectCount] = {}
     for kind in sorted(set(evidence) | set(code)):
-        if chosen is not None and kind in code:
+        if kind in STATED_FIRST and kind in evidence:
+            out[kind] = _from_model(kind, evidence[kind], code.get(kind))
+        elif chosen is not None and kind in code:
             out[kind] = _from_code(kind, code[kind], evidence.get(kind), chosen, len(lists or []))
         else:
             out[kind] = _from_model(kind, evidence[kind])
     _apartment_notes(out, code_implausible if "room" in code else implausible)
     _per_apartment(out, recipe)
+    _at_least_one(out, records)
     return out
+
+
+def _at_least_one(out: dict[str, ObjectCount], records: list[VerifiedRecord]) -> None:
+    """A kind in `AT_LEAST_ONE` that a requirement multiplies by and no record counts: at least one, labelled an
+    assumption, so the requirement is priced with its assumption visible instead of missing."""
+    needed = {v.record.per_object for v in records if v.record.quantity_source == "per_object"}
+    for kind in AT_LEAST_ONE:
+        if kind in needed and (kind not in out or out[kind].count is None):
+            many = OBJECT_LABELS[kind][1]
+            out[kind] = ObjectCount(
+                kind,
+                Decimal(1),
+                f"minst 1 (antal {many} anges inte)",
+                note=ASSUMED_COUNT_NOTE.format(many=many),
+                source="assumed",
+            )
 
 
 def _apartment_notes(out: dict[str, ObjectCount], implausible: int) -> None:
@@ -429,13 +479,23 @@ class Post:
         return _round(self.total / self.quantity)
 
     @property
-    def assumed(self) -> bool:
+    def assumed_per_object(self) -> bool:
         """Some of the quantity rests on an assumed count per object."""
         return any(ln.assumed for ln in self.lines)
 
     @property
+    def assumed_objects(self) -> bool:
+        """Some of the quantity multiplies by an assumed object count (`AT_LEAST_ONE`)."""
+        return any(ln.objects is not None and ln.objects.source == "assumed" for ln in self.lines)
+
+    @property
+    def assumed(self) -> bool:
+        """Some of the quantity rests on an assumption: a count per object or an object count."""
+        return self.assumed_per_object or self.assumed_objects
+
+    @property
     def level(self) -> str:
-        if any(ln.assumed for ln in self.lines):
+        if self.assumed:
             return LEVEL_LABELS["assumed"]
         if any(ln.recipe for ln in self.lines):
             return LEVEL_LABELS["recipe"]

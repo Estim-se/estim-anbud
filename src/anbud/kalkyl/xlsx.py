@@ -239,6 +239,7 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Poster per objekt eller rumstyp", c["posts_per_object"], None),
         ("Poster med antal enligt recept", c["posts_from_recipe"], None),
         ("Poster med antaget antal per objekt (1)", c["posts_assumed_per_object"], None),
+        ("Poster med antaget antal objekt (minst 1 byggnad)", c["posts_assumed_object_count"], None),
         ("Verifierade poster från modellen", c["records_verified"], None),
         ("Underkända poster från modellen", c["records_rejected"], None),
         ("Avsnitt lästa / totalt", f"{c['chunk_status'].get('submitted', 0)} / {c['chunks']}", None),
@@ -249,7 +250,8 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         _put(ws, i, 2, value, fmt)
 
 
-CODE_KINDS = ("apartment", "premises", "stairwell", "stairwell_floor")
+CODE_KINDS = ("apartment", "premises", "stairwell", "stairwell_floor", "building")
+OBJECT_SOURCES = {"code": "kod (objektlistan)", "model": "modellen", "assumed": "antagande (minst 1)"}
 
 
 def _code_objects(result: KalkylResult) -> str:
@@ -342,7 +344,7 @@ def _objects_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status
         _put(ws, r, 4, obj.conflict or "")
         _put(ws, r, 5, obj.note or "")
         _put(ws, r, 6, ", ".join(obj.rows))
-        _put(ws, r, 7, "kod (objektlistan)" if obj.source == "code" else "modellen")
+        _put(ws, r, 7, OBJECT_SOURCES[obj.source])
         _put(ws, r, 8, ", ".join(obj.model_rows))
 
 
