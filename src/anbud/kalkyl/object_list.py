@@ -15,6 +15,10 @@ label rule and premises pattern from `src/lib/tender-object-counts.ts` (`roomCou
   `adress|gata|trapphus|uppgång|port`, the floor column `plan|våning`, the number column `lägenhetsnr|lgh nr|lgh`.
   The header text of a column is its cells in every header row, joined.
 - **Counts.** Stairwells are the distinct non-empty addresses; stairwell floors the distinct address and floor pairs.
+- **Buildings (Kalkyl's own, not the app's).** A column whose header names a building (`hus`, `huskropp`, `byggnad`,
+  as a word of its own, so a stairwell column, "trapphus", is none; a building type is none either) groups the
+  apartments by building: the distinct non-empty values are the buildings, a count labelled derived. The app only
+  takes a building count from the text.
 
 Several lists: the app keeps the sheet with the most apartments (the first of equals) and never adds lists together;
 `choose` does the same, and the caller says how many lists it found.
@@ -48,6 +52,7 @@ _ASCII_B = r"(?<![A-Za-z0-9_])plan(?![A-Za-z0-9_])"
 ADDRESS = re.compile(r"adress|gata|trapphus|uppgång|port", re.IGNORECASE)
 FLOOR = re.compile(rf"^\s*plan\s*$|våning|{_ASCII_B}", re.IGNORECASE)
 NUMBER = re.compile(r"lägenhetsnr|lgh\.?\s*nr|lägenhet\s*nr|lgh\Z", re.IGNORECASE)
+BUILDING = re.compile(rf"(?<!{_LETTER})(?:huskropp|byggnad|hus)(?!s?\s*-?typ)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,7 @@ class ListApartment:
     address: str | None
     floor: str | None
     number: str | None
+    building: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,7 @@ class ObjectList:
     address_column: str | None
     floor_column: str | None
     number_column: str | None
+    building_column: str | None = None
 
     @property
     def premises(self) -> int:
@@ -83,6 +90,14 @@ class ObjectList:
         for a in self.apartments:
             if a.address:
                 out.setdefault(a.address, []).append(a.block_id)
+        return out
+
+    def buildings(self) -> dict[str, list[str]]:
+        """Each distinct non-empty value of the building column, with the apartment rows that give it."""
+        out: dict[str, list[str]] = {}
+        for a in self.apartments:
+            if a.building:
+                out.setdefault(a.building, []).append(a.block_id)
         return out
 
     def stairwell_floors(self) -> dict[tuple[str, str], list[str]]:
@@ -153,6 +168,7 @@ def read_sheet(doc_id: str, sheet: str, rows: dict[int, Row]) -> ObjectList | No
         return next((c for c in columns if c != type_col and pattern.search(header(c))), None)
 
     address, floor, number = pick(ADDRESS), pick(FLOOR), pick(NUMBER)
+    building = next((c for c in columns if c not in (type_col, address) and BUILDING.search(header(c))), None)
     apartments: list[ListApartment] = []
     premises: list[str] = []
     for n, bid, r in data:
@@ -171,6 +187,7 @@ def read_sheet(doc_id: str, sheet: str, rows: dict[int, Row]) -> ObjectList | No
                 address=r.get(address) if address else None,
                 floor=r.get(floor) if floor else None,
                 number=r.get(number) if number else None,
+                building=r.get(building) if building else None,
             )
         )
     return ObjectList(
@@ -184,6 +201,7 @@ def read_sheet(doc_id: str, sheet: str, rows: dict[int, Row]) -> ObjectList | No
         address_column=address,
         floor_column=floor,
         number_column=number,
+        building_column=building,
     )
 
 

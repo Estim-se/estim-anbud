@@ -4,16 +4,34 @@ meet the model's. Every sheet, text, address and count here is invented; no mode
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import openpyxl
 import pytest
-from kalkyl_synthetic import BLOCKS, cite, fake_sdk, obj, write_catalog, write_cells, write_prep
+from kalkyl_synthetic import (
+    BLOCKS,
+    DOC_A,
+    GOOD,
+    OUTLINE,
+    cite,
+    fake_sdk,
+    first_block,
+    good_handler,
+    message,
+    obj,
+    req,
+    submit,
+    write_catalog,
+    write_cells,
+    write_prep,
+)
 
 from anbud import paths
 from anbud.granskning.corpus import Corpus
 from anbud.kalkyl.object_list import choose, read_lists
-from anbud.kalkyl.price import CODE_BASIS, count_objects
+from anbud.kalkyl.price import ASSUMED_COUNT_NOTE, CODE_BASIS, count_objects
 from anbud.kalkyl.records import QuantityRecord, VerifiedRecord
 from anbud.kalkyl.rooms import room_count
 from anbud.kalkyl.run import run_dev_tender
@@ -250,3 +268,84 @@ def test_a_run_counts_from_the_code_list_and_says_where_the_model_disagrees(tend
     assert floors["Antal"] == 6 and floors["Räknat av"] == "kod (objektlistan)"
     # Summary carries counts only.
     assert "Exempelgatan" not in (out / "summary.json").read_text()
+
+
+# A requirement per building, and a line that states how many buildings there are.
+METER = Block(id="aaaaaa-000013", doc_id=DOC_A, kind="paragraph", text="2 st mätarskåp i varje byggnad.", page=3)
+STATED = Block(id="aaaaaa-000014", doc_id=DOC_A, kind="paragraph", text="Projektet omfattar 3 byggnader.", page=3)
+METER_REQ = req(
+    "Mätarskåp",
+    "per_object",
+    "st",
+    [cite(METER.id, "2 st mätarskåp i varje byggnad")],
+    quantity=2,
+    per_object="building",
+    catalog_id="downlight",
+)
+STATED_OBJ = obj("building", "stated", [cite(STATED.id, "3 byggnader")], quantity=3)
+
+
+def _with_houses(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """The list with a building column: the 1000s in house A, the 2000s in house B."""
+    out = [dict(r) for r in rows]
+    out[1]["G"] = "Hus"
+    for r in out:
+        if r.get("A", "")[:1] in ("1", "2") and len(r.get("A", "")) == 4:
+            r["G"] = "A" if r["A"].startswith("1") else "B"
+    return out
+
+
+def test_a_building_column_groups_apartments_and_a_stairwell_or_type_column_does_not(tmp_path: Path) -> None:
+    corpus, cells = _corpus(tmp_path, _sheet(DOC, "Objekt", _with_houses(LIST)))
+    (lst,) = read_lists(corpus, cells)
+    assert lst.building_column == "G" and {k: len(v) for k, v in lst.buildings().items()} == {"A": 5, "B": 5}
+    typed = [dict(r) for r in _with_houses(LIST)]
+    typed[1]["G"] = "Hustyp"  # a building type, not a building
+    corpus, cells = _corpus(tmp_path / "t", _sheet(DOC, "Objekt", typed))
+    (lst,) = read_lists(corpus, cells)
+    assert lst.address_column == "D" and lst.building_column is None and lst.buildings() == {}  # "Trapphus" is D
+
+
+@pytest.mark.parametrize(
+    ("path", "houses", "stated", "count", "source"),
+    [
+        ("stated", True, True, 3, "model"),
+        ("derived", True, False, 2, "code"),
+        ("assumed", False, False, 1, "assumed"),
+    ],
+)
+def test_a_per_building_requirement_takes_a_stated_then_a_derived_then_an_assumed_building_count(
+    data_root: Path, path: str, houses: bool, stated: bool, count: int, source: str
+) -> None:
+    tender = paths.dev_tender_dir("co-001", "t-0001")
+    blocks, cells = _sheet(DOC, "Objekt", _with_houses(LIST) if houses else LIST)
+    extra = [METER, STATED] if stated else [METER]
+    prep = write_prep(tender / "prep", [*BLOCKS[:12], *extra, *BLOCKS[12:], *blocks], OUTLINE)
+    write_cells(prep, cells)
+    write_catalog(data_root)
+
+    def handler(params: dict[str, Any]) -> Any:
+        if "tools" in params and params["tools"][0]["name"] == "submit_quantities":
+            if first_block(params) == "aaaaaa-000001":
+                good = GOOD["aaaaaa-000001"]
+                records = [*good["records"], METER_REQ, *([STATED_OBJ] if stated else [])]
+                return message([submit({"records": records, "set_aside": good.get("set_aside", [])})])
+        return good_handler(params)
+
+    summary = run_dev_tender("co-001", "t-0001", sdk=fake_sdk(handler), catalog_name="synthetic", run_id="kalkyl-b")
+    result = json.loads((tender / "kalkyl" / "kalkyl-b" / "result.json").read_text())
+    building = next(o for o in result["objects"] if o["kind"] == "building")
+    assert Decimal(building["count"]) == count and building["source"] == source
+    post = next(p for p in result["posts"] if p["name"] == "Mätarskåp")
+    assert Decimal(post["quantity"]) == 2 * count and post["status"] == "Prissatt"
+    if path == "stated":  # the count the documents state, with its citation; the derived one is a conflict note
+        assert building["rows"] == [STATED.id]
+        assert building["conflict"] == "Konflikt: 3 enligt underlaget / 2 härledd – underlaget används"
+    if path == "derived":  # from the list's building column, labelled derived, with the rows it groups
+        assert "härledd: unika värden i kolumn G" in building["basis"] and len(building["rows"]) == 10
+        assert any(n.startswith("Härledd: antal byggnader anges inte") for n in post["notes"])
+    if path == "assumed":  # at least one, labelled an assumption, inside "varav antagna mängder"
+        assert post["level"] == "Antagande" and ASSUMED_COUNT_NOTE.format(many="byggnader") in post["notes"]
+        assert Decimal(result["totals"]["assumed_total"]) == Decimal(post["total"])
+    assert summary["posts_assumed_object_count"] == (path == "assumed")
+    assert (post["level"] == "Antagande") == (path == "assumed")
