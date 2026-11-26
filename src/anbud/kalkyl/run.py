@@ -1,7 +1,8 @@
 """`anbud kalkyl`: a dev tender's prepared blocks to a priced calc in the tender's data folder.
 
 Reads `<tender>/prep/`, the page cards of its tiles (`granskning.card_store`: stored cards, then earlier Granskning
-runs' step caches at $0, then paid R1 reads) and the catalog from `~/estim-anbud-data/catalogs/<name>.json`.
+runs' step caches at $0, then paid R1 reads), the catalog from `~/estim-anbud-data/catalogs/<name>.json` and the
+recipe (`kalkyl.recipe`: the customer's, else Estim's default).
 Writes, under `<tender>/kalkyl/<run_id>/`:
 
     kalkyl.xlsx    the calc, Swedish labels, catalog label on every sheet
@@ -31,6 +32,7 @@ from anbud.kalkyl.extract import BRIEF, chunk_message, outline_text
 from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.pipeline import KalkylResult, run_kalkyl
 from anbud.kalkyl.price import calc_posts
+from anbud.kalkyl.recipe import BoundRecipe, RecipeError, bind, load_recipe
 from anbud.kalkyl.settings import EXTRACT, MATCH, KalkylConfig, load_kalkyl_config
 from anbud.kalkyl.tables import load_cells
 from anbud.kalkyl.xlsx import write_workbook
@@ -101,12 +103,16 @@ def result_json(result: KalkylResult) -> bytes:
                 "labour": p.labour,
                 "total": p.total,
                 "records": [ln.record.id for ln in p.lines],
+                "per_object": sorted({ln.per for ln in p.lines if ln.per}),
+                "recipe": next((ln.recipe for ln in p.lines if ln.recipe), None),
+                "object_rows": p.rows,
             }
         )
     body = {
         "complete": result.complete,
         "totals": vars(result.totals),
         "objects": [vars(o) for o in result.objects.values()],
+        "recipe": {"label": result.recipe.label, "source": result.recipe.source} if result.recipe else None,
         "posts": posts,
         "records": [v.model_dump(mode="json") for v in result.verified],
         "rejected": [r.model_dump(mode="json") for r in result.rejected],
@@ -117,6 +123,14 @@ def result_json(result: KalkylResult) -> bytes:
         ],
     }
     return json.dumps(body, ensure_ascii=False, indent=1, default=_decimal).encode()
+
+
+def load_bound_recipe(company_id: str, catalog: Catalog, root: Path | None = None) -> BoundRecipe | None:
+    """The customer's recipe, else Estim's default, matched to the catalog; None when neither exists."""
+    try:
+        return bind(load_recipe(company_id, root), catalog)
+    except RecipeError as exc:
+        raise KalkylError(str(exc)) from None
 
 
 def new_run_id(tender_id: str) -> str:
@@ -141,12 +155,14 @@ def run_dev_tender(
     tender = paths.dev_tender_dir(company_id, tender_id, root)
     corpus = load_corpus(tender / "prep")
     catalog = load(catalog_name or kalkyl.default_catalog, root)
+    recipe = load_bound_recipe(company_id, catalog, root)
     store = RunStore(company_id, root)
     run_id = run_id or new_run_id(tender_id)
     budget = Budget(kalkyl.hard_stop)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store)
     corpus, cards = with_cards(client, store, corpus, tender_id)
-    result = run_kalkyl(corpus, catalog, client, kalkyl, cells=load_cells(tender / "prep" / CELLS_FILE))
+    cells = load_cells(tender / "prep" / CELLS_FILE)
+    result = run_kalkyl(corpus, catalog, client, kalkyl, cells=cells, recipe=recipe)
     meta = {"company_id": company_id, "tender_id": tender_id, "run_id": run_id, "cost_usd": budget.spent}
     workbook, rows = write_workbook(result, corpus, catalog, meta)
     result.calc_posts = calc_posts(result.posts, rows)
@@ -190,6 +206,7 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
     corpus = add_cards(corpus, free)  # chunks as the run will cut them, as far as the cards are known
     chunks = make_chunks(corpus, kalkyl.chunk_max_chars, kalkyl.chunk_max_quantity_lines)
     heads = heading_paths(corpus)
+    recipe = load_bound_recipe(company_id, catalog, root) if catalog else None
     catalog_chars = len(prompt_lines(catalog)) if catalog else 0
     prefix_tokens = int((len(BRIEF) + catalog_chars + len(outline_text(corpus))) / CHARS_PER_TOKEN) + 3000  # + tools
     chunk_tokens = [int(len(chunk_message(c, corpus, heads, cells)) / CHARS_PER_TOKEN) for c in chunks]
@@ -213,7 +230,11 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
     return {
         "chunks": len(chunks),
         "quantity_lines": sum(len(c.quantity_ids) for c in chunks),
+        "scope_lines": sum(len(c.scope_ids) for c in chunks),
         "rows_with_cells": len(cells),
+        "recipe": recipe.label if recipe else None,
+        "recipe_items": len(recipe.counts) if recipe else 0,
+        "recipe_items_unbound": recipe.unbound if recipe else 0,
         "block_chars": sum(c.chars for c in chunks),
         "tiles": len(corpus.tiles),
         "cards_stored": sources["stored"],

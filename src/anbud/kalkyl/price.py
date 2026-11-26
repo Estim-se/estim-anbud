@@ -3,15 +3,21 @@
 **Object model.** Object records within the contract (included or unclear) are counted per object kind. List rows add
 up (each cited row once); stated totals are compared with them. Totals stated for different locations add up; totals
 without a location are whole-scope figures. When the candidates disagree, the lowest is used and a conflict note
-says so, as #73 asks.
+says so, as #73 asks. An apartment row's rooms (`contains`, from the model, a table column or the row's own
+descriptor) give room types per apartment (`rooms.room_types`), counted the same way with a breakdown per apartment
+type. Room types no row counts (a hall) come from the recipe's per-apartment figure, labelled.
 
-**Requirement quantities.** `stated` is the number written; `per_object` is the number per object times the object
-count (missing when the object model has no count for that kind); `lump_sum` is 1; `missing` stays missing.
+**Requirement quantities.** `stated` is the number written; `lump_sum` is 1; `missing` stays missing. `per_object` is
+the number per object times the object count; with no number written, the recipe's count for that room type and
+catalog item (labelled with the recipe's source), else "Saknar mängd" with the multiplier shown, so the estimator only
+fills in the count. A complete-installation passage becomes one line per recipe item and room type, each citing the
+passage and the counted rows, unless a requirement already states that item for that room type.
 
-**Posts.** Requirement records are grouped by scope, catalog item (or, without one, the normalised description), type
-code and unit family. Inside a post, records are grouped by location: the same quantity stated twice counts once, a
-record marked additive adds, and different quantities for the same location are a conflict priced at the lower value
-with a visible note. Locations add up.
+**Posts.** Requirement lines are grouped by scope, catalog item (or, without one, the normalised description), type
+code, unit family and the object kind they multiply by. Inside a post, lines are grouped by location: the same
+quantity stated twice counts once, a record marked additive adds, and different quantities for the same location are
+a conflict priced at the lower value with a visible note. Locations add up. Quantities from per-space rules
+(`DerivedQuantity`, common spaces) are posts of their own, labelled with the rule's source.
 
 **Catalog mapping.** A post's catalog item must exist and its unit must be in the same family as the post's (counts,
 length, area, volume, hours). A post without a usable item is "Saknar pris", never priced on the nearest item.
@@ -26,12 +32,17 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 
 from anbud.granskning.catalog import Catalog, CatalogItem
 from anbud.granskning.contracts import CalcPost
-from anbud.kalkyl.records import VerifiedRecord
+from anbud.kalkyl.recipe import BoundRecipe, Count
+from anbud.kalkyl.records import QuantityRecord, Scope, VerifiedRecord
+from anbud.kalkyl.rooms import APARTMENT_ROOMS, room_types
+from anbud.kalkyl.rooms import label as rooms_label
+from anbud.models import Citation
 
 OBJECT_LABELS = {
     "building": ("byggnad", "byggnader"),
@@ -40,6 +51,10 @@ OBJECT_LABELS = {
     "apartment": ("lägenhet", "lägenheter"),
     "premises": ("lokal", "lokaler"),
     "room": ("rum", "rum"),
+    "living_room": ("vardagsrum", "vardagsrum"),
+    "bedroom": ("sovrum", "sovrum"),
+    "half_room": ("halvrum", "halvrum"),
+    "hall": ("hall", "hallar"),
     "kitchen": ("kök", "kök"),
     "bathroom": ("badrum", "badrum"),
     "wc": ("wc", "wc"),
@@ -52,7 +67,12 @@ SCOPE_LABELS = {
     "excluded": "Ingår ej",
     "other_trade": "Utförs av annan",
 }
-LEVEL_LABELS = {"exact": "Exakt citat", "visual": "Läst visuellt", "interpretation": "Tolkning"}
+LEVEL_LABELS = {
+    "exact": "Exakt citat",
+    "visual": "Läst visuellt",
+    "interpretation": "Tolkning",
+    "recipe": "Enligt recept",
+}
 _UNIT_FAMILIES = {
     "count": {"st", "styck", "stycken", "pcs", "lgh", "rum", "sats", "set", "pkt", "post"},
     "length": {"m", "meter", "lm", "löpmeter"},
@@ -96,12 +116,28 @@ class ObjectCount:
     basis: str
     conflict: str | None = None
     record_ids: list[str] = field(default_factory=list)
+    rows: list[str] = field(default_factory=list)  # the cited blocks counted: list rows, or the stated totals
+    note: str | None = None  # how a derived count was reached, when it isn't plain rows or totals
 
 
-def count_objects(records: list[VerifiedRecord]) -> dict[str, ObjectCount]:
+def _held(r: QuantityRecord, n: Decimal) -> tuple[list[tuple[str, Decimal]], bool]:
+    """What one counted object holds, times how many it is, and False when an apartment row's rooms are implausible.
+    An apartment's rooms also give its room types (living room, bedrooms, half room) per `rooms.room_types`."""
+    if r.object_kind != "apartment":
+        return [(c.object_kind, n * _d(c.quantity)) for c in r.contains], True
+    types = room_types(list(r.contains))
+    if r.contains and not types:
+        return [], False
+    return [(kind, n * per) for kind, per in types.items()], True
+
+
+def count_objects(records: list[VerifiedRecord], recipe: BoundRecipe | None = None) -> dict[str, ObjectCount]:
     rows: dict[str, dict[str, Decimal]] = defaultdict(dict)  # kind -> first cited block -> count
     totals: dict[str, dict[str, set[Decimal]]] = defaultdict(lambda: defaultdict(set))  # kind -> location -> values
     ids: dict[str, list[str]] = defaultdict(list)
+    blocks: dict[str, list[str]] = defaultdict(list)
+    by_type: dict[str, dict[str, list[Decimal]]] = defaultdict(lambda: defaultdict(list))  # kind -> row label -> per
+    implausible = 0
     for v in records:
         r = v.record
         if r.record_kind != "object" or r.object_kind is None or r.scope not in ("included", "unclear"):
@@ -112,13 +148,18 @@ def count_objects(records: list[VerifiedRecord]) -> dict[str, ObjectCount]:
             n = _d(r.quantity)
         else:
             continue
+        held, plausible = _held(r, n)
+        implausible += not plausible
         # The object itself, then what each one holds (an apartment row's kitchens and rooms), counted the same way.
-        for kind, count in [(r.object_kind, n), *((c.object_kind, n * _d(c.quantity)) for c in r.contains)]:
+        for kind, count in [(r.object_kind, n), *held]:
             if r.quantity_source == "list_row":
                 rows[kind].setdefault(v.block_ids[0], count)
+                if kind != r.object_kind and r.object_kind == "apartment":
+                    by_type[kind][rooms_label(list(r.contains))].append(count)
             else:
                 totals[kind][_norm(r.location)].add(count)
             ids[kind].append(v.id)
+            blocks[kind].extend(b for b in v.block_ids if b not in blocks[kind])
     out: dict[str, ObjectCount] = {}
     for kind in sorted(set(rows) | set(totals)):
         candidates: list[tuple[Decimal, str]] = []
@@ -134,24 +175,74 @@ def count_objects(records: list[VerifiedRecord]) -> dict[str, ObjectCount]:
         values = sorted({c for c, _ in candidates})
         chosen = values[0]
         basis = "; ".join(f"{_num(c)} ({why})" for c, why in candidates)
+        if by_type.get(kind):
+            parts = [f"{lbl}: {len(vals)} lgh × {_num(vals[0])}" for lbl, vals in sorted(by_type[kind].items())]
+            basis += " – per lägenhetstyp: " + "; ".join(parts)
         conflict = None
         if len(values) > 1:
             conflict = f"Konflikt: {' / '.join(_num(v) for v in values)} – lägsta används"
-        out[kind] = ObjectCount(kind, chosen, basis, conflict, ids[kind])
+        out[kind] = ObjectCount(kind, chosen, basis, conflict, ids[kind], blocks[kind])
+    _apartment_notes(out, implausible)
+    _per_apartment(out, recipe)
     return out
+
+
+def _apartment_notes(out: dict[str, ObjectCount], implausible: int) -> None:
+    """Room types derived from fewer rows than the apartment count say so, and so do rows left out as implausible."""
+    apartments = out.get("apartment")
+    if apartments is None or apartments.count is None:
+        return
+    described = len(out["room"].rows) if "room" in out else 0
+    for kind in ("room", "living_room", "bedroom", "half_room"):
+        obj = out.get(kind)
+        if obj is None:
+            continue
+        notes = []
+        if described != apartments.count:
+            notes.append(f"rumstyper från {described} lägenhetsrader med rumsuppgift av {_num(apartments.count)}")
+        if implausible:
+            notes.append(f"{implausible} rader med orimligt rumsantal utelämnade")
+        obj.note = "; ".join(notes) or None
+
+
+def _per_apartment(out: dict[str, ObjectCount], recipe: BoundRecipe | None) -> None:
+    """Room types every apartment has one of (a hall, a kitchen), from the recipe, when no row counts them."""
+    apartments = out.get("apartment")
+    if recipe is None or apartments is None or apartments.count is None:
+        return
+    for kind, per in recipe.per_apartment.items():
+        if kind in out:
+            continue
+        out[kind] = ObjectCount(
+            kind,
+            per * apartments.count,
+            f"{_num(per)} per lägenhet ({recipe.label}) × {_num(apartments.count)} lägenheter",
+            apartments.conflict,
+            list(apartments.record_ids),
+            list(apartments.rows),
+            note=f"{OBJECT_LABELS[kind][1]} per lägenhet enligt {recipe.label}",
+        )
 
 
 @dataclass
 class Line:
-    """One requirement record's contribution to a post."""
+    """One contribution to a post: a requirement record, or a recipe count the record's scope passage calls for."""
 
     record: VerifiedRecord
     quantity: Decimal | None
     basis: str
     note: str | None = None
+    per: str | None = None  # the object kind or room type multiplied by
+    objects: ObjectCount | None = None  # the counted objects, for their rows
+    recipe: str | None = None  # the recipe label, when the count per object comes from a recipe
+    name: str | None = None  # the post name, when it isn't the record's
+    catalog_id: str | None = None  # the item, when the line is a recipe count
+    unit: str | None = None
 
 
-def line_of(v: VerifiedRecord, objects: dict[str, ObjectCount]) -> Line:
+def line_of(
+    v: VerifiedRecord, objects: dict[str, ObjectCount], recipe: BoundRecipe | None = None, catalog_id: str | None = None
+) -> Line:
     r = v.record
     unit = r.unit
     src = r.quantity_source
@@ -160,13 +251,20 @@ def line_of(v: VerifiedRecord, objects: dict[str, ObjectCount]) -> Line:
         return Line(v, q, f"angivet {_num(q)} {unit}")
     if src == "lump_sum":
         return Line(v, Decimal(1), "klumpsumma, 1 post")
-    if src == "per_object" and r.per_object is not None and r.quantity is not None:
-        per = _d(r.quantity)
-        one, many = OBJECT_LABELS[r.per_object]
-        obj = objects.get(r.per_object)
+    if src == "per_object" and r.per_object is not None:
+        kind = r.per_object
+        one, many = OBJECT_LABELS[kind]
+        obj = objects.get(kind)
+        hit = recipe.count_for(kind, catalog_id) if recipe and r.quantity is None else None
+        per = _d(r.quantity) if r.quantity is not None else (hit.count if hit else None)
+        label = hit.label if hit else None
+        each = f"{_num(per)} per {one}" + (f" ({label})" if label else "") if per is not None else f"? per {one}"
         if obj is None or obj.count is None:
-            return Line(v, None, f"{_num(per)} per {one}", f"antal {many} saknas i objektmodellen")
-        return Line(v, per * obj.count, f"{_num(per)} per {one} × {_num(obj.count)} {many}", obj.conflict)
+            return Line(v, None, each, f"antal {many} saknas i objektmodellen", per=kind)
+        times = f"{each} × {_num(obj.count)} {many}"
+        if per is None:
+            return Line(v, None, times, f"Saknar mängd: ange antal per {one}", per=kind, objects=obj)
+        return Line(v, per * obj.count, times, obj.conflict, per=kind, objects=obj, recipe=label)
     return Line(v, None, "mängd saknas i underlaget")
 
 
@@ -181,7 +279,7 @@ class Post:
     lines: list[Line]
     quantity: Decimal | None = None
     notes: list[str] = field(default_factory=list)
-    mapped_by: str | None = None  # R2, R3, or None
+    mapped_by: str | None = None  # R2, R3, recipe, or None
     mapping_note: str | None = None
     status: str = ""
     unit_price: Decimal | None = None
@@ -195,6 +293,8 @@ class Post:
 
     @property
     def level(self) -> str:
+        if any(ln.recipe for ln in self.lines):
+            return LEVEL_LABELS["recipe"]
         levels = {ln.record.level for ln in self.lines}
         for key in ("visual", "interpretation"):
             if key in levels:
@@ -204,6 +304,11 @@ class Post:
     @property
     def basis(self) -> str:
         return "; ".join(dict.fromkeys(ln.basis for ln in self.lines))
+
+    @property
+    def rows(self) -> list[str]:
+        """The object rows the quantity counts (list rows or stated totals), each once."""
+        return list(dict.fromkeys(b for ln in self.lines if ln.objects for b in ln.objects.rows))
 
     @property
     def priced_in_total(self) -> bool:
@@ -230,8 +335,11 @@ def _post_quantity(lines: list[Line]) -> tuple[Decimal | None, list[str]]:
         q += sum(extra, Decimal(0))
         total = q if total is None else total + q
     for ln in lines:
-        if ln.note and ln.note not in notes:
-            notes.append(ln.note)
+        extra_notes = [ln.note, f"Antal per objekt enligt {ln.recipe}" if ln.recipe else None]
+        extra_notes.append(ln.objects.note if ln.objects else None)
+        for note in extra_notes:
+            if note and note not in notes:
+                notes.append(note)
     return total, notes
 
 
@@ -251,43 +359,136 @@ def _usable(catalog: Catalog, catalog_id: str | None, unit: str) -> str | None:
     return None
 
 
-def build_posts(records: list[VerifiedRecord], objects: dict[str, ObjectCount], catalog: Catalog) -> list[Post]:
+@dataclass(frozen=True)
+class DerivedQuantity:
+    """A quantity a per-space rule derived outside R2 (common spaces from the space list, builder A's rules on
+    `granskning-checks`): Kalkyl groups and prices it like any post. `citations` are the passage that sets the scope
+    and the rows counted; `label` names the rule's source and is shown on the post."""
+
+    name: str
+    unit: str
+    scope: Scope
+    quantity: Decimal | None
+    basis: str
+    label: str
+    citations: tuple[Citation, ...]
+    catalog_id: str | None = None
+
+
+# Per-space rules plug in here: given the verified records and the object model, return derived quantities.
+CommonSpaceRules = Callable[[list[VerifiedRecord], dict[str, ObjectCount]], list[DerivedQuantity]]
+
+
+def _derived_line(n: int, d: DerivedQuantity) -> Line:
+    record = QuantityRecord(
+        record_kind="requirement",
+        what=d.name[:200],
+        quantity=float(d.quantity) if d.quantity is not None else None,
+        quantity_source="stated" if d.quantity is not None else "missing",
+        unit=d.unit[:20],
+        scope=d.scope,
+        catalog_id=d.catalog_id,
+        citations=list(d.citations[:3]),
+    )
+    ids = list(dict.fromkeys(c.block_id for c in d.citations))
+    v = VerifiedRecord(id=f"regel-{n:03d}", chunk_id="regler", record=record, level="interpretation", block_ids=ids)
+    return Line(v, d.quantity, d.basis, f"Enligt {d.label}", name=d.name, catalog_id=d.catalog_id, unit=d.unit)
+
+
+def _apartment_rooms(kind: str) -> set[str]:
+    return {kind, *APARTMENT_ROOMS} if kind == "apartment" else {kind}
+
+
+def _covered(c: Count, explicit: set[tuple[str, str]]) -> bool:
+    return (c.room, c.item.id) in explicit or ("*", c.item.id) in explicit
+
+
+def _recipe_lines(
+    v: VerifiedRecord, objects: dict[str, ObjectCount], recipe: BoundRecipe | None, explicit: set[tuple[str, str]]
+) -> list[Line]:
+    """A complete-installation passage, room by room from the recipe: one line per recipe item and room type with
+    objects, unless a requirement already states that item for that room type (or for the whole contract)."""
+    kind = v.record.per_object or "apartment"
+    out = []
+    for c in recipe.for_rooms(_apartment_rooms(kind)) if recipe else []:
+        if _covered(c, explicit):
+            continue
+        obj = objects.get(c.room)
+        if obj is None or not obj.count:
+            continue
+        one, many = OBJECT_LABELS[c.room]
+        basis = f"{_num(c.count)} per {one} ({c.label}) × {_num(obj.count)} {many}"
+        name = f"{c.item.name}, {many}"
+        out.append(
+            Line(v, c.count * obj.count, basis, obj.conflict, c.room, obj, c.label, name, c.item.id, c.item.unit)
+        )
+    return out
+
+
+def build_posts(
+    records: list[VerifiedRecord],
+    objects: dict[str, ObjectCount],
+    catalog: Catalog,
+    recipe: BoundRecipe | None = None,
+    derived: list[DerivedQuantity] | None = None,
+) -> list[Post]:
     """Group requirement records into posts. R2's catalog proposal is checked per record first; a proposal that fails
-    is dropped with its reason, so the record groups by its description and the post goes to R3 or stays unmapped."""
+    is dropped with its reason, so the record groups by its description and the post goes to R3 or stays unmapped.
+    Per-object lines group by the object kind they multiply by too, so sockets per bedroom and per living room are two
+    posts. A complete-installation passage becomes the recipe's posts room by room."""
     groups: dict[tuple[str, ...], list[Line]] = defaultdict(list)
     dropped: dict[tuple[str, ...], str] = {}
-    for v in records:
+    requirements = [v for v in records if v.record.record_kind == "requirement"]
+    explicit: set[tuple[str, str]] = set()
+    for v in requirements:
         r = v.record
-        if r.record_kind != "requirement":
-            continue
+        if not r.complete_installation and r.catalog_id and r.scope in ("included", "unclear"):
+            if _usable(catalog, r.catalog_id, r.unit) is None:
+                explicit.add((r.per_object or "*", r.catalog_id))
+    for v in requirements:
+        r = v.record
+        if r.complete_installation:
+            made = _recipe_lines(v, objects, recipe, explicit)
+            for ln in made:
+                unit = ln.unit or "st"
+                groups[(r.scope, ln.catalog_id or "", "", "", unit_family(unit), ln.per or "")].append(ln)
+            wanted = recipe.for_rooms(_apartment_rooms(r.per_object or "apartment")) if recipe else []
+            if made or (wanted and all(_covered(c, explicit) for c in wanted)):
+                continue  # covered room by room, by the recipe or by stated requirements
+            # No recipe, or no counted rooms for it: one post missing its quantity, with the multiplier shown.
         problem = _usable(catalog, r.catalog_id, r.unit)
         cid = None if problem else r.catalog_id
-        key = (r.scope, cid or "", "" if cid else _norm(r.what), _norm(r.type_code), unit_family(r.unit))
-        groups[key].append(line_of(v, objects))
+        per = r.per_object if r.quantity_source == "per_object" else None
+        key = (r.scope, cid or "", "" if cid else _norm(r.what), _norm(r.type_code), unit_family(r.unit), per or "")
+        groups[key].append(line_of(v, objects, recipe, cid))
         if problem:
             dropped.setdefault(key, f"förslag avvisat: {problem}")
+    for n, d in enumerate(derived or [], 1):
+        name = "" if d.catalog_id else _norm(d.name)
+        groups[(d.scope, d.catalog_id or "", name, "", unit_family(d.unit), d.label)].append(_derived_line(n, d))
     posts = []
     for key, lines in groups.items():
-        first = lines[0].record.record
+        first = lines[0]
         quantity, notes = _post_quantity(lines)
         cid = key[1] or None
+        by_recipe = all(ln.recipe for ln in lines)
         posts.append(
             Post(
                 id=_post_id(key),
-                name=first.what,
-                scope=first.scope,
-                unit=first.unit,
-                type_code=first.type_code,
+                name=first.name or first.record.record.what,
+                scope=first.record.record.scope,
+                unit=first.unit or first.record.record.unit,
+                type_code=first.record.record.type_code if not first.name else None,
                 catalog_id=cid,
                 lines=lines,
                 quantity=quantity,
                 notes=notes,
-                mapped_by="R2" if cid else None,
+                mapped_by=("recept" if by_recipe else "R2") if cid else None,
                 mapping_note=None if cid else dropped.get(key, "ingen katalogpost föreslogs"),
             )
         )
     order = {"included": 0, "unclear": 1, "option": 2, "other_trade": 3, "excluded": 4}
-    posts.sort(key=lambda p: (order[p.scope], p.lines[0].record.id))
+    posts.sort(key=lambda p: (order[p.scope], p.lines[0].record.id, p.name))
     return posts
 
 

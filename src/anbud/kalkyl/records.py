@@ -18,7 +18,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from anbud.models import Citation
 
 ObjectKind = Literal[
-    "building", "stairwell", "floor", "apartment", "premises", "room", "kitchen", "bathroom", "wc", "other"
+    "building",
+    "stairwell",
+    "floor",
+    "apartment",
+    "premises",
+    "room",
+    "living_room",
+    "bedroom",
+    "half_room",
+    "hall",
+    "kitchen",
+    "bathroom",
+    "wc",
+    "other",
 ]
 QuantitySource = Literal["stated", "per_object", "list_row", "lump_sum", "missing"]
 Scope = Literal["included", "option", "excluded", "other_trade", "unclear"]
@@ -45,15 +58,24 @@ class QuantityRecord(_Model):
     quantity: float | None = Field(
         default=None,
         ge=0,
-        description="stated: the number written. per_object: the number per object (1 if the text implies one). "
-        "list_row: how many objects the row is (leave out for one). Leave out for lump_sum and missing.",
+        description="stated: the number written. per_object: the number per object if the text gives one (a digit or "
+        "a number word; 1 for 'a' or 'one'), else leave out and code applies a recipe or marks it missing. list_row: "
+        "how many objects the row is (leave out for one). Leave out for lump_sum and missing.",
     )
     quantity_source: QuantitySource = Field(
         description="stated: the quote writes the quantity. per_object: a number per object of the object model. "
         "list_row: an object record for one row of a list. lump_sum: one whole delivery with no count. "
         "missing: required, but no quantity is stated anywhere you can cite."
     )
-    per_object: ObjectKind | None = Field(default=None, description="Required for per_object")
+    per_object: ObjectKind | None = Field(
+        default=None, description="Required for per_object: the object kind or room type the quantity is per"
+    )
+    complete_installation: bool = Field(
+        default=False,
+        description="per_object only: true when the passage sets the whole electrical installation of each object "
+        "(all its rooms) without listing items or counts. Leave quantity and catalog_id out; code applies the recipe "
+        "room by room.",
+    )
     unit: str = Field(min_length=1, max_length=20, description="The unit as written, or st for counts")
     location: str | None = Field(default=None, max_length=120, description="Room, floor or part, if stated")
     scope: Scope = Field(description="Who and whether: included in this contract, option, excluded, other trade")
@@ -113,7 +135,8 @@ class SubmitQuantitiesInput(_Model):
     records: list[QuantityRecord] = Field(description="Every quantity record in this chunk. Empty if none.")
     set_aside: list[SetAside] = Field(
         default_factory=list,
-        description="Quantity lines (q=1) that are not requirements or objects of this contract, with the reason",
+        description="Quantity lines (q=1) and scope lines (s=1) that are not requirements or objects of this "
+        "contract, with the reason",
     )
     tables: list[TableLayout] = Field(
         default_factory=list,
@@ -149,8 +172,9 @@ class Rejected(_Model):
 
 
 class Uncovered(_Model):
-    """A quantity line no verified record used, with why: 'Ej omhändertaget'."""
+    """A quantity or scope line no verified record used, with why: 'Ej omhändertaget'."""
 
     block_id: str
     reason: str
     set_aside_by_model: bool = False
+    line: Literal["quantity", "scope"] = "quantity"

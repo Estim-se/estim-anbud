@@ -259,7 +259,7 @@ def test_a_budget_stop_leaves_the_rest_unread_and_the_calc_incomplete(tender: Pa
     tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
     summary = _run(fake_sdk(), kalkyl=tiny)
     assert not summary["complete"] and summary["chunk_status"] == {"not_run": 2}
-    assert summary["lines_not_handled"] == summary["quantity_lines"]
+    assert summary["lines_not_handled"] == summary["quantity_lines"] + summary["scope_lines"]
     wb = openpyxl.load_workbook(tender / "kalkyl" / "kalkyl-test" / "kalkyl.xlsx")
     assert "OFULLSTÄNDIG" in wb["Kalkyl"]["A2"].value
 

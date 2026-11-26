@@ -48,8 +48,11 @@ kitchens, bathrooms, WC), put each kind with the number the row writes in contai
 
 How a requirement's quantity is stated (quantity_source):
 - stated: the quote writes the number. Put that number in quantity, exactly as written.
-- per_object: a number per object of the object model, such as two per apartment or one in each bathroom. Put the \
-number per object in quantity (1 when the text implies one) and the object kind in per_object. Code multiplies.
+- per_object: so many per object or per room of the object model, such as two per apartment, one in each bathroom \
+or sockets in every bedroom. Put the object kind or room type in per_object (apartment, premises, room, living_room, \
+bedroom, half_room, hall, kitchen, bathroom, wc, stairwell, building). Put the number per object in quantity only \
+when the text writes it (digits or a number word; 1 for "a" or "one"); otherwise leave quantity out, and code applies \
+the company's recipe or lists the post as missing a quantity. Code multiplies by the objects it counted.
 - lump_sum: one whole delivery with no count, such as a design task or a complete system.
 - missing: the text requires it but no quantity is written where you can cite it. Code lists it as missing a \
 quantity; never guess one.
@@ -67,12 +70,25 @@ catalog_id: the catalog item that fits the requirement and its unit, from the ca
 nothing fits; never force the nearest item. Additive: true only when the quote says the quantity comes on top of \
 another stated quantity. A delivery stated twice is one requirement cited twice, not two.
 
+Scope lines: blocks marked s="1" say what is installed per object or room without a number and unit next to it. \
+Each must be used by a record or listed in set_aside with a reason, like q="1" rows. Write one per_object \
+requirement per item and object kind or room type the passage names, with catalog_id when an item fits: "double \
+sockets and a ceiling outlet in every bedroom" is two records, both per_object bedroom. When a passage sets the whole \
+electrical installation of each object (every room complete, as a standard apartment) without listing items, write \
+one record with complete_installation true, per_object the object kind, and no quantity or catalog_id: code applies \
+the recipe room by room. A passage about another trade, or an object that isn't part of this contract, is set aside.
+
+Room composition: for an apartment list row, contains holds what the row states, such as rooms (object_kind room \
+for "3 rok" or "3 rum och kök": the rooms excluding the kitchen) and a kitchen, or bedrooms when a column counts \
+bedrooms. Code also reads descriptors like "3 rok" from each row itself, so you never need to copy them.
+
 Tables: rows with a cols attribute have cells code can read. For a room or apartment list, or a schedule of \
 quantities, don't write one record per row: submit a table layout once. Name the header row, the first and last row \
 code should read, whether each row is an object (with its object_kind) or a requirement, the scope, and the role of \
 each column by its letter or number from cols (id, description, type_code, quantity, unit, location, or contains \
-with an object_kind for counts such as rooms or kitchens per row). Set aside heading, total and blank rows inside \
-the range. Rows without cols are recorded one by one."""
+with an object_kind for counts such as rooms, bedrooms or kitchens per row; a column of descriptors like "3 rok" is \
+contains with object_kind room). Set aside heading, total and blank rows inside the range. Rows without cols are \
+recorded one by one."""
 
 
 def outline_text(corpus: Corpus) -> str:
@@ -96,7 +112,9 @@ def system_blocks(catalog: Catalog, corpus: Corpus) -> list[dict[str, Any]]:
     ]
 
 
-def _attrs(block_id: str, corpus: Corpus, quantity: set[str], context: bool, cells: Cells) -> str:
+def _attrs(
+    block_id: str, corpus: Corpus, quantity: set[str], context: bool, cells: Cells, scope: frozenset[str] = frozenset()
+) -> str:
     b = corpus.blocks[block_id]
     parts = [f'id="{block_id}"', f'kind="{b.kind}"']
     if (cols := cols_attr(block_id, cells)) is not None:
@@ -109,6 +127,8 @@ def _attrs(block_id: str, corpus: Corpus, quantity: set[str], context: bool, cel
         parts.append('hidden="1"')
     if block_id in quantity:
         parts.append('q="1"')
+    if block_id in scope:
+        parts.append('s="1"')
     if context:
         parts.append('context="1"')
     return " ".join(parts)
@@ -118,6 +138,7 @@ def chunk_message(chunk: Chunk, corpus: Corpus, paths: dict[str, tuple[str, ...]
     cells = cells or {}
     head = paths.get(chunk.block_ids[0], ())
     quantity = set(chunk.quantity_ids)
+    scope = frozenset(chunk.scope_ids)
     lines = [
         f'<tender_blocks chunk="{chunk.id}" document="{chunk.doc_id}">',
         f"<heading_path>{escape(' > '.join(head), quote=False)}</heading_path>",
@@ -127,11 +148,11 @@ def chunk_message(chunk: Chunk, corpus: Corpus, paths: dict[str, tuple[str, ...]
         lines.append(f"<block {_attrs(block_id, corpus, quantity, True, cells)}>{text}</block>")
     for block_id in chunk.block_ids:
         text = escape(corpus.blocks[block_id].text, quote=False)
-        lines.append(f"<block {_attrs(block_id, corpus, quantity, False, cells)}>{text}</block>")
+        lines.append(f"<block {_attrs(block_id, corpus, quantity, False, cells, scope)}>{text}</block>")
     lines.append("</tender_blocks>")
     lines.append(
-        f'This chunk has {len(chunk.quantity_ids)} row(s) marked q="1". Record what it states, then call '
-        "submit_quantities once."
+        f'This chunk has {len(chunk.quantity_ids)} row(s) marked q="1" and {len(chunk.scope_ids)} scope line(s) '
+        'marked s="1". Record what it states, then call submit_quantities once.'
     )
     return "\n".join(lines)
 

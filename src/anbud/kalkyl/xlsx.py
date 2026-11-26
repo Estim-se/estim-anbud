@@ -1,5 +1,8 @@
 """The calc as an XLSX with Swedish labels: Översikt, Kalkyl, Underlag, Objektmodell and Ej omhändertaget.
 
+- A post whose count per object comes from a recipe says which recipe ("kundens recept" or Estim's default) in its
+  notes and level, and lists the object rows it counts.
+
 - Every sheet starts with the catalog's label, so a calc priced on Estim's default catalog says so on every page.
 - Every post shows its citation (block id and quote). Tender text and model output are always written as plain
   strings, never as formulas, and characters a worksheet can't hold are removed.
@@ -98,7 +101,18 @@ CALC_COLUMNS = [
     ("Anmärkning", 40),
     ("Källa (block)", 18),
     ("Citat", 60),
+    ("Räknade objektrader (block)", 40),
 ]
+MAX_ROW_IDS = 400  # block ids listed in one cell; beyond that the cell gives the count and Objektmodell has the rest
+
+
+def _rows_cell(post: Post) -> str:
+    rows = post.rows
+    if not rows:
+        return ""
+    if len(rows) > MAX_ROW_IDS:
+        return f"{len(rows)} rader, se Objektmodell"
+    return f"{len(rows)} rader: {', '.join(rows)}"
 
 
 def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str) -> dict[str, int]:
@@ -112,6 +126,8 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
             notes.append(f"Katalog: {p.mapping_note}")
         elif p.mapped_by == "R3":
             notes.append("Katalogpost vald av R3")
+        elif p.mapped_by == "recept":
+            notes.append("Katalogpost enligt receptet")
         if p.scope == "unclear":
             notes.append("Låg: oklar entreprenadgräns")
         values: list[tuple[Any, str | None]] = [
@@ -136,6 +152,7 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
             ("; ".join(notes), None),
             (block, None),
             (quote, None),
+            (_rows_cell(p), None),
         ]
         for col, (value, fmt) in enumerate(values, 1):
             if value is not None:
@@ -172,6 +189,7 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Körning", meta["run_id"], None),
         ("Katalog", f"{catalog.name} ({catalog.currency})", None),
         ("Timpris", catalog.hourly_rate, KR),
+        ("Recept", result.recipe.label if result.recipe else "inget recept: rumsposter utan antal saknar mängd", None),
         ("Summa (exkl. optioner)", t.total, KR),
         ("Material", t.material, KR),
         ("Arbete", t.labour, KR),
@@ -183,7 +201,11 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Saknar pris", c["posts_missing_price"], None),
         ("Saknar mängd", c["posts_missing_quantity"], None),
         ("Mängdrader i underlaget", c["quantity_lines"], None),
-        ("Ej omhändertagna mängdrader", c["lines_not_handled"], None),
+        ("Omfattningsstycken i underlaget", c["scope_lines"], None),
+        ("Ej omhändertagna rader och stycken", c["lines_not_handled"], None),
+        ("varav omfattningsstycken", c["scope_lines_not_handled"], None),
+        ("Poster per objekt eller rumstyp", c["posts_per_object"], None),
+        ("Poster med antal enligt recept", c["posts_from_recipe"], None),
         ("varav bortvalda av modellen", c["lines_set_aside_by_model"], None),
         ("Verifierade poster från modellen", c["records_verified"], None),
         ("Underkända poster från modellen", c["records_rejected"], None),
@@ -248,15 +270,15 @@ def _evidence_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, statu
 
 
 def _objects_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str) -> None:
-    _header(
-        ws, catalog, status, run, [("Objekt", 16), ("Antal", 10), ("Underlag", 50), ("Konflikt", 40), ("Rader", 40)]
-    )
+    columns = [("Objekt", 16), ("Antal", 10), ("Underlag", 50), ("Konflikt", 40), ("Anmärkning", 40), ("Rader", 40)]
+    _header(ws, catalog, status, run, columns)
     for r, obj in enumerate(result.objects.values(), FIRST_ROW):
         _put(ws, r, 1, OBJECT_LABELS[obj.kind][1])
         _put(ws, r, 2, obj.count, NUM)
         _put(ws, r, 3, obj.basis)
         _put(ws, r, 4, obj.conflict or "")
-        _put(ws, r, 5, ", ".join(obj.record_ids))
+        _put(ws, r, 5, obj.note or "")
+        _put(ws, r, 6, ", ".join(obj.rows))
 
 
 def _uncovered_sheet(
@@ -270,12 +292,15 @@ def _uncovered_sheet(
         ("Rubrik", 40),
         ("Text", 70),
         ("Orsak", 60),
+        ("Typ", 16),
     ]
     _header(ws, catalog, status, run, columns)
     for r, u in enumerate(result.uncovered, FIRST_ROW):
         b = corpus.blocks[u.block_id]
         where = f"sida {b.page}" if b.page is not None else (b.sheet or "")
-        values = [u.block_id, b.doc_id, where, b.row, " > ".join(result.paths.get(u.block_id, ())), b.text, u.reason]
+        kind = "Omfattningsstycke" if u.line == "scope" else "Mängdrad"
+        heading = " > ".join(result.paths.get(u.block_id, ()))
+        values = [u.block_id, b.doc_id, where, b.row, heading, b.text, u.reason, kind]
         for col, value in enumerate(values, 1):
             if value is not None:
                 _put(ws, r, col, value)

@@ -165,7 +165,14 @@ def test_a_run_reads_the_apartment_list_from_one_table_layout(tender: Path) -> N
     assert summary["posts_priced"] == 4 and summary["lines_not_handled"] == 1  # the summary row, set aside
     result = json.loads((tender / "kalkyl" / "kalkyl-t" / "result.json").read_text())
     objects = {o["kind"]: o["count"] for o in result["objects"]}
-    assert objects == {"apartment": "3", "room": "9", "kitchen": "3", "bathroom": "3"}
+    assert objects == {
+        "apartment": "3",
+        "room": "9",
+        "kitchen": "3",
+        "bathroom": "3",
+        "living_room": "3",  # three rooms are a living room and two bedrooms
+        "bedroom": "6",
+    }
     posts = json.loads((tender / "kalkyl" / "kalkyl-t" / "posts.json").read_text())
     assert next(p for p in posts if p["text"] == "Dubbla vägguttag i sovrum")["quantity"] == 6
     sent = [p for p in sdk.messages.sent if first_block(p) == "bbbbbb-000001"][0]

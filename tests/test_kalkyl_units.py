@@ -84,7 +84,7 @@ def test_chunks_stay_in_one_document_and_respect_the_caps(corpus: Corpus) -> Non
 
 
 def test_a_cut_moves_back_to_a_heading(corpus: Corpus) -> None:
-    chunks = make_chunks(corpus, 10_000, 4)
+    chunks = make_chunks(corpus, 10_000, 5)  # four quantity lines and one scope line fill the first chunk
     starts = [c.block_ids[0] for c in chunks if c.doc_id == "aaaaaaaaaaaa"]
     assert "aaaaaa-000009" in starts  # the option heading starts a chunk
 
@@ -313,7 +313,10 @@ def test_every_quantity_line_is_used_or_listed_with_a_reason(corpus: Corpus) -> 
     ]
     listed = {u.block_id: u for u in uncovered_lines(chunks, results, used)}
     quantity_lines = {b for c in chunks for b in c.quantity_ids}
-    assert set(listed) == quantity_lines - {"aaaaaa-000005"}  # nothing silently dropped
+    scope_lines = {b for c in chunks for b in c.scope_ids}
+    assert scope_lines == {"aaaaaa-000008"}
+    assert set(listed) == (quantity_lines | scope_lines) - {"aaaaaa-000005"}  # nothing silently dropped
+    assert listed["aaaaaa-000008"].line == "scope" and "Omfattningstext" in listed["aaaaaa-000008"].reason
     assert listed["aaaaaa-000011"].set_aside_by_model
     assert listed["aaaaaa-000007"].reason.startswith("Citatet underkändes")
     assert listed["aaaaaa-000004"].reason.startswith("Ej omhändertaget")
