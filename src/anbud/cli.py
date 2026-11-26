@@ -134,6 +134,34 @@ def _import_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+# `anbud regress`: are the confirmed catches in the tender's regression set still found by a run?
+def _regress(args: argparse.Namespace) -> int:
+    from anbud import paths
+    from anbud.granskning.regress import regress
+    from anbud.store import StoreError, check_run_id
+
+    try:
+        if check_run_allowed(args.company_id, args.tender_id) != "dev":
+            raise RunRefused("regress takes dev tenders only")
+        check_run_id(args.run_id)
+    except (RunRefused, StoreError) as exc:
+        print(f"anbud regress: refused: {exc}", file=sys.stderr)
+        return REFUSED
+    tender = paths.dev_tender_dir(args.company_id, args.tender_id)
+    try:
+        result, out = regress(args.company_id, tender, args.run_id)
+    except (OSError, ValueError, StoreError) as exc:  # pydantic's ValidationError is a ValueError
+        print(f"anbud regress: stopped: {type(exc).__name__}", file=sys.stderr)
+        return REFUSED
+    n = result["entries"]
+    print(f"found: {result['found']} of {n}")
+    print(f"shown or generic: {result['shown']} of {n}")
+    print(f"missed entries: {result['missed']}")
+    print(f"found but not shown: {result['not_shown']}")
+    print(f"result: {out}")
+    return 0 if not result["missed"] else 1
+
+
 def _not_built(name: str) -> int:
     print(f"anbud {name}: not built yet", file=sys.stderr)
     return NOT_BUILT
@@ -196,6 +224,10 @@ def main(argv: list[str] | None = None) -> int:
     labels.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
     labels.add_argument("--xlsx", type=Path, required=True, help="the filled review workbook")
     labels.add_argument("--labeller", required=True, help="a neutral labeller id, like lab-1")
+    regress = sub.add_parser("regress", help="check a run against the tender's regression set of confirmed catches")
+    regress.add_argument("company_id")
+    regress.add_argument("tender_id")
+    regress.add_argument("run_id")
 
     args = parser.parse_args(argv)
     if args.command == "run":
@@ -210,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
         return _export_review(args)
     if args.command == "import-labels":
         return _import_labels(args)
+    if args.command == "regress":
+        return _regress(args)
     return _not_built(args.command)
 
 
