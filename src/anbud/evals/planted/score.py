@@ -188,7 +188,11 @@ class RunFlags(_Model):
     run_id: str
     flags: list[Flag]
     calc_posts: list[CalcPost] = Field(default_factory=list)
-    kronor: dict[str, float] = Field(default_factory=dict)
+    kronor: dict[str, float] = Field(default_factory=dict, description="Kronor point by flag fingerprint")
+    placements: dict[str, str] = Field(default_factory=dict, description="Report placement by flag fingerprint")
+
+
+SEEN = ("shown", "generic")
 
 
 class PlantScore(_Model):
@@ -199,11 +203,15 @@ class PlantScore(_Model):
     kronor: float | None
     structural: bool
     arms: dict[str, Literal["caught", "unresolved", "missed"]]
+    seen: dict[str, bool] = Field(
+        default_factory=dict, description="A matching flag was placed where the estimator sees it (shown or generic)"
+    )
 
 
 class Recall(_Model):
     plants: int
     caught: int
+    seen: int = Field(description="Caught by a flag placed shown or generic")
     unresolved: int
     recall: float | None
     kronor_plants: float
@@ -232,6 +240,13 @@ def _status(matches: list[Match], plant_id: str) -> Literal["caught", "unresolve
     return "unresolved" if outcomes else "missed"
 
 
+def _seen(matches: list[Match], plant_id: str, placements: dict[str, str]) -> bool:
+    return any(
+        m.plant_id == plant_id and m.outcome in ("rule", "judge") and placements.get(m.fingerprint) in SEEN
+        for m in matches
+    )
+
+
 def _recall(scores: list[PlantScore]) -> Recall:
     caught = [s for s in scores if s.arms.get("planted") == "caught"]
     unresolved = [s for s in scores if s.arms.get("planted") == "unresolved"]
@@ -240,6 +255,7 @@ def _recall(scores: list[PlantScore]) -> Recall:
     return Recall(
         plants=len(scores),
         caught=len(caught),
+        seen=sum(s.seen.get("planted", False) for s in scores),
         unresolved=len(unresolved),
         recall=round(len(caught) / len(scores), 4) if scores else None,
         kronor_plants=round(k_all, 2),
@@ -271,6 +287,7 @@ def score(key: Key, runs: dict[Arm, RunFlags], judge: Judge = judge_stub) -> Rep
             kronor=p.expected.kronor,
             structural=p.id in structural,
             arms={arm: _status(m, p.id) for arm, m in matches.items()},
+            seen={arm: _seen(m, p.id, runs[arm].placements) for arm, m in matches.items()},
         )
         for p in key.plants
     ]

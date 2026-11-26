@@ -52,7 +52,7 @@ def finish(
 ) -> Finished:
     settings = settings or load_settings()
     posts = {p.id: p for p in calc_posts}
-    items = merge(results, corpus, merge_client, settings)
+    items = merge(results, corpus, merge_client, settings, calc_posts=posts)
     provisional = price_items(items, catalog, posts, settings)
     chosen = select(
         provisional,

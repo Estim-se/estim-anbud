@@ -7,12 +7,12 @@ citation checks. Otherwise that cluster keeps the code merge.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
 
-from anbud.granskning.contracts import LensResult, fingerprint
+from anbud.granskning.contracts import CalcPost, LensResult, fingerprint
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
 from anbud.granskning.settings import Settings
@@ -126,7 +126,9 @@ def _submitted(message: Any) -> list[dict[str, Any]] | None:
     return None
 
 
-def _accept(group: list[Item], outputs: list[Flag], corpus: Corpus) -> list[Item] | None:
+def _accept(
+    group: list[Item], outputs: list[Flag], corpus: Corpus, calc_posts: Mapping[str, CalcPost] | None = None
+) -> list[Item] | None:
     """The cluster's merged items, or None if the model's result for it breaks a rule."""
     if not outputs or len(outputs) > len(group):
         return None
@@ -137,7 +139,7 @@ def _accept(group: list[Item], outputs: list[Flag], corpus: Corpus) -> list[Item
     searches = {_search_key(s) for i in group for s in i.flag.searches}
     merged = []
     for flag in outputs:
-        if check_flag(flag, searches, corpus):
+        if check_flag(flag, searches, corpus, calc_posts=calc_posts):
             return None
         keys = {_key(c) for c in flag.citations}
         members = [i for i in group if keys & {_key(c) for c in i.flag.citations}]
@@ -159,6 +161,7 @@ def merge(
     client: ModelClient | None = None,
     settings: Settings | None = None,
     step: str = "merge",
+    calc_posts: Mapping[str, CalcPost] | None = None,
 ) -> list[Item]:
     """Every lens flag ends in exactly one item. Without a client, or when the model's merge fails a check, clusters
     are left as their same-fingerprint items: code never merges different claims on its own."""
@@ -195,7 +198,7 @@ def merge(
         assigned.setdefault(owners.pop(), []).append(flag)
     merged: dict[int, list[Item]] = {}
     for n, group in enumerate(multi):
-        accepted = None if n in broken else _accept(group, assigned.get(n, []), corpus)
+        accepted = None if n in broken else _accept(group, assigned.get(n, []), corpus, calc_posts)
         merged[n] = accepted if accepted is not None else group
     index = {id(g): n for n, g in enumerate(multi)}
     out: list[Item] = []

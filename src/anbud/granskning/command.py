@@ -26,10 +26,20 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="build everything up to the first model call, print counts, call nothing"
     )
+    parser.add_argument(
+        "--arm", type=Path, help="one arm of a planted variant of a dev tender: <tender>/planted/seed-<N>/arms/<arm>"
+    )
 
 
 def _dirs(args: argparse.Namespace, kind: str) -> tuple[Path, Path, Path]:
-    """The prep folder, the calc folder, and the folder that holds this tender's runs."""
+    """The prep folder, the calc folder, and the folder that holds this tender's runs. An arm of a planted variant
+    brings its own prep and calc.xlsx and runs under the tender's runs/; its answer key is never read."""
+    if getattr(args, "arm", None) is not None:
+        from anbud.evals.planted.variant import resolve_arm
+
+        tender = paths.dev_tender_dir(args.company_id, args.tender_id)
+        arm_dir, args.arm_rel = resolve_arm(tender, args.arm)
+        return arm_dir / "prep", arm_dir, tender / "runs"
     if kind == "fixture":
         fixture = args.fixture.expanduser().resolve()
         base = paths.company_dir(args.company_id) / "fixtures" / fixture.name
@@ -50,7 +60,15 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     from anbud.prep.tender import IntakeStop
     from anbud.store import RunStore, StoreError, check_run_id
 
-    prep_dir, calc_dir, runs_dir = _dirs(args, kind)
+    if getattr(args, "arm", None) is not None and kind != "dev":
+        print("anbud run: --arm runs dev tenders only", file=sys.stderr)
+        return PAID_REFUSED
+    try:
+        prep_dir, calc_dir, runs_dir = _dirs(args, kind)
+    except ValueError as exc:
+        print(f"anbud run: refused: {exc}", file=sys.stderr)
+        return PAID_REFUSED
+    arm = getattr(args, "arm_rel", None)
     if not (prep_dir / "blocks.jsonl").exists():
         print("anbud run: no prepared tender; run `anbud prep` first", file=sys.stderr)
         return PAID_REFUSED
@@ -58,6 +76,8 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
         print("anbud run: --replay needs --run-id", file=sys.stderr)
         return PAID_REFUSED
     name = args.tender_id or "fixture"
+    if arm:  # planted/seed-N/arms/<arm> -> <tender>-seed-N-<arm>
+        name = f"{name}-{arm.split('/')[1]}-{arm.split('/')[3]}"
     run_id = args.run_id or f"{name}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     try:
         check_run_id(run_id)
@@ -110,6 +130,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             settings=settings,
             concurrency=args.concurrency,
             on_progress=lambda msg: print(f"  {msg}", flush=True),
+            arm=arm,
         )
     except IntakeStop as exc:
         print(f"anbud run: stopped: {exc}", file=sys.stderr)

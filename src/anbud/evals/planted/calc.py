@@ -15,8 +15,9 @@ Layout, per sheet (posts with no sheet go on "Kalkyl"):
          Totalt                          <hours>  <amount>
 
 - Amount is quantity × unit price, rounded to öre, when the post has both; otherwise the post's own amount.
-- Posts keep their order inside a section; sections keep the order in which they first appear on their sheet. Posts
-  with no section go in a closing section, "Övrigt".
+- Priced posts keep their order inside a section, and its notes follow them; sections keep the order in which they
+  first appear on their sheet. Posts with no section go in a closing section, "Övrigt". Notes go last because the
+  calc ingest reads a text-only row as a heading: placed after the posts, a note never takes over their section.
 - Cells hold values, never formulas: readers use the cached values, and openpyxl writes none for formulas.
 - The file's bytes depend only on the posts: fixed document properties and fixed zip timestamps, so planting twice
   with the same seed gives the same file, the same calc post ids and the same cached requests.
@@ -111,7 +112,7 @@ def regenerate(posts: list[CalcPost]) -> tuple[bytes, list[PostPlace]]:
             n = 0
             sub_hours = sub_amount = 0.0
             has_priced = False
-            for i in section.posts:
+            for i in sorted(section.posts, key=lambda i: not priced(posts[i])):
                 post = posts[i]
                 if priced(post):
                     has_priced = True

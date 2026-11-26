@@ -15,6 +15,7 @@ The same inputs and seed give the same files, byte for byte.
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
 from random import Random
@@ -23,7 +24,7 @@ from anbud.evals.planted.calc import NO_SECTION, PostPlace, regenerate
 from anbud.evals.planted.calc_plants import CalcEdit, apply, plant_calc
 from anbud.evals.planted.categories import Category
 from anbud.evals.planted.doc_plants import plant_documents
-from anbud.evals.planted.key import EXPECTED_CLAIMS, Change, Expected, Key, Location, Plant, PostAt
+from anbud.evals.planted.key import ARMS, Change, Expected, Key, Location, Plant, PostAt, expected_claims
 from anbud.evals.planted.prep_copy import Prep, copy_prep
 from anbud.evals.planted.structural import CatalogItem, detect
 from anbud.granskning.contracts import CalcPost
@@ -35,6 +36,30 @@ _BASIS = {"remove_category": "missing_post", "cut_quantity": "quantity_gap", "cu
 
 def variant_dir(tender_dir: Path, seed: int) -> Path:
     return tender_dir / "planted" / f"seed-{seed}"
+
+
+_SEED = re.compile(r"^seed-\d+$")
+
+
+def resolve_arm(tender_dir: Path, arm: Path) -> tuple[Path, str]:
+    """An arm folder of one of the tender's planted variants, resolved, and its path relative to the tender folder
+    (`planted/seed-N/arms/<arm>`). Raises ValueError for anything else, the answer key included."""
+    tender = tender_dir.resolve()
+    resolved = arm.expanduser().resolve()
+    if not resolved.is_relative_to(tender):
+        raise ValueError("the arm isn't inside this tender's folder")
+    parts = resolved.relative_to(tender).parts
+    if (
+        len(parts) != 4
+        or parts[0] != "planted"
+        or not _SEED.match(parts[1])
+        or parts[2] != "arms"
+        or parts[3] not in ARMS
+    ):
+        raise ValueError("an arm is <tender>/planted/seed-<N>/arms/<planted|unplanted|calc_only>")
+    if not (resolved / "prep" / "blocks.jsonl").is_file() or not (resolved / "calc.xlsx").is_file():
+        raise ValueError("the arm is incomplete; write the variant again with `anbud plant --force`")
+    return resolved, "/".join(parts)
 
 
 def _at(place: PostPlace, post: CalcPost) -> PostAt:
@@ -86,9 +111,12 @@ def _calc_plant(
     sections = sorted({posts[i].section or NO_SECTION for i in edit.touched()})
     planted_at = [c.at for c in changes if c.at is not None and c.action != "mention_removed"]
     unplanted_at = [_at(places_unplanted[i], posts[i]) for i in sorted(edit.touched())]
+    basis = [_BASIS[edit.kind]]
+    if edit.kind == "remove_category" and any(posts[i].hours for i in edit.removed):
+        basis.append("hours_gap")  # missing hours are a fair money basis for a missing category
     expected = Expected(
-        claim_types=EXPECTED_CLAIMS[edit.kind],
-        basis_kinds=[_BASIS[edit.kind]],  # type: ignore[list-item]
+        claim_types=expected_claims(edit.kind, edit.category.key),
+        basis_kinds=basis,  # type: ignore[arg-type]
         quantity=edit.quantity(posts),
         hours=edit.hours(posts),
         kronor=edit.kronor(posts),

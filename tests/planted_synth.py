@@ -133,8 +133,30 @@ def calc_posts() -> list[CalcPost]:
     return [_post(n, section, text, **kw) for n, (section, text, kw) in enumerate(rows, 1)]
 
 
+def write_calc(path: Path) -> None:
+    """The calc as a contractor might export it: its own column names, section rows and subtotal rows."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Kalkyl"
+    ws.append(["Pos", "Benämning", "Antal", "Enh", "À-pris", "Tim", "Summa"])
+    section: str | None = None
+    subtotal = 0.0
+    for post in [p for p in calc_posts() if p.quantity is not None or p.amount is not None or p.hours is not None]:
+        if post.section != section:
+            if section is not None:
+                ws.append([None, f"Summa {section}", None, None, None, None, subtotal])
+            section, subtotal = post.section, 0.0
+            ws.append([None, section or "Övrigt"])
+        amount = post.amount if post.unit_price is None else (post.quantity or 0) * post.unit_price
+        subtotal += amount or 0
+        ws.append([None, post.text, post.quantity, post.unit, post.unit_price, post.hours, amount])
+    ws.append([None, f"Summa {section}", None, None, None, None, subtotal])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+
+
 def write_tender(tender_dir: Path) -> None:
     write_prep(tender_dir / "prep")
-    calc = tender_dir / "calc"
-    calc.mkdir(parents=True, exist_ok=True)
-    (calc / "posts.jsonl").write_text("".join(p.model_dump_json() + "\n" for p in calc_posts()))
+    write_calc(tender_dir / "calc" / "kalkyl.xlsx")

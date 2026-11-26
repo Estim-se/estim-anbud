@@ -70,6 +70,9 @@ class RunInputs(_Model):
     tender_id: str
     prep_dir: str
     calc_posts: list[CalcPost] = Field(default_factory=list)
+    arm: str | None = Field(
+        default=None, description="The planted-variant arm the run read, relative to the tender folder, if any"
+    )
 
 
 def fingerprint(flag: Flag) -> str:

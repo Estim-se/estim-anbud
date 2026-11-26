@@ -127,6 +127,12 @@ def _doc_header(doc: dict[str, Any], tile_ids: list[str]) -> str:
     return " ".join(parts)
 
 
+CALC_ONLY = """\
+This run has no tender documents, only the calculation. Here, and only here, a citation names a calc post instead of \
+a block: put the post id in `block_id` and copy the quote exactly from that post's line in <calculation>. Every other \
+evidence rule still applies."""
+
+
 def _doc_order(corpus: Corpus) -> list[str]:
     order = [d["doc_id"] for d in corpus.documents]
     for block_id in corpus.order:
@@ -207,10 +213,11 @@ def brief_text() -> str:
 
 def system_blocks(corpus: Corpus, calc: Iterable[CalcPost]) -> list[dict[str, Any]]:
     """The shared system blocks, with the run's one 1h cache breakpoint on the last. Identical input gives identical
-    bytes, so map, lenses and verifier share one cache entry."""
+    bytes, so map, lenses and verifier share one cache entry. A corpus with no blocks (the calc-only control arm) gets
+    the rule for citing calc posts; every other prefix is unchanged by it."""
     return [
         {"type": "text", "text": brief_text()},
-        {"type": "text", "text": RULE},
+        {"type": "text", "text": RULE if corpus.blocks else RULE + "\n\n" + CALC_ONLY},
         {"type": "text", "text": corpus_text(corpus)},
         {"type": "text", "text": calc_text(calc), "cache_control": dict(CACHE_1H)},
     ]

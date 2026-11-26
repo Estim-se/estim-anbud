@@ -35,18 +35,33 @@ DOC_KINDS: tuple[PlantKind, ...] = (
 )
 ALL_BASIS: list[BasisKind] = ["missing_post", "quantity_gap", "hours_gap", "contract_formula"]
 
-# The claim types each kind of plant should draw. Provisional until the lens taxonomy is fixed; the matcher reads only
-# this table, so aligning it with the lenses is a one-place change.
+# The claim types each kind of plant should draw, from `granskning.taxonomy.CLAIM_TYPES` (a test keeps them in it).
+# The matcher reads only these two tables.
 EXPECTED_CLAIMS: dict[PlantKind, list[str]] = {
-    "remove_category": ["missing_scope", "calc_missing_post", "normal_scope_missing"],
-    "cut_quantity": ["quantity_realism", "quantity_mismatch", "document_conflict"],
+    "remove_category": ["unpriced_requirement", "generic_scope"],
+    "cut_quantity": ["quantity_realism", "unpriced_requirement"],
     "cut_hours": ["hours_realism"],
-    "contradicting_quantity": ["document_conflict", "quantity_mismatch"],
+    "contradicting_quantity": ["document_conflict", "quantity_realism", "unreliable_information"],
     "vite_clause": ["contract_vite"],
     "index_clause": ["contract_index"],
-    "delete_section": ["document_conflict", "missing_document", "dangling_reference"],
-    "drawing_note_conflict": ["drawing_conflict", "document_conflict", "quantity_mismatch"],
+    "delete_section": ["missing_document", "document_conflict"],
+    "drawing_note_conflict": ["document_conflict", "quantity_realism"],
 }
+
+# Calc categories whose taxonomy item has a claim type of its own: a flag may name that item instead.
+CATEGORY_CLAIMS: dict[str, list[str]] = {
+    "inspection_hours": ["documentation_inspection"],
+    "documentation": ["documentation_inspection", "design_responsibility"],
+    "project_management": ["generic_scope", "occupied_building"],
+    "temporary_power": ["occupied_building"],
+    "fire_alarm": ["regulation_fire_safety"],
+    "ev_charging": ["regulation_ev_charging"],
+    "distribution_boards": ["metering", "grid_interface"],
+}
+
+
+def expected_claims(kind: PlantKind, category: str | None = None) -> list[str]:
+    return list(dict.fromkeys([*EXPECTED_CLAIMS[kind], *CATEGORY_CLAIMS.get(category or "", [])]))
 
 
 class _Model(BaseModel):

@@ -3,11 +3,10 @@
     anbud plant <company> <tender> --seed N   a planted variant of a dev tender, in its data folder
     anbud plant-score <run> [<run> ...]       score runs on one variant's arms against its answer key
 
-Two seams wait for the stages being built alongside:
-- `load_tender_calc` reads the tender's calc as typed posts from `<tender>/calc/posts.jsonl` until the calc ingest
-  replaces it;
-- `load_run` reads a run's `inputs.json` (RunInputs; its `prep_dir` names the arm), `flags.json` (a list of Flag) and,
-  if present, `kronor.json` (kronor by flag fingerprint).
+`anbud plant` reads the tender's calc with the calc ingest (`<tender>/calc/*.xlsx`), the same posts `anbud run`
+reads. Each arm is then run with `anbud run <company> <tender> --arm <variant>/arms/<arm>`, and `plant-score` reads
+what those runs wrote: `inputs.json` (its `arm` and `prep_dir` name the arm), `flags.json`, `kronor.json` and
+`items.json`.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from anbud.evals.planted.score import RunFlags, score
 from anbud.evals.planted.structural import CatalogItem
 from anbud.evals.planted.variant import build_variant, variant_dir
 from anbud.granskning.contracts import CalcPost, RunInputs
+from anbud.granskning.items import Item, Kronor
 from anbud.models import Flag
 from anbud.runguard import RunRefused, check_run_allowed
 from anbud.store import RunStore, StoreError, check_run_id
@@ -38,10 +38,13 @@ class ScoreError(RuntimeError):
 
 
 def load_tender_calc(tender_dir: Path) -> list[CalcPost]:
-    path = tender_dir / "calc" / "posts.jsonl"
-    if not path.exists():
-        raise StoreError("the tender has no typed calc yet (calc/posts.jsonl); ingest its calc first")
-    return [CalcPost.model_validate_json(line) for line in path.read_text().splitlines() if line.strip()]
+    """The tender's calc as `anbud run` reads it: every xlsx under `<tender>/calc/`, through the calc ingest."""
+    from anbud.granskning.calc import load_calc
+
+    posts = load_calc(tender_dir / "calc")
+    if not posts:
+        raise StoreError("the tender has no calc posts (no readable xlsx in calc/)")
+    return posts
 
 
 def _catalog(path: Path | None) -> dict[str, CatalogItem] | None:
@@ -103,14 +106,16 @@ def plant_main(argv: list[str]) -> int:
 
 
 def find_run(arg: str, root: Path | None = None) -> Path:
-    """A run folder: a path to one, or a run id looked up across the companies' run stores."""
+    """A run's output folder: a path to one, or a run id looked up under every dev tender and fixture
+    (`<company>/dev/<tender>/runs/<id>`, `<company>/fixtures/<name>/runs/<id>`)."""
     base = (root or paths.data_root()).expanduser()
     candidate = Path(arg).expanduser()
     if candidate.is_dir():
         run_dir = candidate.resolve()
     else:
         check_run_id(arg)
-        hits = sorted(p for p in base.glob(f"co-*/runs/{arg}") if p.is_dir())
+        found = [*base.glob(f"co-*/dev/t-*/runs/{arg}"), *base.glob(f"co-*/fixtures/*/runs/{arg}")]
+        hits = sorted(p for p in found if (p / "inputs.json").is_file())
         if not hits:
             raise ScoreError("no run with that id in any company's run store")
         if len(hits) > 1:
@@ -122,16 +127,25 @@ def find_run(arg: str, root: Path | None = None) -> Path:
 
 
 def load_run(run_dir: Path) -> tuple[RunInputs, RunFlags]:
+    """A run as `anbud run` writes it: inputs.json, flags.json (merged, in report order), kronor.json (Kronor by
+    fingerprint) and items.json (each finding with its placement)."""
     try:
         inputs = RunInputs.model_validate_json((run_dir / "inputs.json").read_text())
         flags = TypeAdapter(list[Flag]).validate_json((run_dir / "flags.json").read_bytes())
-        kronor_path = run_dir / "kronor.json"
-        kronor = TypeAdapter(dict[str, float]).validate_json(kronor_path.read_bytes()) if kronor_path.exists() else {}
+        kronor_path, items_path = run_dir / "kronor.json", run_dir / "items.json"
+        kronor = TypeAdapter(dict[str, Kronor]).validate_json(kronor_path.read_bytes()) if kronor_path.exists() else {}
+        items = TypeAdapter(list[Item]).validate_json(items_path.read_bytes()) if items_path.exists() else []
     except FileNotFoundError:
         raise ScoreError("a run needs inputs.json and flags.json to be scored") from None
     except ValidationError:
-        raise ScoreError("a run's inputs.json, flags.json or kronor.json doesn't validate") from None
-    return inputs, RunFlags(run_id=run_dir.name, flags=flags, calc_posts=inputs.calc_posts, kronor=kronor)
+        raise ScoreError("a run's inputs.json, flags.json, kronor.json or items.json doesn't validate") from None
+    return inputs, RunFlags(
+        run_id=run_dir.name,
+        flags=flags,
+        calc_posts=inputs.calc_posts,
+        kronor={fp: k.point for fp, k in kronor.items() if k.priced and k.point is not None},
+        placements={i.fingerprint: i.placement for i in items if i.placement},
+    )
 
 
 def arm_of(prep_dir: str) -> tuple[Path, Arm]:

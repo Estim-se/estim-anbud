@@ -26,8 +26,9 @@ from anbud.evals.planted.prep_copy import Prep
 from anbud.evals.planted.score import RunFlags, match_arm, score
 from anbud.evals.planted.structural import CatalogItem, detect, item_key
 from anbud.evals.planted.variant import build_variant, variant_dir
-from anbud.granskning.contracts import CalcPost, RunInputs
+from anbud.granskning.contracts import CalcPost, RunInputs, fingerprint
 from anbud.granskning.corpus import Corpus
+from anbud.granskning.items import Item, Kronor
 from anbud.models import Citation, Flag, MoneyBasis
 from anbud.prep.text import TEXT_PREFIX, text_hash
 
@@ -374,13 +375,31 @@ def test_cli_plant_and_score(data_root: Path, capsys: pytest.CaptureFixture[str]
     key = Key.model_validate_json((out / "key" / "plants.json").read_text())
     posts = _ingest((out / "arms" / "planted" / "calc.xlsx").read_bytes())
     ids = {(p.sheet, p.row): p.id for p in posts}
-    run = paths.company_dir(COMPANY) / "runs" / "run-1"
+    # A run's output as `anbud run` writes it, under the tender's runs/.
+    run = tender / "runs" / "run-1"
     run.mkdir(parents=True)
     inputs = RunInputs(
-        company_id=COMPANY, tender_id=TENDER, prep_dir=str(out / "arms" / "planted" / "prep"), calc_posts=posts
+        company_id=COMPANY,
+        tender_id=TENDER,
+        prep_dir=str(out / "arms" / "planted" / "prep"),
+        calc_posts=posts,
+        arm="planted/seed-2/arms/planted",
     )
     (run / "inputs.json").write_text(inputs.model_dump_json())
-    (run / "flags.json").write_text(json.dumps([_perfect(p, ids).model_dump() for p in key.plants]))
+    flags = [_perfect(p, ids) for p in key.plants]
+    fps = [fingerprint(f) for f in flags]
+    (run / "flags.json").write_text(json.dumps([f.model_dump(mode="json") for f in flags]))
+    kronor = {
+        fp: Kronor(priced=True, point=p.expected.kronor or 1000.0, basis="syntetisk").model_dump(mode="json")
+        for fp, p in zip(fps, key.plants, strict=True)
+    }
+    (run / "kronor.json").write_text(json.dumps(kronor))
+    placements = ["refuted", *["shown"] * (len(flags) - 1)]
+    items = [
+        Item(flag=f, fingerprint=fp, lenses=["lens"], placement=pl).model_dump(mode="json")
+        for f, fp, pl in zip(flags, fps, placements, strict=True)
+    ]
+    (run / "items.json").write_text(json.dumps(items))
     capsys.readouterr()
     assert cli.main(["plant-score", "run-1"]) == 0
     printed = capsys.readouterr().out
@@ -388,6 +407,7 @@ def test_cli_plant_and_score(data_root: Path, capsys: pytest.CaptureFixture[str]
     assert "Strömbrytare" not in printed and "AFC" not in printed  # counts and ids only
     report = json.loads((out / "key" / "scores" / "run-1.json").read_text())
     assert report["recall_clean"]["all"]["recall"] == 1.0
+    assert report["recall_clean"]["all"]["seen"] == len(key.plants) - 1  # the refuted one isn't shown
 
 
 def test_cli_plant_refuses_held_out_and_unprepared(data_root: Path) -> None:
