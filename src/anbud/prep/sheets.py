@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import re
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -72,6 +73,23 @@ def read_xlsx(data: bytes, builder: DocBuilder) -> list[SheetInfo]:
     return infos
 
 
+_HF_CODES = re.compile(r'&"[^"]*"|&K[0-9A-Fa-f]{6}|&\d+|&\[[^\]]*\]|&[A-Za-z]')
+
+
+def _header_footer_texts(ws: openpyxl.worksheet.worksheet.Worksheet) -> list[str]:
+    """The sheet's print header and footer texts, formatting codes removed, each distinct text once."""
+    texts: list[str] = []
+    for attr in ("oddHeader", "oddFooter", "evenHeader", "evenFooter", "firstHeader", "firstFooter"):
+        part = getattr(ws, attr, None)
+        if part is None:
+            continue
+        for side in (part.left, part.center, part.right):
+            text = clean(_HF_CODES.sub(" ", side.text or "")) if side is not None else ""
+            if text and text not in texts:
+                texts.append(text)
+    return texts
+
+
 def _read_sheet(ws: openpyxl.worksheet.worksheet.Worksheet, builder: DocBuilder) -> SheetInfo:
     name = builder.mask(ws.title, "sheet_name")
     sheet_hidden = ws.sheet_state != "visible"
@@ -107,6 +125,9 @@ def _read_sheet(ws: openpyxl.worksheet.worksheet.Worksheet, builder: DocBuilder)
             raw = " | ".join(c.text for c in cells)
             block = builder.add(Piece("sheet_row", raw, sheet=name, row=r, hidden=hidden, cells=cells))
             first_block = first_block or block
+    for text in _header_footer_texts(ws):
+        block = builder.add(Piece("paragraph", text, sheet=name, hidden=sheet_hidden))
+        first_block = first_block or block
     builder.outline.append(
         OutlineEntry(
             doc_id=builder.doc_id, level=1, title=name, block_id=first_block.id if first_block else None, sheet=name
