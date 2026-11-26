@@ -16,7 +16,7 @@ This repo runs Estim Anbud's model work outside the app.
 - Logs carry ids, sizes, timings and costs, never document text or model output.
 
 ## Held-out tenders
-- Never open, list, decrypt, copy or summarise held-out or prospective data. Only `anbud eval heldout` and `anbud eval prospective` touch it. They are never started from an agent session, and they report aggregates only.
+- Never open, list, decrypt, copy or summarise held-out or prospective data. Only `anbud eval heldout` and `anbud eval prospective` touch it. They report aggregates only. They are never started from an agent session, with one exception: the eval lane (`anbud-eval`), which the orchestrator starts with `ANBUD_EVAL_LANE=1`. No other agent sets that variable.
 - Agents run `anbud run` on development tenders and synthetic fixtures only.
 - Never change a lens, prompt or threshold because of a held-out result. Thresholds are committed in `evals/thresholds/` before an exam.
 

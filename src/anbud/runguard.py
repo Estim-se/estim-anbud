@@ -1,8 +1,9 @@
 """Who may run: `anbud run` takes dev tenders and synthetic fixtures only.
 
 Held-out, prospective and unknown tenders are refused, and so is anything that resolves into held-out or sealed
-storage. Only `anbud eval heldout` / `anbud eval prospective` may touch held-out data, and only when a person runs it
-at a terminal, never from an agent session.
+storage. Only `anbud eval heldout` / `anbud eval prospective` may touch held-out data: run by a person at a terminal,
+or by the eval lane, which the orchestrator starts with `ANBUD_EVAL_LANE=1` (AGENTS.md, "Held-out tenders"). Any
+other agent session is refused.
 """
 
 from __future__ import annotations
@@ -70,12 +71,19 @@ def in_agent_session(env: Mapping[str, str] | None = None) -> bool:
     return any(env.get(name) for name in AGENT_VARIABLES) or any(k.startswith(AGENT_PREFIXES) for k in env)
 
 
+EVAL_LANE = "ANBUD_EVAL_LANE"
+
+
 def held_out_refusal(
     env: Mapping[str, str] | None = None, stdin: TextIO | None = None, stdout: TextIO | None = None
 ) -> str | None:
-    """Why `anbud eval heldout|prospective` must not run here, or None. It fails closed: a person at a terminal only."""
+    """Why `anbud eval heldout|prospective` must not run here, or None. It fails closed: a person at a terminal, or
+    the eval lane (`ANBUD_EVAL_LANE=1`, exactly), which may run without a terminal."""
+    env = os.environ if env is None else env
+    if env.get(EVAL_LANE) == "1":
+        return None
     if in_agent_session(env):
-        return "never from an agent session"
+        return "never from an agent session (only the eval lane, started with ANBUD_EVAL_LANE=1)"
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     if not (stdin.isatty() and stdout.isatty()):

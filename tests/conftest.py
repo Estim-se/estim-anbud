@@ -49,6 +49,7 @@ def _never_the_real_data_root(tmp_path_factory: pytest.TempPathFactory) -> objec
     leaves this fallback in place, because it is set on a MonkeyPatch of its own."""
     patch = pytest.MonkeyPatch()
     patch.setenv("ANBUD_DATA_ROOT", str(tmp_path_factory.mktemp("not-the-real-data")))
+    patch.delenv("ANBUD_EVAL_LANE", raising=False)  # the eval lane's own sessions set it; no test inherits the gate
     yield
     patch.undo()
 
