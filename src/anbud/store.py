@@ -99,6 +99,13 @@ class RunStore:
             raise
         _fsync_dir(path.parent)  # the rename itself survives a power loss
 
+    def write_file(self, path: Path, data: bytes) -> None:
+        """Write a file inside this company's folder, atomically and private to the user."""
+        resolved = path.resolve()
+        if not resolved.is_relative_to(self.dir.resolve()):
+            raise StoreError("a write outside the company's folder")
+        self._write_atomic(path, data)
+
     # Blobs
 
     def _blob_path(self, sha: str) -> Path:
