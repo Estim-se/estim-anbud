@@ -44,6 +44,7 @@ class LensResult(_Model):
     turns: int = 0
     cost_usd: float = 0.0
     generic: bool = Field(default=False, description="Lens 8: normal scope the documents never mention")
+    error: str | None = Field(default=None, description="Why the lens failed: an exception or error kind, no message")
 
 
 class CalcPost(_Model):
