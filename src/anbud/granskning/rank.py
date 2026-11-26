@@ -2,8 +2,12 @@
 
 - Score: kronor high (an unpriced flag counts as `unpriced_sek`) x verdict weight x the lens action rate, times the
   covered-by-calc and other-trade adjustments when the verifier says so.
-- At most `max_shown` flags are shown; generic-lens flags are a separate list of at most `max_generic`. Everything
-  else is kept, with where it went and why, for the log and the XLSX.
+- At most `max_shown` priced flags are shown; generic-lens flags are a separate list of at most `max_generic`.
+- Flags kronor can't price, and that the verifier didn't refute, are a list of their own ("Krav utan prisuppgift", at
+  most `max_unpriced_shown`), so a flat unpriced weight never lets priced flags push them out. They are ordered by the
+  verifier's outcome (confirmed, partly, unverified), then by severity: contractual exposure, the electrical scope,
+  how many lenses agree, and the lenses' action rate. No kronor weight enters that order.
+- Everything else is kept, with where it went and why, for the log and the XLSX.
 - Coverage per lens comes only from the lens's tool log, with the corpus used to map ids to documents. It lists what
   was read and what wasn't, and never says "all clear".
 """
@@ -22,6 +26,7 @@ from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
 from anbud.granskning.kronor import is_minor, price, ranking_kronor
 from anbud.granskning.settings import Settings
+from anbud.models import MoneyBasis
 
 NOT_ALL_CLEAR = (
     "Täckningen visar bara vad granskningen läste och sökte. Den betyder inte att underlaget saknar fel eller risker."
@@ -32,22 +37,28 @@ def price_items(
     items: list[Item], catalog: Catalog | None, calc_posts: dict[str, CalcPost], settings: Settings
 ) -> list[Item]:
     """Kronor for each item: from the verifier's corrected money basis when it gave one and didn't refute the flag,
-    otherwise from the flag's own."""
+    then from the flag's own, then from the merged lens flags', the first that prices."""
     out = []
     for item in items:
-        basis = item.flag.money_basis
+        own = [item.flag.money_basis]
+        own += [f.money_basis for f in item.source_flags if f.money_basis not in own]
+        bases = list(own)
         if item.verdict and item.verdict.verdict != "refuted" and item.verdict.corrected_money_basis:
-            basis = item.verdict.corrected_money_basis
-        kronor = price(basis, catalog, calc_posts, settings)
+            bases.insert(0, _keep_catalog_id(item.verdict.corrected_money_basis, own))
+        priced = [price(basis, catalog, calc_posts, settings) for basis in bases]
+        kronor = next((k for k in priced if k.priced), priced[0])
         out.append(item.model_copy(update={"kronor": kronor, "minor": is_minor(kronor, item.flag, settings)}))
     return out
 
 
-def score(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
+def action_rate(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
     rates = action_rates or {}
-    rate = max((rates.get(lens, settings.default_action_rate) for lens in item.lenses), default=1.0)
-    value = ranking_kronor(item.kronor, settings) * settings.weight(item.verdict.verdict if item.verdict else None)
-    value *= rate
+    return max((rates.get(lens, settings.default_action_rate) for lens in item.lenses), default=1.0)
+
+
+def factor(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
+    """Everything in the score but the kronor: verdict weight x lens action rate x the verifier's adjustments."""
+    value = settings.weight(item.verdict.verdict if item.verdict else None) * action_rate(item, settings, action_rates)
     if item.verdict and item.verdict.covered_by_calc:
         value *= settings.covered_by_calc
     if item.verdict and not item.verdict.electrical_scope:
@@ -55,18 +66,62 @@ def score(item: Item, settings: Settings, action_rates: dict[str, float] | None 
     return value
 
 
+def _keep_catalog_id(corrected: MoneyBasis, own: list[MoneyBasis]) -> MoneyBasis:
+    """The verifier's correction keeps the lens's catalog id when it names the same kind and item: the verifier never
+    sees the catalog, so it can't be expected to repeat the id."""
+    if corrected.catalog_id is not None:
+        return corrected
+    same = next((b for b in own if b.catalog_id and b.kind == corrected.kind and b.item == corrected.item), None)
+    return corrected.model_copy(update={"catalog_id": same.catalog_id}) if same else corrected
+
+
+def score(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
+    return ranking_kronor(item.kronor, settings) * factor(item, settings, action_rates)
+
+
 @dataclass
 class Ranked:
     shown: list[Item] = field(default_factory=list)
     generic: list[Item] = field(default_factory=list)
     logged: list[Item] = field(default_factory=list)
+    unpriced: list[Item] = field(default_factory=list)
+
+
+_OUTCOME_ORDER = {"confirmed": 0, "partly": 1}  # anything else (no verdict) is unverified, after both
+
+
+def is_unpriced(item: Item) -> bool:
+    return item.kronor is None or not item.kronor.priced
+
+
+def unpriced_order(item: Item, rate: float = 1.0) -> tuple[int, bool, bool, int, float, str]:
+    """Verifier outcome, then severity. Flags carry no severity field, so severity is what the flag and the verifier
+    say: contractual exposure first, then in the electrical scope, then more lenses agreeing, then the lens's rate."""
+    outcome = _OUTCOME_ORDER.get(item.verdict.verdict if item.verdict else "", 2)
+    other_trade = bool(item.verdict and not item.verdict.electrical_scope)
+    return outcome, not item.flag.contractual_exposure, other_trade, -len(item.lenses), -rate, item.fingerprint
+
+
+def unpriced_queue(items: list[Item], settings: Settings, action_rates: dict[str, float] | None = None) -> list[Item]:
+    """The flags for "Krav utan prisuppgift", in its order. Before verification every outcome is unverified, so the
+    order is severity alone; the verifier's reserved slots are drawn from the front of this queue."""
+    queue = [i for i in items if _unpriced_candidate(i, factor(i, settings, action_rates))]
+    return sorted(queue, key=lambda i: unpriced_order(i, action_rate(i, settings, action_rates)))
 
 
 def rank(items: list[Item], settings: Settings, action_rates: dict[str, float] | None = None) -> Ranked:
     scored = [i.model_copy(update={"score": score(i, settings, action_rates)}) for i in items]
     scored.sort(key=lambda i: (-i.score, i.fingerprint))
     ranked = Ranked()
+    unpriced = unpriced_queue(scored, settings, action_rates)
+    candidate = {i.fingerprint for i in unpriced}
+    for n, item in enumerate(unpriced):
+        placement = "shown_unpriced" if n < settings.max_unpriced_shown else "capped"
+        placed = item.model_copy(update={"placement": placement})
+        (ranked.unpriced if placement == "shown_unpriced" else ranked.logged).append(placed)
     for item in scored:
+        if item.fingerprint in candidate:
+            continue
         if item.verdict and item.verdict.verdict == "refuted":
             placement = "refuted"
         elif item.verdict and item.verdict.covered_by_calc and item.score <= 0:
@@ -82,6 +137,14 @@ def rank(items: list[Item], settings: Settings, action_rates: dict[str, float] |
         placed = item.model_copy(update={"placement": placement})
         {"shown": ranked.shown, "generic": ranked.generic}.get(placement, ranked.logged).append(placed)
     return ranked
+
+
+def _unpriced_candidate(item: Item, weight: float) -> bool:
+    """Unpriced, not refuted, not weighted to zero (covered by the calc), and not a generic-lens flag (those have
+    their own list). The kronor stand-in plays no part."""
+    if not is_unpriced(item) or item.generic or weight <= 0:
+        return False
+    return not (item.verdict and item.verdict.verdict == "refuted")
 
 
 class _Model(BaseModel):
@@ -101,6 +164,7 @@ class LensCoverage(_Model):
     tiles_viewed: int = 0
     calc_calls: int = 0
     law_lookups: int = 0
+    catalog_searches: int = 0
     refused_calls: int = 0
     failed_calls: int = 0
     not_checked: list[str] = Field(default_factory=list)
@@ -148,10 +212,18 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
     blocks: set[str] = set()
     tiles: set[str] = set()
     searches: list[str] = []
-    counts = {"calc_posts": 0, "law_lookup": 0, "refused": 0, "failed": 0}
+    counts = {"calc_posts": 0, "law_lookup": 0, "catalog_search": 0, "refused": 0, "failed": 0}
     for call in result.tool_log:
         if call.refused is not None:
             counts["refused"] += 1
+            continue
+        if call.tool == "law_lookup":  # counted as a lookup even when the harness has no law corpus yet
+            counts["law_lookup"] += 1
+            if call.error is not None and call.error != "not_available":
+                counts["failed"] += 1
+            continue
+        if call.tool == "catalog_search" and call.error == "no_catalog":  # a search, not a failure: no catalog loaded
+            counts["catalog_search"] += 1
             continue
         if call.error is not None:
             counts["failed"] += 1
@@ -201,6 +273,7 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
         tiles_viewed=len(tiles),
         calc_calls=counts["calc_posts"],
         law_lookups=counts["law_lookup"],
+        catalog_searches=counts["catalog_search"],
         refused_calls=counts["refused"],
         failed_calls=counts["failed"],
         not_checked=not_checked,
@@ -227,6 +300,6 @@ def coverage(
 def summary(ranked: Ranked) -> dict[str, Any]:
     """Counts for the run log: ids and numbers only."""
     placements: dict[str, int] = {}
-    for item in ranked.shown + ranked.generic + ranked.logged:
+    for item in ranked.shown + ranked.unpriced + ranked.generic + ranked.logged:
         placements[item.placement or "none"] = placements.get(item.placement or "none", 0) + 1
     return {"placements": placements, "shown": [i.fingerprint for i in ranked.shown]}

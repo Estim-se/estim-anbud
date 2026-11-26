@@ -5,7 +5,7 @@ One mechanism gives resume after a crash, free replay of code-only changes, and 
 
     blobs/<aa>/<sha256>          request and response bodies, by the hash of their bytes
     steps/<aa>/<key>.json        step cache: a request key -> its response blob and cost
-    runs/<run_id>/run.json       the run's salt, written once
+    runs/<run_id>/run.json       the run's salt and the code it started with, written once
     runs/<run_id>/events.jsonl   one Event per line, appended, never rewritten
     runs/<run_id>/STOP           `anbud stop` marker for one run
 and `~/estim-anbud-data/STOP` stops every run.
@@ -162,12 +162,16 @@ class RunStore:
     def run_dir(self, run_id: str) -> Path:
         return self.dir / "runs" / check_run_id(run_id)
 
-    def open_run(self, run_id: str, salt: str | None = None) -> str:
-        """The run's salt: read back for an existing run (resume, replay), created for a new one."""
+    def open_run(self, run_id: str, salt: str | None = None, code: dict[str, Any] | None = None) -> str:
+        """The run's salt: read back for an existing run (resume, replay), created for a new one. `code`, the code the
+        run started with, goes into a new run's manifest; an existing manifest is never rewritten."""
         manifest = self.run_dir(run_id) / "run.json"
         if not manifest.exists():
             chosen = salt or secrets.token_hex(16)
-            tmp = self._temp(manifest, canonical({"salt": chosen, "company_id": self.company_id}))
+            record: dict[str, Any] = {"salt": chosen, "company_id": self.company_id}
+            if code is not None:
+                record["code"] = code
+            tmp = self._temp(manifest, canonical(record))
             try:
                 os.link(tmp, manifest)  # fails if another process created the run first; then its salt wins
                 _fsync_dir(manifest.parent)

@@ -96,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
         from anbud.guards.__main__ import main as guards_main
 
         return guards_main(argv[1:])
+    if argv and argv[0] == "recipe-extract":
+        from anbud.granskning.recipe_command import main as recipe_main
+
+        return recipe_main(argv[1:])
     if argv and argv[0] == "split":
         from anbud.evals.split_heldout import main as split_main
 
@@ -135,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("replay", help="replay a stored run at $0 (phase 1)")
     sub.add_parser("guards", help="repo guards: names, document files, licensed text")
     sub.add_parser("split", help="assign new tenders to dev, held-out or prospective")
+    sub.add_parser("recipe-extract", help="write the customer's outlet recipe from a run's calc recipe (explicit only)")
     sub.add_parser("split-status", help="counts per status, and the dev tender ids")
     sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
     sub.add_parser("plant", help="a planted variant of a dev tender: plants, both control arms and the answer key")

@@ -19,15 +19,19 @@ from pathlib import Path
 from typing import Any
 
 from anbud.granskning.catalog import Catalog, with_calc_rate
+from anbud.granskning.check_loop import CHECK_ROLE, STOP_NAMES
+from anbud.granskning.checks import ChecksResult, not_run, run_checks
 from anbud.granskning.contracts import CalcPost, RunInputs
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.finish import Finished, finish
 from anbud.granskning.lenses import Lens
 from anbud.granskning.loop import LoopOutcome, SubmitOutcome, run_tool_loop
 from anbud.granskning.merge import STOP_ERRORS
+from anbud.granskning.outlet_recipe import RecipeError, load_recipe
 from anbud.granskning.page_cards import Cards, read_cards
 from anbud.granskning.prefix import system_blocks
-from anbud.granskning.run import GranskningResult, run_granskning
+from anbud.granskning.report import write_reports
+from anbud.granskning.run import FATAL_ERRORS, GranskningResult, run_granskning
 from anbud.granskning.settings import Settings, load_settings
 from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.granskning.toolbox import Toolbox
@@ -53,9 +57,6 @@ class CardsRead:
     failed: dict[str, str] = field(default_factory=dict)  # tile id -> error kind
 
 
-_FATAL = ("RunStopped", "BudgetExceeded", "spend_cap", "ReplayMiss")
-
-
 def read_all_cards(client: ModelClient, store: RunStore, corpus: Corpus) -> CardsRead:
     """One card per tile, tile by tile, so one failure loses one tile. A stop, the budget, the spend cap or a replay
     miss ends the cards there; the run goes on without the rest, and coverage says which tiles weren't read."""
@@ -67,7 +68,7 @@ def read_all_cards(client: ModelClient, store: RunStore, corpus: Corpus) -> Card
         except (*STOP_ERRORS, OSError, StoreError) as exc:
             kind = exc.kind if isinstance(exc, ModelError) else type(exc).__name__
             out.failed[tile.id] = kind
-            if kind in _FATAL:
+            if kind in FATAL_ERRORS:
                 out.failed.update({t.id: kind for t in tiles[n + 1 :]})
                 break
             continue
@@ -145,14 +146,86 @@ class PipelineResult:
     catalog: Catalog | None
     run_dir: Path
     files: dict[str, Path]
-
-    @property
-    def cost_usd(self) -> float:
-        return self.cards.cost_usd + self.granskning.cost_usd + self.verifier.cost_usd
+    cost_usd: float = 0.0  # what this pipeline spent, from the run budget: every call, merge and failures included
+    checks: ChecksResult | None = None
 
 
 def _write(store: RunStore, path: Path, value: Any) -> None:
     store.write_file(path, json.dumps(value, ensure_ascii=False, indent=1).encode() + b"\n")
+
+
+def stopped_by(result: GranskningResult) -> str | None:
+    """The stop error the map or a lens ended on (a budget, the spend cap, a stop, a replay miss, prefix drift), or
+    None. The checks would end the same way, so they don't start."""
+    errors = [result.map.outcome.error, *(lens.error for lens in result.lenses)]
+    return next((e for e in errors if e in STOP_NAMES), None)
+
+
+def _run_checks(
+    client: ModelClient,
+    corpus: Corpus,
+    calc: list[CalcPost],
+    toolbox: Toolbox,
+    result: GranskningResult,
+    concurrency: int,
+    say: Callable[[str], None],
+) -> ChecksResult:
+    try:
+        recipe = load_recipe(client.company_id)
+    except RecipeError as exc:  # a missing, unreadable, undecodable or invalid recipe: compare by hand
+        say(f"checks: the customer's outlet recipe can't be read ({type(exc).__name__}); comparing by hand instead")
+        recipe = None
+    return run_checks(
+        client,
+        corpus=corpus,
+        calc=calc,
+        system=system_blocks(corpus, calc),
+        toolbox=toolbox,
+        recipe=recipe,
+        lens_results=result.lenses,
+        concurrency=concurrency,
+        on_progress=say,
+    )
+
+
+def _checks(
+    client: ModelClient,
+    store: RunStore,
+    corpus: Corpus,
+    calc: list[CalcPost],
+    toolbox: Toolbox,
+    result: GranskningResult,
+    run_dir: Path,
+    summary_file: str,
+    concurrency: int,
+    say: Callable[[str], None],
+    enabled: bool = True,
+) -> ChecksResult:
+    """The focused checks after the lenses. Writes `checks.json` (their tables, for the report and for
+    `anbud recipe-extract`) and adds their statuses and costs to the run summary. Nothing here stops the run: a
+    check that fails, or checks that don't run, say so in the report's coverage, and the reports are still written."""
+    stop = stopped_by(result)
+    if not enabled:
+        checks = not_run("bara utvalda linser kördes (--lens); lägg till --checks för att köra kontrollerna")
+    elif stop is not None:
+        checks = not_run(f"körningen hade redan stoppats ({stop})")
+    else:
+        try:
+            checks = _run_checks(client, corpus, calc, toolbox, result, concurrency, say)
+        except Exception as exc:  # noqa: BLE001 - a bug in a check must not cost the run its reports
+            checks = not_run(f"kontrollerna avbröts av ett fel ({type(exc).__name__})")
+    if checks.report.skipped:
+        say(f"checks: not run: {checks.report.skipped}")
+    summary_path = store.run_dir(client.run_id) / summary_file
+    try:
+        _write(store, run_dir / "checks.json", {"summary": checks.summary(), **checks.report.model_dump(mode="json")})
+        summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+        summary["checks"] = checks.summary()
+        summary["checks_cost_usd"] = round(checks.cost_usd, 4)
+        store.write_file(summary_path, canonical(summary))
+    except (OSError, ValueError, StoreError):
+        client.persist_failures += 1
+    return checks
 
 
 def run_pipeline(
@@ -170,9 +243,14 @@ def run_pipeline(
     concurrency: int = 3,
     on_progress: Callable[[str], None] | None = None,
     arm: str | None = None,
+    summary_file: str = "granskning.json",
+    code: dict[str, Any] | None = None,
+    checks: bool = True,
 ) -> PipelineResult:
+    """`checks=False` (a run of selected lenses without `--checks`) skips the focused checks; coverage says so."""
     settings = settings or load_settings()
     say = on_progress or (lambda _msg: None)
+    spent_before = client.budget.spent
     say(f"page cards: {len(corpus.tiles)} tiles")
     read = read_all_cards(client, store, corpus)
     cards = read.cards
@@ -184,11 +262,22 @@ def run_pipeline(
         _write(store, run_dir / "cards_masking.json", [m.model_dump(mode="json") for m in cards.masked])
     corpus = add_cards(corpus, cards)
 
-    toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob)
+    toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob, catalog=catalog)
     validator = flag_validator(corpus, set(CLAIM_TYPES), {p.id: p for p in calc})
     result = run_granskning(
-        client, corpus, calc, lenses, toolbox=toolbox, validator=validator, concurrency=concurrency, on_progress=say
+        client,
+        corpus,
+        calc,
+        lenses,
+        toolbox=toolbox,
+        validator=validator,
+        concurrency=concurrency,
+        on_progress=say,
+        summary_file=summary_file,
+        code=code,
     )
+
+    checked = _checks(client, store, corpus, calc, toolbox, result, run_dir, summary_file, concurrency, say, checks)
 
     if catalog is not None:
         catalog = with_calc_rate(catalog, calc)
@@ -204,7 +293,7 @@ def run_pipeline(
         calc_posts=calc,
         system_blocks=system_blocks(corpus, calc),
         verifier_loop=verifier_loop(client, toolbox, settings, runs),
-        out_dir=run_dir / "report",
+        out_dir=None,
         seed=client.salt or client.run_id,
         catalog=catalog,
         merge_client=client,
@@ -212,10 +301,14 @@ def run_pipeline(
         named_not_present=named,
         unread_tiles=sorted(read.failed),
         parallel=concurrency,
-        cost_usd=None,
+        check_results=checked.lens_results(client.config.model_for(CHECK_ROLE)),
+        checks=checked.report,
     )
+    cost = client.budget.spent - spent_before  # every call this pipeline made, merge and failed calls included
+    finished.report = finished.report.model_copy(update={"cost_usd": round(cost, 4)})
+    finished.paths = write_reports(finished.report, run_dir / "report")
     ranked = finished.ranked
-    ordered = ranked.shown + ranked.generic + ranked.logged
+    ordered = ranked.shown + ranked.unpriced + ranked.generic + ranked.logged
     files = dict(finished.paths)
     files["inputs"] = run_dir / "inputs.json"
     inputs = RunInputs(
@@ -228,4 +321,7 @@ def run_pipeline(
     _write(store, files["kronor"], {i.fingerprint: i.kronor.model_dump(mode="json") for i in ordered if i.kronor})
     files["items"] = run_dir / "items.json"
     _write(store, files["items"], [i.model_dump(mode="json") for i in ordered])
-    return PipelineResult(client.run_id, cards, read.failed, result, finished, runs, catalog, run_dir, files)
+    files["checks"] = run_dir / "checks.json"
+    return PipelineResult(
+        client.run_id, cards, read.failed, result, finished, runs, catalog, run_dir, files, cost, checked
+    )

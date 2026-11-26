@@ -390,8 +390,10 @@ def test_cli_plant_and_score(data_root: Path, capsys: pytest.CaptureFixture[str]
     fps = [fingerprint(f) for f in flags]
     (run / "flags.json").write_text(json.dumps([f.model_dump(mode="json") for f in flags]))
     kronor = {
-        fp: Kronor(priced=True, point=p.expected.kronor or 1000.0, basis="syntetisk").model_dump(mode="json")
-        for fp, p in zip(fps, key.plants, strict=True)
+        fp: Kronor(priced=True, point=p.expected.kronor or 1000.0, basis=f.money_basis, label="syntetisk").model_dump(
+            mode="json"
+        )
+        for f, fp, p in zip(flags, fps, key.plants, strict=True)
     }
     (run / "kronor.json").write_text(json.dumps(kronor))
     placements = ["refuted", *["shown"] * (len(flags) - 1)]

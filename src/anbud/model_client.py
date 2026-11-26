@@ -199,6 +199,7 @@ class ModelClient:
         if store is not None:
             budget.settle(0.0, store.run_spend(run_id))  # a resumed run keeps counting against the same hard stop
         self.persist_failures = 0  # store writes that failed; the caller should stop the run if this isn't 0
+        self.replay_misses = 0  # replayed requests not in the step cache; a replay with any is incomplete
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -292,6 +293,8 @@ class ModelClient:
         if key is not None and (hit := self._cached(step, model, key)) is not None:
             return hit
         if self.sdk is None:
+            with self._lock:
+                self.replay_misses += 1
             raise ReplayMiss("this request isn't in the step cache, and replay never calls a model")
         price = self.config.price_for(model)
         count_params = {k: v for k, v in params.items() if k != "max_tokens"}

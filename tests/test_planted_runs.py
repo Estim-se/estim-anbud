@@ -24,6 +24,7 @@ from anbud.granskning.calc import parse_calc
 from anbud.granskning.contracts import CalcPost, RunInputs
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.prefix import CALC_ONLY, post_line, system_blocks
+from anbud.granskning.provenance import GitState
 from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.granskning.validate import validate_flags
 from anbud.models import Block, Flag
@@ -168,6 +169,8 @@ def test_each_arm_runs_without_opening_the_key_then_scores(
     sdk = ScriptedSDK(_script(variant, key))
     monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
     monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
+    # A paid run needs a clean tree; this one is scripted, so pretend the tree is clean wherever the test runs.
+    monkeypatch.setattr("anbud.granskning.provenance.git_state", lambda *_: GitState("0" * 40, False, None))
     _SEEN.clear()
     _WATCH.append(True)
     try:

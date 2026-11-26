@@ -76,6 +76,11 @@ class RunInputs(_Model):
 
 
 def fingerprint(flag: Flag) -> str:
-    """sha256 of the flag's sorted, de-duplicated block ids plus its claim type: the key labels and merges use."""
+    """sha256 of the flag's sorted, de-duplicated block ids plus its claim type: the key labels and merges use. A
+    check's flag adds its `check_key`, so two checked quantities citing the same blocks stay two items, each priced;
+    a flag without one (every lens flag) keeps the fingerprint it always had."""
     ids = sorted({c.block_id for c in flag.citations})
-    return hashlib.sha256(("\n".join(ids) + "\n" + flag.claim_type).encode()).hexdigest()
+    text = "\n".join(ids) + "\n" + flag.claim_type
+    if flag.check_key is not None:
+        text += "\n" + flag.check_key
+    return hashlib.sha256(text.encode()).hexdigest()

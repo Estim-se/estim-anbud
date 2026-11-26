@@ -15,7 +15,9 @@ from pydantic import ValidationError
 from anbud.granskning.contracts import CalcPost, LensResult, fingerprint
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
+from anbud.granskning.prefix import defuse
 from anbud.granskning.settings import Settings
+from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.granskning.validate import _search_key, check_flag
 from anbud.model_client import BudgetExceeded, ModelClient, ModelError, PrefixDrift, ReplayMiss, RunStopped
 from anbud.models import Citation, Flag
@@ -47,7 +49,9 @@ def union_citations(flags: Iterable[Flag]) -> list[Citation]:
 
 
 def code_merge(flags: list[Flag]) -> Flag:
-    """The first flag, carrying every citation and search of the others. Absence only if all are absences."""
+    """One flag for flags with the same fingerprint: every distinct claim (joined with " / "), every citation and
+    search, the first flag's money basis. Absence only if all are absences. Callers keep the originals, so the other
+    money bases aren't lost."""
     first = flags[0]
     if len(flags) == 1:
         return first
@@ -55,6 +59,7 @@ def code_merge(flags: list[Flag]) -> Flag:
     rule = next((f.reference_rule for f in flags if f.reference_rule), None)
     return first.model_copy(
         update={
+            "claim": " / ".join(dict.fromkeys(f.claim for f in flags)),
             "citations": union_citations(flags),
             "searches": searches,
             "absence": all(f.absence for f in flags),
@@ -80,6 +85,7 @@ def items_from_results(results: list[LensResult]) -> list[Item]:
                 lenses=list(dict.fromkeys(r.lens_id for _, r in members)),
                 generic=all(r.generic for _, r in members),
                 sources=[fp],
+                source_flags=[f for f, _ in members] if len(members) > 1 else [],
             )
         )
     return items
@@ -115,7 +121,7 @@ def _merge_request(groups: list[list[Item]]) -> str:
     payload = []
     for n, group in enumerate(groups):
         payload.append({"cluster": n + 1, "findings": [i.flag.model_dump(mode="json") for i in group]})
-    return "<clusters>\n" + json.dumps(payload, ensure_ascii=False, indent=1) + "\n</clusters>"
+    return "<clusters>\n" + defuse(json.dumps(payload, ensure_ascii=False, indent=1)) + "\n</clusters>"
 
 
 def _submitted(message: Any) -> list[dict[str, Any]] | None:
@@ -139,7 +145,7 @@ def _accept(
     searches = {_search_key(s) for i in group for s in i.flag.searches}
     merged = []
     for flag in outputs:
-        if check_flag(flag, searches, corpus, calc_posts=calc_posts):
+        if check_flag(flag, searches, corpus, CLAIM_TYPES, calc_posts=calc_posts):
             return None
         keys = {_key(c) for c in flag.citations}
         members = [i for i in group if keys & {_key(c) for c in i.flag.citations}]
@@ -150,9 +156,14 @@ def _accept(
                 lenses=list(dict.fromkeys(lens for i in members for lens in i.lenses)),
                 generic=all(i.generic for i in members),
                 sources=list(dict.fromkeys(s for i in members for s in i.sources)),
+                source_flags=_originals(members) if len(_originals(members)) > 1 else [],
             )
         )
     return merged
+
+
+def _originals(items: list[Item]) -> list[Flag]:
+    return [f for i in items for f in (i.source_flags or [i.flag])]
 
 
 def merge(
@@ -164,9 +175,11 @@ def merge(
     calc_posts: Mapping[str, CalcPost] | None = None,
 ) -> list[Item]:
     """Every lens flag ends in exactly one item. Without a client, or when the model's merge fails a check, clusters
-    are left as their same-fingerprint items: code never merges different claims on its own."""
+    are left as their same-fingerprint items: code never merges different claims on its own. A check's flag (one with
+    a `check_key`) stays its own item, outside the model merge, so its money basis is always priced."""
     items = items_from_results(results)
-    groups = clusters(items)
+    checked = [i for i in items if i.flag.check_key is not None]
+    groups = clusters([i for i in items if i.flag.check_key is None])
     multi = [g for g in groups if len(g) > 1]
     if client is None or not multi:
         return items
@@ -201,7 +214,7 @@ def merge(
         accepted = None if n in broken else _accept(group, assigned.get(n, []), corpus, calc_posts)
         merged[n] = accepted if accepted is not None else group
     index = {id(g): n for n, g in enumerate(multi)}
-    out: list[Item] = []
+    out: list[Item] = list(checked)
     for group in groups:
         out.extend(merged[index[id(group)]] if id(group) in index else group)
     return out

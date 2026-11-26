@@ -18,14 +18,18 @@ from typing import Any
 
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
+from anbud.granskning.kronor import FORMULA_INPUTS
 from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.models import Block
 
 CACHE_1H = {"type": "ephemeral", "ttl": "1h"}
 
 _KIND = {"heading": "H", "paragraph": "P", "table_row": "T", "sheet_row": "R", "tile_text": "I"}
+# Every tag the harness's prompts use as a delimiter: the prefix's, the verifier's, the merge's and the lens task's.
 _TAGS = re.compile(
-    r"<(/?\s*(?:tender_corpus|calculation|doc|documents|sheet|results|blocks|outline|posts|tile)\b)", re.IGNORECASE
+    r"<(/?\s*(?:tender_corpus|calculation|doc|documents|sheet|results|blocks|block|outline|posts|tile|citation|"
+    r"finding|clusters|tender_map|focus_questions|task)\b)",
+    re.IGNORECASE,
 )
 
 BRIEF = """\
@@ -48,7 +52,8 @@ It still cites the block that creates the need.
 name the item, with quantity and unit if the documents give them), `quantity_gap` (a calc post's quantity is wrong; \
 give the post id and the quantity the documents support), `hours_gap` (hours missing or too low; give hours and the \
 post id if one exists), `contract_formula` (a contract term priced by formula: vite_per_week, security, index_drift \
-or wage_step, with its inputs).
+or wage_step, with its inputs). For a `missing_post` or `quantity_gap`, look the item up with catalog_search and put \
+the id that fits in `catalog_id`; when nothing fits, leave `catalog_id` out and name the item in `item`.
 - Calc posts are cited by their id (for example in `money_basis.post_ref`); they are the contractor's own figures.
 - Set `contractual_exposure` when the risk is a term, deadline or liability rather than a missing quantity.
 - Material means roughly 20 000 kr or more, or a contractual exposure. Leave out trivia, wording issues and things \
@@ -206,9 +211,22 @@ def calc_text(calc: Iterable[CalcPost]) -> str:
     return "\n".join(lines)
 
 
+def formula_text() -> str:
+    """The contract formulas and the exact `formula_inputs` names code reads, from kronor's own table."""
+    lines = [
+        "Contract formulas: `money_basis.formula_inputs` is a list of {name, value}, values as plain numbers (SEK, "
+        "percent as 0.5 for 0.5 %, weeks, months, hours). Code reads only these names; any other name is ignored, "
+        "and a formula missing a required input stays unpriced."
+    ]
+    for formula, inputs in FORMULA_INPUTS.items():
+        lines.append(f"- {formula}:")
+        lines.extend(f"  - {name}: {meaning}" for name, meaning in inputs.items())
+    return "\n".join(lines)
+
+
 def brief_text() -> str:
     claim_types = "\n".join(f"- {name} ({item}): {text}" for name, (item, text) in CLAIM_TYPES.items())
-    return BRIEF.format(claim_types=claim_types)
+    return BRIEF.format(claim_types=claim_types) + "\n\n" + formula_text()
 
 
 def system_blocks(corpus: Corpus, calc: Iterable[CalcPost]) -> list[dict[str, Any]]:
@@ -223,6 +241,14 @@ def system_blocks(corpus: Corpus, calc: Iterable[CalcPost]) -> list[dict[str, An
     ]
 
 
+CHARS_PER_TOKEN = 1.6  # fitted on a paid run's measured prefix; every run summary records chars and tokens to re-fit
+
+
+def prefix_chars(blocks: list[dict[str, Any]]) -> int:
+    return sum(len(b.get("text", "")) for b in blocks)
+
+
 def estimate_tokens(blocks: list[dict[str, Any]]) -> int:
-    """A rough token count for budgeting before the first call: about 3.5 characters per token for Swedish text."""
-    return int(sum(len(b.get("text", "")) for b in blocks) / 3.5)
+    """An estimate of the prefix's tokens before the first call measures it. Tender text with ids, tables and
+    numbers runs far denser than prose: about 1.6 characters per token."""
+    return int(prefix_chars(blocks) / CHARS_PER_TOKEN)
