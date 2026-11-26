@@ -3,6 +3,12 @@ checks, merge, verifier, kronor, and the HTML and XLSX report in `<tender>/runs/
 
 Prints ids, statuses, counts and costs only, never tender text or model output. A paid run reads the model key from
 the Keychain; `--replay` answers every call from the run's step cache at $0 and refuses any call not in it.
+
+A finished paid dev run is frozen: hashed into the freeze ledger, then its outputs folder and run record become
+read-only (files 0o400, folders 0o500). A frozen run is never resumed or replayed in place. `--base-run <run>` rebuilds
+from it under a new run id with its salt, so every unchanged call comes from its step cache ($0, and with `--replay`
+nothing is sent; a miss exits 4); a finished rebuild is frozen the same way. An unfinished run stays writable, so the
+same run id resumes it, and a fixture run is never frozen, so it still replays in place.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from anbud import paths
+from anbud.frozen import freeze_tree, is_frozen
 
 PAID_REFUSED = 3
 REPLAY_INCOMPLETE = 4
@@ -21,8 +28,14 @@ RUN_HALTED = 5
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--run-id", help="resume or replay this run (default: a new id from the tender and the time)")
+    parser.add_argument(
+        "--run-id", help="resume or replay an unfinished run (default: a new id from the tender and the time)"
+    )
     parser.add_argument("--replay", action="store_true", help="answer from the step cache only, at $0")
+    parser.add_argument(
+        "--base-run",
+        help="rebuild from this stored run under a new --run-id: its salt and step cache, unchanged calls $0",
+    )
     parser.add_argument("--concurrency", type=int, default=3, help="lenses in parallel (default 3)")
     parser.add_argument("--lens", action="append", default=None, help="run only this lens (repeatable)")
     parser.add_argument(
@@ -83,8 +96,9 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     if not (prep_dir / "blocks.jsonl").exists():
         print("anbud run: no prepared tender; run `anbud prep` first", file=sys.stderr)
         return PAID_REFUSED
-    if args.replay and not args.run_id:
-        print("anbud run: --replay needs --run-id", file=sys.stderr)
+    base_run = getattr(args, "base_run", None)
+    if args.replay and not (args.run_id or base_run):
+        print("anbud run: --replay needs --run-id or --base-run", file=sys.stderr)
         return PAID_REFUSED
     name = args.tender_id or "fixture"
     if arm:  # planted/seed-N/arms/<arm> -> <tender>-seed-N-<arm>
@@ -92,8 +106,13 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     run_id = args.run_id or f"{name}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     try:
         check_run_id(run_id)
+        if base_run is not None:
+            check_run_id(base_run)
     except StoreError as exc:
         print(f"anbud run: {exc}", file=sys.stderr)
+        return PAID_REFUSED
+    if base_run == run_id:
+        print("anbud run: a rebuild needs its own --run-id", file=sys.stderr)
         return PAID_REFUSED
 
     config = load_config()
@@ -118,22 +137,40 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
         return dry_run(corpus, calc, lenses, catalog, config.budgets, code, args.company_id)
     store = RunStore(args.company_id)
     run_dir = runs_dir / run_id
-    if args.replay:
-        sdk = None
+    salt = None
+    if base_run is not None:
+        salt = store.stored_salt(base_run)
+        if salt is None:
+            print(f"anbud run: no stored run {base_run} to rebuild from", file=sys.stderr)
+            return PAID_REFUSED
+    in_place = args.replay and base_run is None  # replays an unfinished or fixture run into its replay-<n>/
+    refusal = frozen_refusal(args.company_id, run_id)
+    if refusal is None and (is_frozen(run_dir) or is_frozen(store.run_dir(run_id))):
+        refusal = f"run {run_id} is frozen; start a new run id"
+    if refusal is not None and in_place:
+        refusal += f". Replay a frozen run as a rebuild: --replay --base-run {run_id} --run-id <new id>"
+    if not args.replay:
+        refusal = provenance.paid_refusal(state) or refusal
+    if refusal is not None:
+        print(f"anbud run: {refusal}", file=sys.stderr)
+        return PAID_REFUSED
+    sdk = None
+    if in_place:
         run_dir = replay_dir(run_dir)  # never over the run it replays
     else:
-        refusal = provenance.paid_refusal(state) or frozen_refusal(args.company_id, run_id)
-        if refusal is not None:
-            print(f"anbud run: {refusal}", file=sys.stderr)
+        try:  # a new run's manifest records its code (a rebuild's, its base's salt); a resumed run keeps the first
+            store.open_run(run_id, salt=salt, code=code)
+        except StoreError as exc:
+            print(f"anbud run: {exc}", file=sys.stderr)
             return PAID_REFUSED
-        store.open_run(run_id, code=code)  # a new run's manifest records its code; a resumed run keeps the first
+    if not args.replay:
         try:
             sdk = make_sdk_client(config, keychain_key(account=config.workspace))
         except KeyMissing as exc:
             print(f"anbud run: {exc}", file=sys.stderr)
             return PAID_REFUSED
     budget = Budget(float(config.budgets["run"]["hard_stop"]))
-    client = ModelClient(config, sdk, budget, run_id=run_id, company_id=args.company_id, store=store)
+    client = ModelClient(config, sdk, budget, run_id=run_id, company_id=args.company_id, store=store, salt=salt)
     counts = f"{len(corpus.blocks)} blocks, {len(corpus.tiles)} tiles, {len(calc)} calc posts, {len(lenses)} lenses"
     print(f"run {run_id}: {counts}")
     try:
@@ -146,7 +183,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             tender_id=args.tender_id or args.fixture.expanduser().resolve().name,
             prep_dir=prep_dir,
             run_dir=run_dir,
-            summary_file=f"granskning-{run_dir.name}.json" if args.replay else "granskning.json",
+            summary_file=f"granskning-{run_dir.name}.json" if in_place else "granskning.json",
             code=code,
             catalog=catalog,
             settings=settings,
@@ -220,7 +257,7 @@ def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_d
     replay, a dry run or a fixture freezes nothing, and run_command only calls this for a run that finished: a run
     with failed store writes, a replay miss or a stop or cap exits non-zero before it. A run that can't be frozen
     exits non-zero."""
-    if kind != "dev" or args.replay or args.dry_run:
+    if kind != "dev" or args.dry_run or (args.replay and getattr(args, "base_run", None) is None):
         return 0
     from anbud.evals.freeze import FreezeError, freeze_run, read_only_warning
 
@@ -237,6 +274,11 @@ def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_d
     print(f"frozen: ledger line {frozen['line_number']}, {frozen['line_sha256'][:12]}")
     if (warning := read_only_warning(frozen)) is not None:
         print(f"anbud run: {warning}", file=sys.stderr)
+        return 1
+    failed = freeze_tree(outputs_dir) + freeze_tree(record_dir)  # the folders too, so nothing can be added
+    if failed:
+        reasons = ", ".join(sorted(set(failed)))
+        print(f"anbud run: frozen, but {len(failed)} entries could not be made read-only ({reasons})", file=sys.stderr)
         return 1
     return 0
 

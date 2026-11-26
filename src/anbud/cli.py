@@ -225,6 +225,9 @@ def _stop(args: argparse.Namespace) -> int:
     except (StoreError, ValueError) as exc:
         print(f"anbud stop: {exc}", file=sys.stderr)
         return REFUSED
+    except OSError as exc:  # a finished run is frozen: its record takes no marker, and it has nothing left to stop
+        print(f"anbud stop: no marker written ({type(exc).__name__}); a frozen run has finished", file=sys.stderr)
+        return REFUSED
     target = "every run" if args.all else f"{args.company_id}/{args.run_id}"
     print(f"anbud stop: {'cleared' if args.clear else 'stop marker written'} for {target}")
     return 0

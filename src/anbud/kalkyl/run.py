@@ -24,13 +24,13 @@ from typing import Any
 
 from anbud import paths
 from anbud.config import Config, load_config
+from anbud.frozen import freeze_tree, is_frozen
 from anbud.granskning.card_store import CardsLoaded, available_cards, load_or_read_cards
 from anbud.granskning.catalog import Catalog
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.pipeline import add_cards
 from anbud.kalkyl.catalog import CatalogError, load, prompt_lines
 from anbud.kalkyl.extract import BRIEF, chunk_message, outline_text
-from anbud.kalkyl.frozen import freeze_tree, is_frozen
 from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.pipeline import KalkylResult, run_kalkyl
 from anbud.kalkyl.price import calc_posts
@@ -167,10 +167,10 @@ def new_run_id(tender_id: str) -> str:
 
 def base_salt(store: RunStore, run_id: str) -> str:
     """The salt of a stored run, read without writing anything to it (a frozen run is read-only)."""
-    manifest = store.run_dir(run_id) / "run.json"
-    if not manifest.is_file():
+    salt = store.stored_salt(run_id)
+    if salt is None:
         raise KalkylError(f"no stored run {run_id} to rebuild from")
-    return str(json.loads(manifest.read_text())["salt"])
+    return salt
 
 
 def run_dev_tender(

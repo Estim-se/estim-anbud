@@ -249,40 +249,57 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert freeze.is_frozen("co-001", "t-0001")
     assert (run_dir / "flags.json").stat().st_mode & 0o777 == 0o400
 
-    # Replay: no key, no SDK, every answer from the step cache, the same outputs.
+    # The paid run's outputs folder and run record are read-only, folders included.
+    record = RunStore("co-001").run_dir(RUN)
+    assert not _writable(run_dir, record)
+
+    # Replay: no key, no SDK, every answer from the step cache. A frozen run is never replayed in place; a rebuild
+    # from it gets its own run id and the same outputs, and is frozen in turn.
     def no_key(**_: Any) -> str:
         raise AssertionError("replay must not read the key")
 
     monkeypatch.setattr(model_client, "keychain_key", no_key)
     names = ("flags.json", "kronor.json", "items.json", "report/granskning.html")
     before = {name: (run_dir / name).read_text() for name in names}
-    summary = RunStore("co-001").run_dir(RUN) / "granskning.json"
+    summary = record / "granskning.json"
     paid_summary = summary.read_text()
+    events = (record / "events.jsonl").read_bytes()
     sent = len(sdk.sent)
-    assert cli.main(["run", "co-001", "t-0001", "--run-id", RUN, "--replay"]) == 0
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", RUN, "--replay"]) == cli.REFUSED
+    assert f"--replay --base-run {RUN} --run-id <new id>" in capsys.readouterr().err
+    rebuild = ["run", "co-001", "t-0001", "--replay", "--base-run", RUN]
+    assert cli.main([*rebuild, "--run-id", f"{RUN}-r1"]) == 0
     replay_out = capsys.readouterr().out
-    assert "total $0.00" in replay_out and "frozen" not in replay_out  # a replay freezes nothing
-    assert freeze.verify(freeze.ledger_file("co-001")).lines == 1
-    replay = run_dir / "replay-1"
+    assert "total $0.00" in replay_out and "frozen: ledger line 2, " in replay_out
+    assert freeze.verify(freeze.ledger_file("co-001")).lines == 2
+    replay, replay_record = tender / "runs" / f"{RUN}-r1", RunStore("co-001").run_dir(f"{RUN}-r1")
     for name in names[:3]:
-        assert (replay / name).read_text() == before[name]  # the same outputs, in their own folder
+        assert (replay / name).read_text() == before[name]  # the same outputs, in the rebuild's own folder
     replay_about = load_workbook(replay / "report" / "granskning.xlsx")["Om rapporten"]
     assert {r[0].value: r[1].value for r in replay_about.iter_rows()}["Modellkostnad (USD)"] == 0
+    assert not _writable(replay, replay_record)
     assert {name: (run_dir / name).read_text() for name in names} == before  # the paid run is untouched
+    assert (record / "events.jsonl").read_bytes() == events and not (run_dir / "replay-1").exists()
     assert len(sdk.sent) == sent
-    assert json.loads((RunStore("co-001").run_dir(RUN) / "run.json").read_text())["code"] == paid_code
-    replay_summary = json.loads((RunStore("co-001").run_dir(RUN) / "granskning-replay-1.json").read_text())
-    assert replay_summary["code"]["harness_sha"] == "a" * 40
+    rebuilt = json.loads((replay_record / "run.json").read_text())
+    assert rebuilt["salt"] == json.loads((record / "run.json").read_text())["salt"]
+    assert rebuilt["code"]["harness_sha"] == "a" * 40
+    assert json.loads((replay_record / "granskning.json").read_text())["code"]["harness_sha"] == "a" * 40
 
-    # A replay that misses the cache (here: a different lens set changes the map's request) stops at the map,
-    # exits non-zero, and still leaves the paid run alone.
-    narrowed = ["run", "co-001", "t-0001", "--run-id", RUN, "--replay", "--lens", "regulation"]
-    assert cli.main(narrowed) == command.REPLAY_INCOMPLETE
+    # A rebuild that misses the cache (here: a different lens set changes the map's request) stops at the map,
+    # exits non-zero, is not frozen, and still leaves the paid run alone.
+    assert cli.main([*rebuild, "--run-id", f"{RUN}-r2", "--lens", "regulation"]) == command.REPLAY_INCOMPLETE
     captured = capsys.readouterr()
     assert "replay incomplete: 1 calls" in captured.err and "stopping before the lenses: ReplayMiss" in captured.out
-    assert (run_dir / "replay-2" / "report" / "granskning.html").exists()
+    missed = tender / "runs" / f"{RUN}-r2"
+    assert (missed / "report" / "granskning.html").exists() and _writable(missed)
+    assert freeze.verify(freeze.ledger_file("co-001")).lines == 2
     assert {name: (run_dir / name).read_text() for name in names} == before
     assert summary.read_text() == paid_summary
+
+
+def _writable(*folders: Path) -> list[Path]:
+    return [p for folder in folders for p in (folder, *folder.rglob("*")) if p.lstat().st_mode & 0o222]
 
 
 def test_a_marking_in_a_page_card_stops_the_run(
@@ -394,6 +411,12 @@ def test_a_stopped_run_is_not_frozen_and_a_frozen_run_is_never_resumed(
     assert len(sdk.sent) == sent
     assert {p: p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == frozen
     assert (record / "events.jsonl").read_bytes() == events
+
+    # Its record takes no stop marker either: refused with a reason, never a traceback.
+    assert cli.main(["stop", "co-001", run_id]) == cli.REFUSED
+    err = capsys.readouterr().err
+    assert "a frozen run has finished" in err and "Traceback" not in err
+    assert not (record / "STOP").exists()
 
 
 def test_a_run_that_hits_its_hard_stop_is_not_frozen(

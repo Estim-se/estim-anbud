@@ -1,5 +1,6 @@
-"""A finished Kalkyl run is frozen: its outputs folder and its run record become read-only, files 0o400 and folders
-0o500, so nothing can add to, change or remove what it produced. A rebuild reads a frozen run and writes its own.
+"""A finished run is frozen: its outputs folder and its run record become read-only, files 0o400 and folders 0o500, so
+nothing can add to, change or remove what it produced. A rebuild reads a frozen run and writes its own. Kalkyl and
+Granskning both freeze this way; Granskning also hashes the run into the freeze ledger first (`anbud.evals.freeze`).
 
 The harness never writes symlinks into these folders; one found there is left alone and counted as a failure.
 """
@@ -26,6 +27,8 @@ def freeze_tree(path: Path) -> list[str]:
     """Make every file under `path` 0o400 and every folder, `path` last, 0o500. Returns a reason for each entry that
     couldn't be, never a path, so the caller can say how many failed."""
     failed: list[str] = []
+    if not path.exists() and not path.is_symlink():
+        return []  # nothing was written there
     if not path.is_dir() or path.is_symlink():
         return ["not a folder"]
     for parent, dirs, files in os.walk(path, topdown=False):
