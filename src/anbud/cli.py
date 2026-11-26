@@ -18,8 +18,10 @@ def _run(args: argparse.Namespace) -> int:
     except RunRefused as exc:
         print(f"anbud run: refused: {exc}", file=sys.stderr)
         return REFUSED
-    print(f"anbud run: allowed ({kind}), but the pipeline isn't built yet (phase 1)", file=sys.stderr)
-    return NOT_BUILT
+    # Granskning end to end: page cards, map, lenses, checks, merge, verifier, kronor and the reports.
+    from anbud.granskning.command import run_command
+
+    return run_command(args, kind)
 
 
 def _eval(args: argparse.Namespace) -> int:
@@ -130,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("company_id")
     run.add_argument("tender_id", nargs="?")
     run.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
+    from anbud.granskning.command import add_arguments as add_run_arguments
+
+    add_run_arguments(run)
     ev = sub.add_parser("eval", help="evals (dev now; held-out and prospective from phase 2, never from an agent)")
     ev.add_argument("kind", choices=["dev", "heldout", "prospective"])
     prep = sub.add_parser("prep", help="document preparation: blocks, outline, tiles and the masking report")
