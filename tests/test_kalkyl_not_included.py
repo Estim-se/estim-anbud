@@ -169,7 +169,10 @@ def test_a_post_citing_a_not_included_line_keeps_its_price_and_gets_a_note(tende
         ("Spis och kyl monteras av beställaren", True),
         ("Arbeten i undercentral ingår ej", True),
         ("Gränsdragning mot sidoentreprenad enligt bilaga", True),
+        ("Målning av väggar och tak", True),  # another trade's work by name
+        ("Ventilationsinstallationer", True),
         ("Matning till ventilationsaggregat", False),  # another trade's equipment, fed by this contract
+        ("Ventilation", False),  # a system, not who does the work
         ("Spis, ugn och diskmaskin i varje kök", False),
         ("Befintlig armatur demonteras", False),
         ("Entreprenören ansvarar för samordning", False),  # this contract's own contractor

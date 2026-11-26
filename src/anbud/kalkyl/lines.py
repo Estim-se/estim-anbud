@@ -42,6 +42,9 @@ _OTHER_TRADE = re.compile(
     r"brandlarm|solcell|tak|golv)[-\s]?(?:entreprenör|entreprenad|leverantör|installatör|firma|arbet)\w*"
     r"|\b(?:b|be|v|s|vs|vvs|sr)-(?:entreprenör|entreprenad|handling|ritning)\w*"
     r"|\bvvs\b|\b(?:rörläggare|målare|byggare|snickare|nätägare|elnätsbolag|nätbolag|teleoperatör|operatör)\w*"
+    # Another trade's work by name: never this contract's, in a line or in the heading of its section.
+    r"|\b(?:målning|måleri|snickeri|plattsättning|kakelsättning|tapetsering|golvläggning|murning|putsning)\w*"
+    r"|\b(?:rör|sanitets|vvs-?|ventilations|luftbehandlings|sprinkler)installation\w*"
 )
 _BOUNDARY = re.compile(
     r"\b(?:utförs|levereras|monteras|tillhandahålls|installeras|anskaffas|bekostas|ombesörjs|anslut(?:s|es))\s+av\b"
