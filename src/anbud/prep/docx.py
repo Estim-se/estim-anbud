@@ -22,7 +22,9 @@ _HEADING_STYLE = re.compile(r"^(?:heading|rubrik)\s*(\d)$", re.IGNORECASE)
 def _text(el: Element) -> str:
     parts = []
     for node in el.iter():
-        if node.tag == f"{W}t":
+        if node.tag == f"{W}p" and node is not el:
+            parts.append(" ")  # paragraphs inside a table cell
+        elif node.tag == f"{W}t":
             parts.append(node.text or "")
         elif node.tag in (f"{W}tab", f"{W}br", f"{W}cr"):
             parts.append(" ")
