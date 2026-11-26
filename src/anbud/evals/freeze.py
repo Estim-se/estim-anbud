@@ -346,10 +346,12 @@ def _harness(run_record_dir: Path) -> dict[str, Any]:
     return provenance.code_block(provenance.git_state())
 
 
-def _inputs(company_id: str, tender_id: str | None, root: Path | None) -> tuple[str | None, dict[str, str]]:
+def _inputs(
+    company_id: str, tender_id: str | None, root: Path | None, input_dir: Path | None = None
+) -> tuple[str | None, dict[str, str]]:
     if tender_id is None:
         return None, {}
-    tender = paths.dev_tender_dir(company_id, tender_id, root)
+    tender = input_dir if input_dir is not None else paths.dev_tender_dir(company_id, tender_id, root)
     manifest = tender / "inbox.sha256"
     manifest_sha = _file_sha(manifest) if manifest.is_file() else None
     prep = {name: _file_sha(tender / "prep" / name) for name in PREP_FILES if (tender / "prep" / name).is_file()}
@@ -387,10 +389,15 @@ def freeze_run(
     sealed: bool = False,
     now: datetime | None = None,
     root: Path | None = None,
+    input_dir: Path | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Hash a finished run into the ledger and make its outputs read-only. Returns the record with its
     `line_number` and `line_sha256`. Freezing a run again is a no-op when every hash still matches, and refused
-    otherwise: a frozen prediction never changes."""
+    otherwise: a frozen prediction never changes.
+
+    The exam passes `input_dir`, the tender folder the run read (its inbox manifest and prep are hashed from there
+    rather than from the dev folder), and `extra`, fields of its own such as the input variant."""
     _company(company_id)
     try:
         check_run_id(run_id)
@@ -407,7 +414,7 @@ def freeze_run(
     own_outputs, own_record = _own(company_id, tender_id, run_id, outputs, record_dir, root)
 
     config = repo_hashes()
-    manifest_sha, prep = _inputs(company_id, tender_id, root)
+    manifest_sha, prep = _inputs(company_id, tender_id, root, input_dir)
     record: dict[str, Any] = {
         "v": 1,
         "kind": "freeze",
@@ -424,6 +431,10 @@ def freeze_run(
         "outputs_sha256": _hash_tree(output_files, own_outputs),
         "run_record_sha256": _hash_tree(record_files, own_record),
     }
+    for key, value in (extra or {}).items():
+        if key in record:
+            raise FreezeError(f"an extra field would replace the record's own {key}")
+        record[key] = value
 
     ledger = ledger_file(company_id, sealed, root)
     with _locked(ledger, root):

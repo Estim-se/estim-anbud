@@ -1,0 +1,697 @@
+"""`anbud eval heldout|prospective <co>`: the exam on sealed tenders. Aggregates only.
+
+It runs only where `runguard.held_out_refusal()` allows: a person at a terminal, or the eval lane
+(`ANBUD_EVAL_LANE=1`). Everything it writes stays under `sealed/`. Nothing it prints names a tender, a file or a
+value from a document: counts, sums, costs and one deadline number.
+
+Per tender of the split status asked for:
+
+1. **Quarantine**, before any prep. The sealed delivery (`heldout/<co>/<t>/`, untouched since intake) is unpacked
+   into a staging folder, and intake's own rules hold the answer keys (Q&A, amendments, award, files the notice lists
+   under those headings, unreadable archives) in `sealed/answers/<co>/<t>/intake/`. Two inputs come out of it:
+   - `granskning`: without any answer key, since the Q&A and amendments are Granskning's answer key;
+   - `kalkyl`: the same plus the amendments, as a bidder would have priced, scored against the opening protocol.
+   Each variant is a data root of its own, `sealed/exam/<co>/<kind>/<variant>/`, with the tender laid out as a dev
+   tender there, so the engines run unchanged with `ANBUD_DATA_ROOT` pointing at it.
+2. **Prep** of both variants ($0).
+3. **The estimate**, from prep sizes: each engine's own dry run (Granskning's prefix tokens, Kalkyl's cost range) and
+   the old engine's measured cost per page, times a margin, per engine and in total, beside the worst case (every
+   hard stop). Without `--paid` the exam stops here, after the old engine's dry run on each input.
+4. **Runs** (`--paid`, with a `--budget` at or above the estimate): Granskning on the granskning input, Kalkyl on the
+   kalkyl input, and the old engine at matched settings on both (once when they're the same). A run is not started
+   when it could take the spend past the budget. Each run is frozen into the sealed ledger with the variant it used,
+   its settings and whether it came after the tender's deadline.
+
+For prospective tenders it prints the nearest deadline of the open ones, in days, and warns about every tender whose
+deadline has passed: a run after the deadline isn't a prospective prediction any more.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from anbud import intake, paths
+from anbud import notice as notices
+from anbud.config import CONFIG_DIR
+from anbud.evals import baseline, freeze
+from anbud.evals import split_heldout as sh
+from anbud.store import private_dirs
+
+KINDS = {"heldout": sh.HELDOUT, "prospective": sh.PROSPECTIVE}
+VARIANTS = ("granskning", "kalkyl")
+ENGINES = ("granskning", "kalkyl", "baseline")
+KALKYL_GETS = ("amendment",)  # held kinds a bidder had when pricing; Q&A, award and unknown kinds stay held
+VARIANT_LABELS = {
+    "granskning": "without answer keys (Q&A, amendments, award)",
+    "kalkyl": "with the amendments; without Q&A and award",
+}
+CHILD_ENV_DROP = ("ANBUD_EVAL_LANE", "ANBUD_DATA_ROOT")
+
+
+class ExamError(RuntimeError):
+    """Raised with a reason that names no tender content."""
+
+
+# --- Places -------------------------------------------------------------------------------------------------------
+
+
+def exam_dir(company_id: str, kind: str, root: Path | None = None) -> Path:
+    return (root or paths.data_root()) / "sealed" / "exam" / paths.check_company_id(company_id) / kind
+
+
+def variant_root(company_id: str, kind: str, variant: str, root: Path | None = None) -> Path:
+    return exam_dir(company_id, kind, root) / variant
+
+
+def held_dir(company_id: str, tender_id: str, root: Path | None = None) -> Path:
+    base = root or paths.data_root()
+    return (
+        base / "sealed" / "answers" / paths.check_company_id(company_id) / paths.check_tender_id(tender_id) / "intake"
+    )
+
+
+def _sealed_tender(company_id: str, tender_id: str, root: Path | None) -> Path:
+    return (root or paths.data_root()) / "heldout" / company_id / paths.check_tender_id(tender_id)
+
+
+def exam_config(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
+    return dict(tomllib.loads((config_dir / "budgets.toml").read_text())["exam"])
+
+
+def hard_stops(config_dir: Path = CONFIG_DIR) -> dict[str, float]:
+    budgets = tomllib.loads((config_dir / "budgets.toml").read_text())
+    return {
+        "granskning": float(budgets["run"]["hard_stop"]),
+        "kalkyl": float(budgets["kalkyl"]["hard_stop"]),
+        "baseline": float(budgets["baseline"]["hard_stop"]),
+    }
+
+
+# --- Deadlines ----------------------------------------------------------------------------------------------------
+
+
+def deadline_of(company_id: str, tender_id: str, root: Path | None = None) -> datetime | None:
+    """The bid deadline intake read from the notice, or None (no notice, no deadline, or a folder delivery)."""
+    record = _sealed_tender(company_id, tender_id, root) / "intake.json"
+    if record.is_symlink() or not record.is_file():
+        return None
+    try:
+        value = json.loads(record.read_text(encoding="utf-8")).get("notice", {}).get("deadline")
+        return datetime.fromisoformat(value) if isinstance(value, str) else None
+    except (ValueError, AttributeError):
+        return None
+
+
+@dataclass
+class Deadlines:
+    open: int = 0
+    passed: int = 0
+    unknown: int = 0
+    nearest_days: int | None = None  # of the open ones
+
+
+def deadlines(found: dict[str, datetime | None], now: datetime) -> Deadlines:
+    out = Deadlines()
+    for deadline in found.values():
+        if deadline is None:
+            out.unknown += 1
+        elif intake._is_open(deadline, now):
+            out.open += 1
+            days = (deadline.date() - now.date()).days
+            out.nearest_days = days if out.nearest_days is None else min(out.nearest_days, days)
+        else:
+            out.passed += 1
+    return out
+
+
+# --- Quarantine ---------------------------------------------------------------------------------------------------
+
+
+def _delivery(company_id: str, tender_id: str, root: Path | None) -> tuple[str, Path]:
+    """("zip", the original zip) for a zip delivery, ("folder", the tender folder) for a folder moved unopened."""
+    base = _sealed_tender(company_id, tender_id, root)
+    if base.is_symlink() or not base.is_dir():
+        raise ExamError("a sealed tender's folder is missing or a link")
+    originals = base / "originals"
+    if (base / "intake.json").is_file() and originals.is_dir() and not originals.is_symlink():
+        zips = [p for p in originals.iterdir() if p.suffix == ".zip" and p.is_file() and not p.is_symlink()]
+        if len(zips) != 1:
+            raise ExamError("a sealed zip delivery doesn't hold exactly one original zip")
+        return "zip", zips[0]
+    return "folder", base
+
+
+def _fingerprint(kind: str, source: Path) -> str:
+    if kind == "zip":
+        return intake._sha256_file(source)
+    return intake.folder_fingerprint(source)
+
+
+def _ensure_dev(vroot: Path, company_id: str, tender_id: str) -> None:
+    """The variant root's own split ledger lists the tender as dev, so the engines' run guard lets it run there."""
+    ledger = paths.ledger_path(company_id, vroot)
+    status = sh.load_ledger(ledger).status if ledger.exists() else {}
+    if status.get(tender_id) != sh.DEV:
+        sh.append_events(ledger, [sh._assign(tender_id, sh.DEV, "exam", ())])
+
+
+def _catalogs(vroot: Path, root: Path | None) -> None:
+    source = (root or paths.data_root()) / "catalogs"
+    if not source.is_dir() or source.is_symlink():
+        return
+    private_dirs(vroot / "catalogs")
+    for path in source.glob("*.json"):
+        if path.is_file() and not path.is_symlink():
+            shutil.copyfile(path, vroot / "catalogs" / path.name)
+
+
+def quarantine(company_id: str, kind: str, tender_id: str, root: Path | None = None) -> dict[str, Any]:
+    """Unpack one sealed tender, hold its answer keys and lay out both inputs. Done once per delivery: a tender whose
+    inputs are already laid out from the same delivery is left as it is."""
+    exam = exam_dir(company_id, kind, root)
+    record_path = exam / "tenders" / f"{tender_id}.json"
+    source_kind, source = _delivery(company_id, tender_id, root)
+    fingerprint = _fingerprint(source_kind, source)
+    tenders = {
+        v: paths.dev_tender_dir(company_id, tender_id, variant_root(company_id, kind, v, root)) for v in VARIANTS
+    }
+    if record_path.is_file():
+        old = json.loads(record_path.read_text(encoding="utf-8"))
+        if old.get("source_sha256") == fingerprint and all((t / "inbox.sha256").is_file() for t in tenders.values()):
+            return old
+    staging = exam / ".staging" / tender_id
+    shutil.rmtree(staging, ignore_errors=True)
+    private_dirs(staging)
+    held_to = held_dir(company_id, tender_id, root)
+    try:
+        inbox = staging / "granskning"
+        stats = intake.UnpackStats()
+        if source_kind == "zip":
+            try:
+                intake._safe_unzip(source, inbox, stats)
+                stats.archives_unpacked += 1
+                intake.unpack_all(inbox, stats)
+            except intake._Keep:
+                stats.archives_kept += 1
+                private_dirs(inbox)
+            notice = notices.from_zip(source)
+        else:
+            shutil.copytree(source, inbox, symlinks=True, ignore=shutil.ignore_patterns("intake.json", "source.path"))
+            for path in list(inbox.rglob("*")):
+                if path.is_symlink():
+                    path.unlink()
+            intake.unpack_all(inbox, stats)
+            notice = notices.Notice()
+        shutil.rmtree(held_to, ignore_errors=True)
+        held, lines = intake._hold_answers(inbox, held_to, notice)
+        if lines:
+            intake._write_private(held_to / "intake.sha256", "\n".join(lines) + "\n")
+        kalkyl_inbox = staging / "kalkyl"
+        shutil.copytree(inbox, kalkyl_inbox)
+        given = 0
+        for line in lines:
+            sha, held_kind, rel = line.split("  ", 2)
+            if held_kind not in KALKYL_GETS:
+                continue
+            stored = held_to / f"{sha}{Path(rel).suffix.casefold()[:16]}"
+            target = kalkyl_inbox / rel
+            if target.exists() or not stored.is_file():
+                continue
+            private_dirs(target.parent)
+            shutil.copyfile(stored, target)
+            given += 1
+        manifests = {"granskning": intake._manifest(inbox), "kalkyl": intake._manifest(kalkyl_inbox)}
+        for variant, folder in (("granskning", inbox), ("kalkyl", kalkyl_inbox)):
+            vroot = variant_root(company_id, kind, variant, root)
+            tender = tenders[variant]
+            shutil.rmtree(tender, ignore_errors=True)
+            private_dirs(tender)
+            os.rename(folder, tender / "inbox")
+            intake._write_private(tender / "inbox.sha256", manifests[variant])
+            _ensure_dev(vroot, company_id, tender_id)
+            _catalogs(vroot, root)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    record = {
+        "tender": tender_id,
+        "source": source_kind,
+        "source_sha256": fingerprint,
+        "held": held,
+        "amendments_to_kalkyl": given,
+        "same_input": manifests["granskning"] == manifests["kalkyl"],
+        "files": {v: len(m.splitlines()) for v, m in manifests.items()},
+        "unpack": asdict(stats),
+        "variants": VARIANT_LABELS,
+    }
+    private_dirs(record_path.parent)
+    intake._write_private(record_path, json.dumps(record, indent=1, sort_keys=True))
+    return record
+
+
+# --- Engines ------------------------------------------------------------------------------------------------------
+
+
+@dataclass
+class EngineRun:
+    engine: str
+    variant: str
+    run_id: str
+    exit_code: int | None
+    ok: bool
+    cost_usd: float | None  # None when the run didn't say; counted at its hard stop
+    outputs_dir: Path | None = None
+    record_dir: Path | None = None
+    settings: dict[str, Any] | None = None
+
+
+_PREFIX = re.compile(r"estimated prefix: (\d+) tokens")
+_KALKYL_HIGH = re.compile(r"^cost_usd_est_high: ([\d.]+)$", re.M)
+_KALKYL_COST = re.compile(r"^cost_usd: ([\d.]+)$", re.M)
+_GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
+
+
+class Engines:
+    """The engines, each run as `anbud ...` in a child process whose data root is one variant root. A child's output
+    goes to a log in sealed storage and is read here by code only."""
+
+    def __init__(self, logs: Path, app: Path, app_ref: str, root: Path | None) -> None:
+        self.logs = logs
+        self.app = app
+        self.app_ref = app_ref
+        self.root = root
+        self._app_root: Path | None = None
+        self._app_sha: str | None = None
+
+    def _anbud(self, vroot: Path, args: list[str], log_name: str) -> tuple[int, str]:
+        env = {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
+        env["ANBUD_DATA_ROOT"] = str(vroot)
+        private_dirs(self.logs)
+        log = self.logs / log_name
+        command = [sys.executable, "-c", "import sys; from anbud.cli import main; sys.exit(main())", *args]
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+        intake._write_private(log, proc.stdout + "\n--- stderr ---\n" + proc.stderr)
+        return proc.returncode, proc.stdout
+
+    def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> bool:
+        code, _ = self._anbud(vroot, ["prep", company_id, tender_id], log_name)
+        return code == 0
+
+    def granskning_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> int | None:
+        code, out = self._anbud(vroot, ["run", company_id, tender_id, "--dry-run"], log_name)
+        match = _PREFIX.search(out)
+        return int(match.group(1)) if code == 0 and match else None
+
+    def kalkyl_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> float | None:
+        code, out = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--dry-run"], log_name)
+        match = _KALKYL_HIGH.search(out)
+        return float(match.group(1)) if code == 0 and match else None
+
+    def granskning(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
+        code, out = self._anbud(vroot, ["run", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
+        match = _GRANSKNING_SPENT.search(out)
+        return EngineRun(
+            "granskning",
+            "granskning",
+            run_id,
+            code,
+            code == 0,
+            float(match.group(1)) if match else None,
+            paths.dev_tender_dir(company_id, tender_id, vroot) / "runs" / run_id,
+            paths.company_dir(company_id, vroot) / "runs" / run_id,
+        )
+
+    def kalkyl(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
+        code, out = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
+        match = _KALKYL_COST.search(out)
+        return EngineRun(
+            "kalkyl",
+            "kalkyl",
+            run_id,
+            code,
+            code == 0,
+            float(match.group(1)) if match else None,
+            paths.dev_tender_dir(company_id, tender_id, vroot) / "kalkyl" / run_id,
+            paths.company_dir(company_id, vroot) / "runs" / run_id,
+        )
+
+    def _app_export(self) -> Path:
+        if self._app_root is None:
+            self._app_sha = baseline.resolve_app(self.app, self.app_ref)
+            self._app_root = baseline.export_app(self.app, self._app_sha, self.root)
+        return self._app_root
+
+    def baseline(
+        self, vroot: Path, company_id: str, tender_id: str, variant: str, run_id: str, run_dir: Path, *, dry_run: bool
+    ) -> EngineRun:
+        from anbud.config import load_config
+        from anbud.granskning import provenance
+        from anbud.model_client import keychain_key
+
+        app_root = self._app_export()
+        settings = baseline.matched_basis(vroot)
+        tender = paths.dev_tender_dir(company_id, tender_id, vroot)
+        files = [
+            tender / "inbox" / line.split("  ", 1)[1] for line in (tender / "inbox.sha256").read_text().splitlines()
+        ]
+        manifest = {
+            "kind": "baseline",
+            "run_id": run_id,
+            "tender": f"{company_id}/{tender_id}",
+            "model": baseline.MODEL,
+            "dry_run": dry_run,
+            "exam_variant": variant,
+            "code": {
+                **provenance.code_block(provenance.git_state()),
+                "app_sha": self._app_sha,
+                "engine": baseline.SCRIPT,
+            },
+        }
+        try:
+            result = baseline.run_baseline(
+                run_id=run_id,
+                documents=files,
+                outputs_dir=run_dir / "outputs",
+                record_dir=run_dir / "record",
+                app_root=app_root,
+                hard_stop=hard_stops()["baseline"],
+                timeout_s=float(tomllib.loads((CONFIG_DIR / "budgets.toml").read_text())["baseline"]["timeout_minutes"])
+                * 60,
+                dry_run=dry_run,
+                api_key=lambda: keychain_key(account=load_config().workspace),
+                manifest=manifest,
+                stop_requested=lambda: (paths.data_root() / "STOP").exists(),
+                settings=settings,
+            )
+        except baseline.BaselineError:
+            return EngineRun("baseline", variant, run_id, None, False, 0.0)
+        ok = result.outcome == ("dry_run" if dry_run else "ok")
+        recorded = json.loads((run_dir / "record" / "run.json").read_text(encoding="utf-8")).get("settings")
+        return EngineRun(
+            "baseline",
+            variant,
+            run_id,
+            result.exit_code,
+            ok,
+            result.cost_usd,
+            run_dir / "outputs",
+            run_dir / "record",
+            recorded,
+        )
+
+
+# --- The exam -----------------------------------------------------------------------------------------------------
+
+
+@dataclass
+class Report:
+    kind: str
+    tenders: int = 0
+    quarantined: int = 0
+    held_tenders: int = 0
+    held: dict[str, int] = field(default_factory=dict)
+    amendments_to_kalkyl: int = 0
+    same_input: int = 0
+    prepared: int = 0
+    prep_failed: int = 0
+    documents: int = 0
+    pages: int = 0
+    deadlines: Deadlines | None = None
+    estimate_usd: dict[str, float] = field(default_factory=dict)
+    estimate_unknown: int = 0
+    worst_case_usd: float = 0.0
+    baseline_runs: int = 0
+    dry_runs_ok: dict[str, int] = field(default_factory=dict)
+    dry_runs: dict[str, int] = field(default_factory=dict)
+    paid: bool = False
+    runs_ok: dict[str, int] = field(default_factory=dict)
+    runs_failed: dict[str, int] = field(default_factory=dict)
+    runs_skipped_budget: int = 0
+    runs_after_deadline: int = 0
+    spent_usd: float = 0.0
+    frozen: int = 0
+
+    @property
+    def estimate_total(self) -> float:
+        return round(sum(self.estimate_usd.values()), 2)
+
+
+def _stamp(now: datetime) -> str:
+    return now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _summary(tender: Path) -> dict[str, Any]:
+    path = tender / "prep" / "summary.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def run_exam(
+    company_id: str,
+    kind: str,
+    *,
+    paid: bool = False,
+    budget_usd: float | None = None,
+    engines: tuple[str, ...] = ENGINES,
+    app: Path = baseline.APP_DIR,
+    app_ref: str = baseline.APP_REF,
+    runner: Engines | None = None,
+    now: datetime | None = None,
+    local_now: datetime | None = None,
+    root: Path | None = None,
+    say: Callable[[str], None] = print,
+) -> Report:
+    """The exam. `say` gets aggregate lines only. Raises ExamError before anything is unpacked when it can't start."""
+    if kind not in KINDS:
+        raise ExamError("the exam is heldout or prospective")
+    if paid and (budget_usd is None or budget_usd <= 0):
+        raise ExamError("a paid exam needs --budget, in USD")
+    unknown = set(engines) - set(ENGINES)
+    if unknown:
+        raise ExamError(f"engines are {', '.join(ENGINES)}")
+    now = now or datetime.now(UTC)
+    local_now = local_now or datetime.now()
+    try:
+        status = sh.load_ledger(paths.ledger_path(company_id, root)).status
+    except sh.SplitError as exc:
+        raise ExamError(str(exc)) from None
+    tenders = sorted(t for t, s in status.items() if s == KINDS[kind])
+    report = Report(kind=kind, tenders=len(tenders), paid=paid)
+    exam = exam_dir(company_id, kind, root)
+    stamp = _stamp(now)
+    logs = exam / "logs" / stamp
+    runner = runner or Engines(logs, app, app_ref, root)
+    cfg = exam_config()
+    stops = hard_stops()
+    found = {t: deadline_of(company_id, t, root) for t in tenders}
+    if kind == "prospective":
+        report.deadlines = deadlines(found, local_now)
+    after = {t: d is not None and not intake._is_open(d, local_now) for t, d in found.items()}
+
+    # 1-2. Quarantine and prep.
+    records: dict[str, dict[str, Any]] = {}
+    ready: list[str] = []
+    for t in tenders:
+        record = quarantine(company_id, kind, t, root)
+        records[t] = record
+        report.quarantined += 1
+        report.held_tenders += bool(record["held"])
+        for k, n in record["held"].items():
+            report.held[k] = report.held.get(k, 0) + n
+        report.amendments_to_kalkyl += record["amendments_to_kalkyl"]
+        report.same_input += record["same_input"]
+        ok = all(
+            runner.prep(variant_root(company_id, kind, v, root), company_id, t, f"prep-{t}-{v}.log") for v in VARIANTS
+        )
+        report.prepared += ok
+        report.prep_failed += not ok
+        if ok:
+            ready.append(t)
+            summary = _summary(paths.dev_tender_dir(company_id, t, variant_root(company_id, kind, "granskning", root)))
+            report.documents += int(summary.get("documents") or 0)
+            report.pages += sum((summary.get("pages_by_kind") or {}).values())
+
+    # 3. The estimate, from the engines' own dry runs and prep sizes.
+    margin = float(cfg["margin"])
+    estimate: Counter[str] = Counter()
+    plans: dict[str, list[str]] = {}
+    for t in ready:
+        roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
+        if "granskning" in engines:
+            tokens = runner.granskning_estimate(roots["granskning"], company_id, t, f"estimate-{t}-granskning.log")
+            if tokens is None:
+                report.estimate_unknown += 1
+                estimate["granskning"] += stops["granskning"]
+            else:
+                usd = tokens / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin
+                estimate["granskning"] += min(usd, stops["granskning"])
+            report.worst_case_usd += stops["granskning"]
+        if "kalkyl" in engines:
+            high = runner.kalkyl_estimate(roots["kalkyl"], company_id, t, f"estimate-{t}-kalkyl.log")
+            if high is None:
+                report.estimate_unknown += 1
+                estimate["kalkyl"] += stops["kalkyl"]
+            else:
+                estimate["kalkyl"] += min(high * margin, stops["kalkyl"])
+            report.worst_case_usd += stops["kalkyl"]
+        variants = ["granskning"] if records[t]["same_input"] else list(VARIANTS)
+        plans[t] = variants if "baseline" in engines else []
+        for v in plans[t]:
+            pages = sum((_summary(paths.dev_tender_dir(company_id, t, roots[v])).get("pages_by_kind") or {}).values())
+            estimate["baseline"] += min(pages * float(cfg["baseline_usd_per_page"]) * margin, stops["baseline"])
+            report.worst_case_usd += stops["baseline"]
+            report.baseline_runs += 1
+    report.estimate_usd = {k: round(v, 2) for k, v in sorted(estimate.items())}
+    report.worst_case_usd = round(report.worst_case_usd, 2)
+
+    # The old engine's dry run on each input: the plumbing works, and nothing is sent.
+    if not paid:
+        for t in ready:
+            for v in plans[t]:
+                run_id = f"exam-{kind}-{t}-baseline-{v}-{stamp}-dry"
+                one = runner.baseline(
+                    variant_root(company_id, kind, v, root),
+                    company_id,
+                    t,
+                    v,
+                    run_id,
+                    exam / "baseline" / t / run_id,
+                    dry_run=True,
+                )
+                report.dry_runs["baseline"] = report.dry_runs.get("baseline", 0) + 1
+                report.dry_runs_ok["baseline"] = report.dry_runs_ok.get("baseline", 0) + one.ok
+        _write_exam(exam, stamp, report, records, [])
+        _say(report, say)
+        return report
+
+    # 4. Paid runs, within the budget.
+    assert budget_usd is not None
+    if report.estimate_total > budget_usd:
+        raise ExamError(f"the estimate (${report.estimate_total:.2f}) is above the budget (${budget_usd:.2f})")
+    runs: list[EngineRun] = []
+    for t in ready:
+        roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
+        todo: list[tuple[str, str]] = [(e, e) for e in ("granskning", "kalkyl") if e in engines]
+        todo += [("baseline", v) for v in plans[t]]
+        for engine, variant in todo:
+            if report.spent_usd + stops[engine] > budget_usd:
+                report.runs_skipped_budget += 1
+                continue
+            run_id = f"exam-{kind}-{t}-{engine}{'-' + variant if engine == 'baseline' else ''}-{stamp}"
+            if engine == "granskning":
+                one = runner.granskning(roots[variant], company_id, t, run_id)
+            elif engine == "kalkyl":
+                one = runner.kalkyl(roots[variant], company_id, t, run_id)
+            else:
+                one = runner.baseline(
+                    roots[variant], company_id, t, variant, run_id, exam / "baseline" / t / run_id, dry_run=False
+                )
+            report.spent_usd += stops[engine] if one.cost_usd is None else one.cost_usd
+            bucket = report.runs_ok if one.ok else report.runs_failed
+            bucket[engine] = bucket.get(engine, 0) + 1
+            runs.append(one)
+            if not one.ok or one.outputs_dir is None or one.record_dir is None:
+                continue
+            report.runs_after_deadline += after[t]
+            extra = {
+                "exam": {
+                    "kind": kind,
+                    "engine": engine,
+                    "variant": variant,
+                    "input": VARIANT_LABELS[variant],
+                    "after_deadline": after[t],
+                    "settings": one.settings,
+                }
+            }
+            try:
+                freeze.freeze_run(
+                    company_id,
+                    run_id,
+                    outputs_dir=one.outputs_dir,
+                    run_record_dir=one.record_dir,
+                    tender_id=t,
+                    sealed=True,
+                    input_dir=paths.dev_tender_dir(company_id, t, roots[variant]),
+                    extra=extra,
+                    root=root,
+                )
+                report.frozen += 1
+            except freeze.FreezeError:
+                bucket[engine] -= 1
+                report.runs_failed[engine] = report.runs_failed.get(engine, 0) + 1
+    report.spent_usd = round(report.spent_usd, 2)
+    _write_exam(exam, stamp, report, records, runs)
+    _say(report, say)
+    return report
+
+
+def _write_exam(
+    exam: Path, stamp: str, report: Report, records: dict[str, dict[str, Any]], runs: list[EngineRun]
+) -> None:
+    """The exam's own record, in sealed storage: per tender and per run, ids and counts."""
+    data = {
+        "report": asdict(report),
+        "tenders": records,
+        "runs": [{**asdict(r), "outputs_dir": None, "record_dir": None} for r in runs],
+    }
+    target = exam / "exams" / f"{stamp}.json"
+    private_dirs(target.parent)
+    intake._write_private(target, json.dumps(data, indent=1, sort_keys=True, default=str))
+
+
+def _counts(values: dict[str, int]) -> str:
+    return ", ".join(f"{k} {v}" for k, v in sorted(values.items())) or "none"
+
+
+def _say(r: Report, say: Callable[[str], None]) -> None:
+    """Aggregates only."""
+    say(f"anbud eval {r.kind}: {r.tenders} tenders")
+    say(
+        f"quarantine: answer keys held in {r.held_tenders} of {r.quarantined} ({_counts(r.held)}); "
+        f"{r.amendments_to_kalkyl} amendments given to Kalkyl; {r.same_input} tenders with one input for both"
+    )
+    say(f"prep: {r.prepared} prepared, {r.prep_failed} stopped; {r.documents} documents, {r.pages} pages")
+    if r.deadlines is not None:
+        d = r.deadlines
+        nearest = f"nearest open deadline in {d.nearest_days} days" if d.nearest_days is not None else "none open"
+        say(f"deadlines: {d.open} open, {nearest}; {d.passed} passed; {d.unknown} unknown")
+        if d.passed:
+            say(f"warning: {d.passed} tenders are past their deadline; a run now comes after it")
+    parts = ", ".join(f"{k} ${v:.2f}" for k, v in r.estimate_usd.items()) or "nothing to run"
+    unknown = (
+        f"; {r.estimate_unknown} engine estimates unknown, counted at their hard stop" if r.estimate_unknown else ""
+    )
+    say(
+        f"estimate: ${r.estimate_total:.2f} ({parts}; {r.baseline_runs} old-engine runs){unknown}; "
+        f"worst case ${r.worst_case_usd:.2f} (every hard stop)"
+    )
+    for engine in sorted(r.dry_runs):
+        say(f"dry runs: {engine} {r.dry_runs_ok.get(engine, 0)} of {r.dry_runs[engine]} reached the first model call")
+    if r.paid:
+        say(
+            f"runs: ok {_counts(r.runs_ok)}; failed {_counts(r.runs_failed)}; {r.runs_skipped_budget} not started "
+            f"(budget); spent ${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger"
+        )
+        if r.runs_after_deadline:
+            say(f"warning: {r.runs_after_deadline} frozen runs came after their tender's deadline")
+
+
+def estimate_digest(report: Report) -> str:
+    """A short hash of the estimate, so a paid run can say which estimate it was approved on."""
+    payload = json.dumps({"estimate": report.estimate_usd, "worst": report.worst_case_usd}, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]

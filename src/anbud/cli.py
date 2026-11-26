@@ -27,13 +27,49 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _eval(args: argparse.Namespace) -> int:
-    if args.kind in ("heldout", "prospective"):
-        refusal = held_out_refusal()
+    if args.kind not in ("heldout", "prospective"):
+        print(f"anbud eval {args.kind}: not built yet", file=sys.stderr)
+        return NOT_BUILT
+    refusal = held_out_refusal()
+    if refusal:
+        print(f"anbud eval {args.kind}: refused: {refusal}", file=sys.stderr)
+        return REFUSED
+    if not args.company_id:
+        print(f"anbud eval {args.kind}: give a company id", file=sys.stderr)
+        return REFUSED
+    import os
+
+    from anbud.evals import exam
+    from anbud.granskning import provenance
+
+    if args.paid:
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            print(f"anbud eval {args.kind}: refused: paid calls never run in CI", file=sys.stderr)
+            return REFUSED
+        refusal = provenance.paid_refusal(provenance.git_state())
         if refusal:
             print(f"anbud eval {args.kind}: refused: {refusal}", file=sys.stderr)
             return REFUSED
-    print(f"anbud eval {args.kind}: not built yet", file=sys.stderr)
-    return NOT_BUILT
+    engines = tuple(args.engines.split(",")) if args.engines else exam.ENGINES
+    try:
+        report = exam.run_exam(
+            args.company_id,
+            args.kind,
+            paid=args.paid,
+            budget_usd=args.budget,
+            engines=engines,
+            app=(args.app or exam.baseline.APP_DIR).expanduser(),
+            app_ref=args.app_ref or exam.baseline.APP_REF,
+        )
+    except (exam.ExamError, ValueError) as exc:
+        print(f"anbud eval {args.kind}: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    except Exception as exc:  # the message may hold a path or a name, so only the type is shown
+        print(f"anbud eval {args.kind}: stopped: {type(exc).__name__}", file=sys.stderr)
+        return REFUSED
+    print(f"estimate id: {exam.estimate_digest(report)}")
+    failed = sum(report.runs_failed.values()) + report.prep_failed
+    return 1 if failed else 0
 
 
 def _prep(args: argparse.Namespace) -> int:
@@ -539,6 +575,14 @@ def main(argv: list[str] | None = None) -> int:
     add_run_arguments(run)
     ev = sub.add_parser("eval", help="evals (dev now; held-out and prospective from phase 2, never from an agent)")
     ev.add_argument("kind", choices=["dev", "heldout", "prospective"])
+    ev.add_argument("company_id", nargs="?")
+    ev.add_argument(
+        "--paid", action="store_true", help="run the engines (paid); without it: quarantine, prep, estimate"
+    )
+    ev.add_argument("--budget", type=float, help="USD for the whole exam; required with --paid, at least the estimate")
+    ev.add_argument("--engines", help="comma-separated: granskning,kalkyl,baseline (default: all three)")
+    ev.add_argument("--app", type=Path, help="the app checkout for the old engine (default as for anbud baseline)")
+    ev.add_argument("--app-ref", help="the app commit for the old engine (default: origin/main)")
     prep = sub.add_parser("prep", help="document preparation: blocks, outline, tiles and the masking report")
     prep.add_argument("company_id")
     prep.add_argument("tender_id", nargs="?")
