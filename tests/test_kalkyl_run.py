@@ -314,6 +314,7 @@ def test_the_cli_dry_run_costs_nothing_and_paid_runs_never_start_in_ci(
     assert cli.main(["kalkyl", "co-001", "t-0001", "--dry-run", "--catalog", "synthetic"]) == 0
     out = capsys.readouterr().out
     assert "chunks: 2" in out and "cost_usd_est_high" in out
+    assert cli.main(["kalkyl", "co-001", "t-0001", "--replay"]) == cli.REFUSED  # a replay names its run
     monkeypatch.setenv("CI", "true")
     assert cli.main(["kalkyl", "co-001", "t-0001", "--catalog", "synthetic"]) == cli.REFUSED
 

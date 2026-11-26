@@ -77,6 +77,9 @@ def _kalkyl(args: argparse.Namespace) -> int:
         print(f"anbud kalkyl: refused: {exc}", file=sys.stderr)
         return REFUSED
     try:
+        if args.replay and not args.run_id:
+            print("anbud kalkyl: --replay needs the --run-id of a stored run", file=sys.stderr)
+            return REFUSED
         if args.dry_run:
             summary = plan(args.company_id, args.tender_id, catalog_name=args.catalog)
         else:
