@@ -1,0 +1,42 @@
+# Granskning settings after the lenses: kronor, verifier weights, ranking and the report cap.
+# The verifier's top_n and random sample size live in budgets.toml [verifier].
+# No catalog prices here: catalogs load at run time from ~/estim-anbud-data/catalogs/<name>.json.
+
+[kronor]
+default_catalog = "estim-default"
+# Below this a flag is "minor" unless it carries a contractual exposure (the customer confirms the figure).
+materiality_sek = 20000
+# A flag code can't price ranks as if it were worth this much, and is labelled unpriced.
+unpriced_sek = 20000
+# Estim's assumption for what a bank guarantee costs per year, as a percent of the guaranteed sum.
+guarantee_cost_percent_per_year = 1.0
+
+# The kronor range around the point estimate, per money-basis kind: low = (1 - spread), high = (1 + spread).
+[kronor.spread]
+missing_post = 0.25
+quantity_gap = 0.25
+hours_gap = 0.30
+contract_formula = 0.0
+
+[verdict_weights]
+confirmed = 1.0
+partly = 0.6
+refuted = 0.0
+# Not checked by the verifier (below the cut and not sampled), or the verifier failed to submit.
+unverified = 0.4
+
+[adjustments]
+# Multiplied into the score when the verifier says the calc already covers the flag.
+covered_by_calc = 0.0
+# Multiplied into the score when the verifier says the money isn't the electrical subcontractor's.
+other_trade = 0.5
+
+[rank]
+max_shown = 15
+max_generic = 10
+# Accepted / shown per lens, per company. 1.0 until 40 labels exist for a lens.
+default_action_rate = 1.0
+
+[merge]
+max_tokens = 8000
+effort = "medium"
