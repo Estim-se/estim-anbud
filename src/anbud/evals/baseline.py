@@ -18,6 +18,7 @@ frozen. The CLI prints counts, costs, timings and ids only.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -44,6 +45,11 @@ SCRIPT = "scripts/run-anbud-local.ts"
 MODEL = "claude-sonnet-5"  # the script's forced tool_choice rules out 5.5
 SUFFIXES = (".pdf", ".docx", ".xlsx")  # what the script reads; everything else is counted as skipped
 PRELOAD = Path(__file__).resolve().with_name("baseline_preload.mjs")
+SETTINGS_SCRIPT = Path(__file__).resolve().with_name("baseline_settings.mjs")
+# "matched" prices on Kalkyl's basis: the default catalog's hourly rate, list prices as material with no discount or
+# markup, and no establishment or contingency. "app-defaults" is the script's own example settings (the app today).
+BASES = ("matched", "app-defaults")
+ZERO_MARKUPS = {"material_markup": 0, "list_discount": 0, "establishment": 0, "contingency": 0}
 EXIT_CODES = {0: "ok", 86: "hard_stop", 87: "blocked", 88: "dry_run"}
 POLL_SECONDS = 2.0
 
@@ -177,7 +183,9 @@ def dev_inbox_files(company_id: str, tender_id: str, root: Path | None = None) -
 # --- The engine ---------------------------------------------------------------------------------------------------
 
 
-def engine_command(bun: str, app_root: Path, documents: Path, out_file: Path) -> list[str]:
+def engine_command(
+    bun: str, app_root: Path, documents: Path, out_file: Path, settings: Path | None = None
+) -> list[str]:
     return [
         bun,
         "--no-env-file",
@@ -189,6 +197,7 @@ def engine_command(bun: str, app_root: Path, documents: Path, out_file: Path) ->
         str(documents),
         "--out",
         str(out_file),
+        *(["--settings", str(settings)] if settings is not None else []),
     ]
 
 
@@ -207,6 +216,56 @@ def engine_env(
         "ANBUD_BASELINE_PRICE": json.dumps(price),
         "ANBUD_BASELINE_DRY": "1" if dry_run else "0",
     }
+
+
+def matched_basis(root: Path | None = None, config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
+    """Kalkyl's pricing basis: its default catalog's hourly rate and no markups. Returns the settings values and, for
+    the run record, the catalog's name and hash."""
+    name = tomllib.loads((config_dir / "kalkyl.toml").read_text())["catalog"]["default"]
+    path = (root or paths.data_root()) / "catalogs" / f"{name}.json"
+    if path.is_symlink() or not path.is_file():
+        raise BaselineError("Kalkyl's default catalog file is missing; matched settings need its hourly rate")
+    data = path.read_bytes()
+    rate = json.loads(data).get("hourly_rate")
+    if not isinstance(rate, int | float) or rate <= 0:
+        raise BaselineError("Kalkyl's default catalog has no hourly rate; matched settings need one")
+    return {
+        "values": {"hourly_rate": rate, **ZERO_MARKUPS},
+        "catalog": name,
+        "catalog_sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def write_settings(bun: str, app_root: Path, values: dict[str, Any], out: Path, tmp: Path) -> str:
+    """The old engine's settings on `values`, built by the app's own code from the exported commit, under the preload
+    in dry-run mode (so no network). Returns the file's sha256. The app's messages are never shown."""
+    env = {
+        "PATH": f"{Path(bun).parent}:/usr/bin:/bin",
+        "HOME": str(Path.home()),
+        "TMPDIR": str(tmp),
+        "ANBUD_BASIS": json.dumps(values),
+        "ANBUD_BASELINE_CALLS": str(tmp / "settings-calls.jsonl"),
+        "ANBUD_BASELINE_HARD_STOP": "0.01",
+        "ANBUD_BASELINE_PRICE": json.dumps(baseline_price()),
+        "ANBUD_BASELINE_DRY": "1",
+    }
+    command = [
+        bun,
+        "--no-env-file",
+        "--no-install",
+        f"--tsconfig-override={app_root / 'tsconfig.json'}",
+        f"--preload={PRELOAD}",
+        str(SETTINGS_SCRIPT),
+        str(app_root),
+        str(out),
+    ]
+    try:
+        proc = subprocess.run(command, env=env, cwd=tmp, capture_output=True, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise BaselineError("the settings could not be built") from None
+    if proc.returncode != 0 or not out.is_file():
+        raise BaselineError(f"the settings could not be built (exit {proc.returncode})")
+    return hashlib.sha256(out.read_bytes()).hexdigest()
 
 
 def read_calls(calls_log: Path) -> dict[str, Any]:
@@ -303,10 +362,13 @@ def run_baseline(
     api_key: Callable[[], str],
     manifest: dict[str, Any],
     stop_requested: Callable[[], bool],
+    settings: dict[str, Any] | None = None,
     bun: str | None = None,
 ) -> Outcome:
     """One engine run. The caller has checked who may run and where outputs go; this copies the documents into a
-    work folder inside the run record, runs the engine and removes the work folder again."""
+    work folder inside the run record, runs the engine and removes the work folder again. With `settings` (a
+    basis from `matched_basis`), the engine prices on them through `record/settings.json`, whose hash the record
+    keeps; without, on the script's own example settings."""
     check_run_id(run_id)
     if not hard_stop > 0:
         raise BaselineError("the hard stop must be above $0")
@@ -320,7 +382,13 @@ def run_baseline(
     private_dirs(work / "tmp")
     calls_log = record_dir / "calls.jsonl"
     out_file = outputs_dir / "engine.json"
+    settings_file = record_dir / "settings.json" if settings is not None else None
+    if settings is None:
+        manifest = {**manifest, "settings": {"basis": "app-defaults"}}
     try:
+        if settings_file is not None and settings is not None:
+            sha = write_settings(bun, app_root, settings["values"], settings_file, work / "tmp")
+            manifest = {**manifest, "settings": {"basis": "matched", **settings, "sha256": sha}}
         count, skipped = flat_documents(documents, work / "documents")
         if not count:
             raise BaselineError("no PDF, DOCX or XLSX file to read")
@@ -331,7 +399,7 @@ def run_baseline(
         env = engine_env(bun, key, calls_log, hard_stop, baseline_price(), dry_run, work / "tmp")
         del key
         outcome, code, seconds = run_engine(
-            engine_command(bun, app_root, work / "documents", out_file),
+            engine_command(bun, app_root, work / "documents", out_file, settings_file),
             env,
             cwd=work,
             log_file=record_dir / "engine.log",
@@ -366,9 +434,10 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def new_run_id(tender_id: str, app_sha: str, dry_run: bool, now: datetime | None = None) -> str:
+def new_run_id(tender_id: str, app_sha: str, dry_run: bool, now: datetime | None = None, basis: str = "matched") -> str:
     stamp = (now or datetime.now(UTC)).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"baseline-{tender_id}-{app_sha[:7]}-{stamp}{'-dry' if dry_run else ''}"
+    tag = "matched" if basis == "matched" else "defaults"
+    return f"baseline-{tender_id}-{app_sha[:7]}-{tag}-{stamp}{'-dry' if dry_run else ''}"
 
 
 def run_dev(
@@ -381,6 +450,7 @@ def run_dev(
     app_ref: str = APP_REF,
     code: dict[str, Any],
     stop_requested: Callable[[Path], bool],  # given the run's stop marker
+    basis: str = "matched",
     api_key: Callable[[], str] | None = None,
     root: Path | None = None,
     now: datetime | None = None,
@@ -391,9 +461,12 @@ def run_dev(
     if hard_stop is not None and hard_stop > cap:
         raise BaselineError(f"--hard-stop may lower the ${cap:.2f} hard stop, never raise it")
     stop = cap if hard_stop is None else hard_stop
+    if basis not in BASES:
+        raise BaselineError(f"settings are one of: {', '.join(BASES)}")
+    settings = matched_basis(root) if basis == "matched" else None
     sha = resolve_app(app, app_ref)
     app_root = export_app(app, sha, root)
-    run_id = new_run_id(tender_id, sha, dry_run, now)
+    run_id = new_run_id(tender_id, sha, dry_run, now, basis)
     run_dir = paths.baseline_dir(company_id, tender_id, root) / run_id
     if run_dir.exists():
         raise BaselineError("a run with this id exists already")
@@ -427,6 +500,7 @@ def run_dev(
         api_key=api_key,
         manifest=manifest,
         stop_requested=lambda: stop_requested(marker),
+        settings=settings,
     )
 
 

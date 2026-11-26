@@ -4,6 +4,7 @@ host), or a stub preloaded before ours answers fetch with a made-up stream. Ever
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -268,6 +269,7 @@ def test_a_baseline_run_lands_under_predictions_and_nothing_under_dev(data_root:
         app_ref="HEAD",
         code={"harness_sha": "x"},
         stop_requested=lambda _: False,
+        basis="app-defaults",
         api_key=lambda: "test-key-never-sent",
         now=NOW,
     )
@@ -325,3 +327,61 @@ def test_a_moved_frozen_run_is_relocated_only_when_every_hash_matches(data_root:
     last = json.loads(freeze.ledger_file("co-001").read_text().splitlines()[-1])
     assert last["outputs_dir"] == "predictions/co-001/baseline/t-0001/r1/outputs" and last["frozen_line"] == 1
     assert freeze.freezes_by_tender(freeze.ledger_file("co-001")) == {"co-001/t-0001": 1}
+
+
+LIB = {
+    "src/lib/tender-calculation.ts": "export const emptyCalculationSettings = { hourly_rate: 0, material_markup: 0, "
+    "list_discount: 0, establishment: 0, contingency: 0, post_types: [], example_values: false };\n"
+    "export function validateSettingsInput(v: any) { return v; }\n",
+    "src/lib/tender-example-catalog.ts": "export function withExamplePostTypes(s: any) "
+    "{ return { ...s, post_types: [{ id: 'p1' }], example_values: true }; }\n",
+}
+ECHO = """
+import { readFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+const i = args.indexOf('--settings');
+const settings = i >= 0 ? JSON.parse(readFileSync(args[i + 1], 'utf8')) : null;
+writeFileSync(args[args.indexOf('--out') + 1], JSON.stringify({ total: 1, rows: [], settings }));
+"""
+
+
+@needs_bun
+def test_matched_settings_price_on_kalkyls_rate_with_no_markups(data_root: Path, tmp_path: Path) -> None:
+    dev_tender(data_root)
+    (data_root / "catalogs").mkdir()
+    (data_root / "catalogs" / "estim-default.json").write_text(json.dumps({"hourly_rate": 640.0, "items": []}))
+    app = fake_app(tmp_path, ECHO)
+    for rel, text in LIB.items():
+        (app / rel).parent.mkdir(parents=True, exist_ok=True)
+        (app / rel).write_text(text)
+    git(app, "add", "-A")
+    git(app, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "lib")
+    result = baseline.run_dev(
+        "co-001",
+        "t-0001",
+        dry_run=False,
+        app=app,
+        app_ref="HEAD",
+        code={},
+        stop_requested=lambda _: False,
+        api_key=lambda: "test-key-never-sent",
+        now=NOW,
+    )
+    assert result.outcome == "ok" and "-matched-" in result.run_id
+    run_dir = paths.baseline_dir("co-001", "t-0001") / result.run_id
+    used = json.loads((run_dir / "outputs" / "engine.json").read_text())["settings"]
+    assert used["hourly_rate"] == 640.0 and used["post_types"] == [{"id": "p1"}]
+    assert all(used[k] == 0 for k in baseline.ZERO_MARKUPS)
+    recorded = json.loads((run_dir / "record" / "run.json").read_text())["settings"]
+    assert recorded["basis"] == "matched" and recorded["values"] == {"hourly_rate": 640.0, **baseline.ZERO_MARKUPS}
+    assert recorded["sha256"] == hashlib.sha256((run_dir / "record" / "settings.json").read_bytes()).hexdigest()
+    assert recorded["catalog"] == "estim-default" and len(recorded["catalog_sha256"]) == 64
+
+
+def test_matched_settings_need_the_catalogs_hourly_rate(data_root: Path) -> None:
+    with pytest.raises(baseline.BaselineError, match="missing"):
+        baseline.matched_basis()
+    (data_root / "catalogs").mkdir()
+    (data_root / "catalogs" / "estim-default.json").write_text(json.dumps({"hourly_rate": 0.0}))
+    with pytest.raises(baseline.BaselineError, match="no hourly rate"):
+        baseline.matched_basis()
