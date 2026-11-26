@@ -83,6 +83,22 @@ class Marking(_Model):
     kind: MarkingKind
 
 
+class CellText(_Model):
+    """One masked cell of a row: its column (a sheet's letter, or a PDF table row's position from 1) and text."""
+
+    col: str
+    text: str
+    numeric: bool = False
+
+
+class RowCells(_Model):
+    """The cells of one sheet_row or table_row block, for code that reads tables (`prep/cells.jsonl`). Joined with
+    ` | ` they are the block's text."""
+
+    block_id: str
+    cells: list[CellText]
+
+
 class DocPrep(_Model):
     version: str
     doc_id: str
@@ -98,3 +114,4 @@ class DocPrep(_Model):
     masked: list[MaskedSpan] = []
     markings: list[Marking] = []
     furniture_dropped: int = 0
+    cells: list[RowCells] = []
