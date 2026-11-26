@@ -14,3 +14,12 @@ output = 10.00
 cache_write_5m = 2.50 # 1.25x input, the standard 5-minute write rate
 cache_write_1h = 4.00
 cache_read = 0.10
+
+# The old engine's pinned model, for the baseline wrapper only (`anbud baseline`). The rates match the app's
+# scripts/run-anbud-local.ts; the 1h cache write is set at 2x input, as for the other models.
+[claude-sonnet-5]
+input = 2.00
+output = 10.00
+cache_write_5m = 2.50
+cache_write_1h = 4.00
+cache_read = 0.20
