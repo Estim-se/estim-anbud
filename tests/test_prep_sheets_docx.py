@@ -84,3 +84,54 @@ def test_docx_headings_tables_and_tracked_changes() -> None:
         ("table_row", "Post | Antal inre"),
     ]
     assert [(o.level, o.number) for o in builder.outline] == [(1, None), (2, "2.1")]
+
+
+def test_docx_content_controls_headers_footers_and_footnotes() -> None:
+    def run(text: str) -> str:
+        return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+    def sdt(inner: str) -> str:
+        return f"<w:sdt><w:sdtPr/><w:sdtContent>{inner}</w:sdtContent></w:sdt>"
+
+    cell = "<w:tc>" + run("Antal") + "</w:tc>"
+    body = (
+        sdt(run("Text i en innehållskontroll"))
+        + "<w:customXml>"
+        + run("Text i anpassad XML")
+        + "</w:customXml>"
+        + "<w:tbl>"
+        + sdt("<w:tr><w:tc>" + run("Post") + "</w:tc>" + sdt(cell) + "</w:tr>")
+        + "</w:tbl>"
+    )
+    parts = {
+        "word/header1.xml": run("Rambeskrivning, revision C"),
+        "word/header2.xml": run("Rambeskrivning, revision C"),  # the same text in the first-page header
+        "word/footer1.xml": run("Kontakt c.exempel@example.se"),
+        "word/footnotes.xml": '<w:footnote w:id="1">' + run("Gäller även garage.") + "</w:footnote>",
+    }
+    builder = builder_for(data := make_docx(body, parts))
+    read_docx(data, builder)
+    assert [(b.kind, b.text) for b in builder.blocks] == [
+        ("paragraph", "Text i en innehållskontroll"),
+        ("paragraph", "Text i anpassad XML"),
+        ("table_row", "Post | Antal"),
+        ("paragraph", "Rambeskrivning, revision C"),
+        ("paragraph", "Kontakt [e-post]"),
+        ("paragraph", "Gäller även garage."),
+    ]
+
+
+def test_xlsx_print_headers_and_footers_are_read_and_gated() -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Kalkyl"
+    ws.append(["Pos", "Antal"])
+    ws.oddHeader.center.text = "Handlingen är HEMLIG"
+    ws.oddFooter.right.text = "Sida &P av &N"
+    buf = io.BytesIO()
+    wb.save(buf)
+    builder = builder_for(data := buf.getvalue())
+    read_xlsx(data, builder)
+    texts = [b.text for b in builder.blocks if b.kind == "paragraph"]
+    assert texts == ["Handlingen är HEMLIG", "Sida av"]
+    assert [m.kind for m in builder.markings] == ["hemlig"]

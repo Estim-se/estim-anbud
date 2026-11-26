@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,68 @@ def test_a_vector_drawing_is_tiled_and_its_labels_stay_separate(tmp_path: Path) 
 def test_a_blank_page_gets_no_tiles(tmp_path: Path) -> None:
     _, pages, tiles, _ = read(make_pdf([Page()]), tmp_path)
     assert pages[0].kind == "blank" and tiles == []
+
+
+def test_a_short_stamp_becomes_a_block_and_reaches_the_gate(tmp_path: Path) -> None:
+    builder, pages, _, _ = read(make_pdf([Page(texts=[Text(60, 60, "HEMLIG", 14)])]), tmp_path)
+    assert pages[0].kind == "text" and [b.text for b in builder.blocks] == ["HEMLIG"]
+    assert [m.kind for m in builder.markings] == ["hemlig"]
+    scan = make_pdf([Page(size=A2, image=(120, 170), texts=[Text(60, 60, "HEMLIG", 14)])])
+    builder, pages, tiles, _ = read(scan, tmp_path / "scan")
+    assert pages[0].kind == "scan" and tiles and [m.kind for m in builder.markings] == ["hemlig"]
+
+
+def test_a_rotated_page_reads_in_display_order(tmp_path: Path) -> None:
+    texts = [
+        Text(60, 90, "Rubrik på en liggande sida", 16, bold=True),
+        Text(60, 130, "Texten på den liggande sidan löper från vänster till höger.", 10),
+    ]
+    builder, pages, _, _ = read(make_pdf([Page(rotate=90, texts=texts)]), tmp_path)
+    assert (pages[0].width, pages[0].height) == (842.0, 595.0)
+    assert [(b.kind, b.text) for b in builder.blocks] == [
+        ("heading", "Rubrik på en liggande sida"),
+        ("paragraph", "Texten på den liggande sidan löper från vänster till höger."),
+    ]
+    box = builder.blocks[1].box
+    assert box is not None and 55 < box.x0 < 65 and 125 < box.y0 < 135  # display coordinates
+
+
+def test_a_soft_hyphen_joins_the_word_across_lines(tmp_path: Path) -> None:
+    texts = [
+        Text(60, 100, "Entreprenaden omfattar installation av belysnings-", 10),
+        Text(60, 112, "armaturer i alla trapphus och korridorer.", 10),
+    ]
+    builder, _, _, _ = read(make_pdf([Page(texts=texts)]), tmp_path)
+    assert [b.text for b in builder.blocks] == [
+        "Entreprenaden omfattar installation av belysningsarmaturer i alla trapphus och korridorer."
+    ]
+
+
+def test_a_title_block_with_changing_drawing_numbers_is_not_furniture(tmp_path: Path) -> None:
+    pages = [
+        Page(texts=[Text(60, 300, f"Planritning plan {n}", 10), Text(400, 800, f"Ritning E-10{n + 4}", 9)])
+        for n in range(1, 5)
+    ]
+    builder, _, _, dropped = read(make_pdf(pages), tmp_path)
+    assert dropped == 0
+    assert sum(b.text.startswith("Ritning E-10") for b in builder.blocks) == 4
+
+
+def test_personal_data_is_painted_over_on_drawing_tiles(tmp_path: Path) -> None:
+    from PIL import Image
+
+    labels = [Text(100, 100, "Central C1", 8), Text(100, 400, "Kontakt Tel: 08-111 222 33", 30)]
+    page = Page(size=A3_LANDSCAPE, vector_lines=300, texts=labels)
+    builder, _, tiles, _ = read(make_pdf([page]), tmp_path)
+    assert any(b.text == "Kontakt Tel: [telefon]" for b in builder.blocks)
+    store = RunStore("co-001", tmp_path / "data")
+    image = Image.open(io.BytesIO(store.get_blob(tiles[0].blob))).convert("L")
+    scale = tiles[0].dpi / 72
+    phone_x = 100 + 13 * 30 * 0.6  # roughly where the digits sit, after "Kontakt Tel: "
+    darkness = [image.getpixel((round((phone_x + dx) * scale), round(418 * scale))) for dx in range(0, 120, 10)]
+    assert max(darkness) < 30  # a black box, not white paper with digits
+    label_row = [image.getpixel((round((100 + dx) * scale), round(104 * scale))) for dx in range(0, 40, 2)]
+    assert max(label_row) > 200  # the unmasked label is not painted over
 
 
 @pytest.mark.parametrize("width,height", [(100, 100), (2576, 2576), (2577, 900), (4962, 3508), (9933, 7016)])
