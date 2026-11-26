@@ -74,6 +74,11 @@ def check_record(record: QuantityRecord, chunk: Chunk, corpus: Corpus) -> str | 
             return f"the row count {record.quantity:g} isn't written in the quotes"
     elif src == "missing" and record.quantity is not None:
         return "quantity_source missing can't carry a quantity"
+    if record.contains and record.record_kind != "object":
+        return "contains is for object records"
+    for item in record.contains:
+        if not _close(item.quantity, 1) and not any(_close(item.quantity, n) for n in written):
+            return f"contains: {item.quantity:g} {item.object_kind} isn't written in the quotes"
     return None
 
 

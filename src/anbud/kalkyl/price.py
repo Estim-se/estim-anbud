@@ -100,14 +100,19 @@ def count_objects(records: list[VerifiedRecord]) -> dict[str, ObjectCount]:
         r = v.record
         if r.record_kind != "object" or r.object_kind is None or r.scope not in ("included", "unclear"):
             continue
-        kind = r.object_kind
         if r.quantity_source == "list_row":
-            rows[kind].setdefault(v.block_ids[0], Decimal(str(r.quantity if r.quantity is not None else 1)))
+            n = Decimal(str(r.quantity if r.quantity is not None else 1))
         elif r.quantity_source == "stated" and r.quantity is not None:
-            totals[kind][_norm(r.location)].add(Decimal(str(r.quantity)))
+            n = Decimal(str(r.quantity))
         else:
             continue
-        ids[kind].append(v.id)
+        # The object itself, then what each one holds (an apartment row's kitchens and rooms), counted the same way.
+        for kind, count in [(r.object_kind, n), *((c.object_kind, n * Decimal(str(c.quantity))) for c in r.contains)]:
+            if r.quantity_source == "list_row":
+                rows[kind].setdefault(v.block_ids[0], count)
+            else:
+                totals[kind][_norm(r.location)].add(count)
+            ids[kind].append(v.id)
     out: dict[str, ObjectCount] = {}
     for kind in sorted(set(rows) | set(totals)):
         candidates: list[tuple[Decimal, str]] = []

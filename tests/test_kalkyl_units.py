@@ -318,3 +318,30 @@ def test_every_quantity_line_is_used_or_listed_with_a_reason(corpus: Corpus) -> 
     assert listed["aaaaaa-000007"].reason.startswith("Citatet underkändes")
     assert listed["aaaaaa-000004"].reason.startswith("Ej omhändertaget")
     assert listed["bbbbbb-000002"].reason == "Ej läst: körningens budget tog slut"
+
+
+def test_a_list_row_counts_what_each_object_holds(corpus: Corpus) -> None:
+    chunk = make_chunks(corpus, 12000, 30)[1]
+    row = obj(
+        "apartment",
+        "list_row",
+        [cite("bbbbbb-000002", "1001 | 3 | 1 | 1")],
+        contains=[{"object_kind": "room", "quantity": 3}, {"object_kind": "kitchen", "quantity": 1}],
+    )
+    assert check_record(_record(**row), chunk, corpus) is None
+    unwritten = {**row, "contains": [{"object_kind": "room", "quantity": 5}]}
+    assert "isn't written" in (check_record(_record(**unwritten), chunk, corpus) or "")
+    on_requirement = req("X", "stated", "st", [cite("bbbbbb-000002", "3")], quantity=3, contains=row["contains"])
+    assert "object records" in (check_record(_record(**on_requirement), chunk, corpus) or "")
+    second = obj(
+        "apartment",
+        "list_row",
+        [cite("bbbbbb-000003", "1002 | 2 | 1 | 1")],
+        contains=[{"object_kind": "room", "quantity": 2}, {"object_kind": "kitchen", "quantity": 1}],
+    )
+    total = obj(
+        "apartment", "stated", [cite("t", "2 lgh")], quantity=2, contains=[{"object_kind": "kitchen", "quantity": 1}]
+    )
+    objects = count_objects(_verified([row, second, total]))
+    assert (objects["apartment"].count, objects["room"].count, objects["kitchen"].count) == (2, 5, 2)
+    assert objects["kitchen"].conflict is None  # two rows with one kitchen each agree with 2 apartments of one kitchen

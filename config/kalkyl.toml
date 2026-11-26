@@ -15,7 +15,7 @@ max_quantity_lines = 30
 model = "sonnet"
 effort = "medium"
 max_tokens = 12000
-max_turns = 3 # the submission, one repair or nudge, and one spare
+max_turns = 2 # the submission, then one repair turn or one nudge
 concurrency = 4
 
 [match] # R3: posts R2 left without a usable catalog item, a constrained choice among catalog ids

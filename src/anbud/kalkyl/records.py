@@ -29,6 +29,11 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class Contained(_Model):
+    object_kind: ObjectKind
+    quantity: float = Field(ge=0, description="How many in each counted object, as written")
+
+
 class QuantityRecord(_Model):
     record_kind: Literal["requirement", "object"] = Field(
         description="object: a building object the documents list or count (one row of a room list, a stated total). "
@@ -57,6 +62,12 @@ class QuantityRecord(_Model):
     )
     catalog_id: str | None = Field(
         default=None, max_length=80, description="The catalog item that fits, from the catalog list; leave out if none"
+    )
+    contains: list[Contained] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Object records only: what each counted object holds as the quote writes it, such as the rooms, "
+        "kitchens and bathrooms of one apartment row",
     )
     citations: list[Citation] = Field(min_length=1, max_length=3, description="One to three consecutive blocks")
 

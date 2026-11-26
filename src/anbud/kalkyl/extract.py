@@ -40,8 +40,8 @@ Submit records with submit_quantities, once, at the end:
 the document's words), its type code if one is written, the unit, the location if stated, and the scope.
 - object: a building object the documents list or count, for the object model: one row of an apartment or room list \
 (quantity_source list_row, object_kind apartment, premises and so on), or a stated total such as a number of \
-apartments in the contract (quantity_source stated). When one list row also gives rooms (kitchens, bathrooms, WC, \
-rooms), add one object record per kind with the number the row writes, citing the same row.
+apartments in the contract (quantity_source stated). When a list row also gives what the object holds (rooms, \
+kitchens, bathrooms, WC), put each kind with the number the row writes in contains: one record per row.
 
 How a requirement's quantity is stated (quantity_source):
 - stated: the quote writes the number. Put that number in quantity, exactly as written.
