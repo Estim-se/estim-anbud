@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -110,7 +111,9 @@ def _setup(data_root: Path):
 def _extract(sdk: Any, catalog, corpus, chunk):
     from anbud.kalkyl.extract import chunk_message
 
-    settings = load_kalkyl_config().roles[EXTRACT]
+    settings = replace(
+        load_kalkyl_config().roles[EXTRACT], follow_up=False
+    )  # the repair loop alone; see follow-up tests
     message_text = chunk_message(chunk, corpus, heading_paths(corpus))
     client = _client(sdk, catalog)
     return extract_chunk(

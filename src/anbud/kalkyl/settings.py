@@ -25,6 +25,7 @@ class RoleSettings:
     effort: str
     max_tokens: int
     max_turns: int = 1
+    follow_up: bool = False  # one more turn for marked lines the answer left unresolved (`extract.follow_up`)
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,9 @@ def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
     budgets = tomllib.loads((directory / "budgets.toml").read_text())
     ex, ma = raw["extract"], raw["match"]
     roles = {
-        EXTRACT: RoleSettings(ex["effort"], int(ex["max_tokens"]), int(ex["max_turns"])),
+        EXTRACT: RoleSettings(
+            ex["effort"], int(ex["max_tokens"]), int(ex["max_turns"]), bool(ex.get("follow_up", False))
+        ),
         MATCH: RoleSettings(ma["effort"], int(ma["max_tokens"]), 1),
     }
     for settings in roles.values():
