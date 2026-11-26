@@ -229,6 +229,7 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Saknar mängd", c["posts_missing_quantity"], None),
         ("Mängdrader i underlaget", c["quantity_lines"], None),
         ("Omfattningsstycken i underlaget", c["scope_lines"], None),
+        ("Rader som säger att något inte ingår", c["not_included_lines"], None),
         ("Rader och stycken utan post", c["lines_not_handled"], None),
         ("varav ej omhändertagna (se Ej omhändertaget)", c["lines_unresolved"], None),
         ("varav bortvalda med skäl (se Bortvalt med skäl)", c["lines_not_handled"] - c["lines_unresolved"], None),
@@ -369,7 +370,7 @@ def _uncovered_sheet(
     for r, u in enumerate(lines, FIRST_ROW):
         b = corpus.blocks[u.block_id]
         where = f"sida {b.page}" if b.page is not None else (b.sheet or "")
-        kind = "Omfattningsstycke" if u.line == "scope" else "Mängdrad"
+        kind = {"scope": "Omfattningsstycke", "not_included": "Rad om något som inte ingår"}.get(u.line, "Mängdrad")
         heading = " > ".join(result.paths.get(u.block_id, ()))
         category = SET_ASIDE_LABELS[u.set_aside_kind] if u.set_aside_kind else ""
         values = [u.block_id, b.doc_id, where, b.row, heading, b.text, u.reason, kind, category]
