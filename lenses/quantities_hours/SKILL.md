@@ -2,7 +2,7 @@
 name: quantities_hours
 description: Calc quantities and hours against the documents' own counts, areas and conditions - zero or blank posts, missing posts, and unit times that ignore how the work must be done.
 role: lens
-tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, catalog_search, submit_flags]
 ---
 
 # Realism of quantities and hours

@@ -2,7 +2,7 @@
 name: document_conflicts
 description: Contradictions between documents on scope, quantity, method or time, resolved by the order of precedence, and the money the losing reading costs.
 role: lens
-tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, catalog_search, submit_flags]
 ---
 
 # Conflicts between documents

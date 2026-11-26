@@ -227,7 +227,7 @@ def run_pipeline(
         _write(store, run_dir / "cards_masking.json", [m.model_dump(mode="json") for m in cards.masked])
     corpus = add_cards(corpus, cards)
 
-    toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob)
+    toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob, catalog=catalog)
     validator = flag_validator(corpus, set(CLAIM_TYPES))
     result = run_granskning(
         client,
@@ -273,7 +273,7 @@ def run_pipeline(
     finished.report = finished.report.model_copy(update={"cost_usd": round(cost, 4)})
     finished.paths = write_reports(finished.report, run_dir / "report")
     ranked = finished.ranked
-    ordered = ranked.shown + ranked.generic + ranked.logged
+    ordered = ranked.shown + ranked.unpriced + ranked.generic + ranked.logged
     files = dict(finished.paths)
     files["inputs"] = run_dir / "inputs.json"
     inputs = RunInputs(company_id=client.company_id, tender_id=tender_id, prep_dir=str(prep_dir), calc_posts=calc)
