@@ -10,7 +10,9 @@ note say so. Nothing it reads is written into this repo.
 - Room names map to the object kinds Kalkyl counts (living room, bedroom, half room, hall, kitchen).
 - The items get the app's own post names, matched by exact name to the default catalog's items: double wall socket,
   counter socket, ceiling outlet. A name the catalog lacks is written without a catalog id.
-- One hall and one kitchen per apartment, as the app's object count gives every apartment row one of each.
+- One hall, kitchen, bathroom and living room per apartment, the defaults of the app's object model
+  (`src/lib/tender-object-model.ts`: kitchens, bathrooms and WC 1/1/0, one hall and living room per apartment). A
+  count the documents give replaces the default.
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ _ROOM = re.compile(r"room:\s*'([^']+)'(?:\s+as\s+const)?\s*,\s*sockets:\s*(\d+)\
 ROOMS = {"Vardagsrum": "living_room", "Sovrum": "bedroom", "Halvrum": "half_room", "Hall": "hall", "Kök": "kitchen"}
 # The app's post names for recipe equipment, and the default catalog item each one is.
 SOCKETS, COUNTER, LAMPS = "Dubbelt vägguttag", "Bänkuttag", "Lamputtag"
+# Room types every apartment has one of in the app's object model, when the documents don't give the number.
+PER_APARTMENT = {"hall": 1, "kitchen": 1, "bathroom": 1, "living_room": 1}
 
 
 def parse_recipe_source(source: str) -> dict[str, tuple[int, int]]:
@@ -59,14 +63,15 @@ def build(source_text: str, catalog: Catalog | None) -> Recipe:
     digest = hashlib.sha256(source_text.encode()).hexdigest()[:12]
     note = (
         f"Estim-appen {APP_FILE} (exampleRoomRecipes, i appen märkta som exempelvärden som företaget ersätter), "
-        f"källfilens sha256 {digest}. Hall och kök: ett per lägenhet som appens objekträkning. "
+        f"källfilens sha256 {digest}. Hall, kök, badrum och vardagsrum: ett per lägenhet som appens objektmodell "
+        f"(src/lib/tender-object-model.ts), när handlingarna inte anger antalet. "
         f"Katalog-id efter exakt namn i {catalog.name if catalog else 'ingen katalog'}."
     )
     return Recipe(
         name=DEFAULT_NAME,
         label=DEFAULT_LABEL,
         source=note,
-        per_apartment={"hall": 1, "kitchen": 1},
+        per_apartment=dict(PER_APARTMENT),
         items=items,
     )
 

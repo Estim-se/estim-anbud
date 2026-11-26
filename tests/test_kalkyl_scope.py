@@ -240,6 +240,16 @@ def test_a_hall_per_apartment_comes_from_the_recipe_labelled() -> None:
     assert "hall" not in count_objects(_verified([_row(1, 3)]))  # no recipe: no assumed halls
 
 
+def test_a_bathroom_per_apartment_from_the_recipe_counts_per_bathroom_requirements() -> None:
+    recipe = TEST_RECIPE.model_copy(update={"per_apartment": {"hall": 1, "bathroom": 1}})
+    record = req(
+        "Handdukstork", "per_object", "st", SCOPE_CITE, quantity=1, per_object="bathroom", catalog_id="uttag-dubbelt"
+    )
+    (post,) = [p for p in _posts([record], recipe) if p.lines[0].record.record.what == "Handdukstork"]
+    assert post.quantity == 3 and post.status == "Prissatt"  # 1 per bathroom × 1 bathroom in each of 3 apartments
+    assert post.lines[0].objects is not None and DEFAULT_LABEL in post.lines[0].objects.basis
+
+
 # --- multiplying -------------------------------------------------------------------------------------------------
 
 SCOPE_CITE = [cite("fu-001", "Sovrum förses med uttag")]
@@ -402,7 +412,7 @@ def test_the_exporter_reads_the_example_recipe_and_binds_items_by_name() -> None
     assert items[("bedroom", "Dubbelt vägguttag")] == ("s", 6)
     assert items[("bedroom", "Lamputtag")] == (None, 2)  # not in this catalog: written without an id
     assert ("kitchen", "Lamputtag") not in items  # zero is no item
-    assert recipe.per_apartment == {"hall": 1, "kitchen": 1}
+    assert recipe.per_apartment == {"hall": 1, "kitchen": 1, "bathroom": 1, "living_room": 1}
     with pytest.raises(ValueError):
         parse_recipe_source(APP_SNIPPET.replace("Hall", "Entré"))
 
