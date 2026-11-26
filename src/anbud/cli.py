@@ -32,6 +32,34 @@ def _eval(args: argparse.Namespace) -> int:
     return NOT_BUILT
 
 
+def _prep(args: argparse.Namespace) -> int:
+    from anbud import paths
+    from anbud.prep.sources import SourceError
+    from anbud.prep.tender import PrepError, prepare
+    from anbud.store import StoreError
+
+    try:
+        kind = check_run_allowed(args.company_id, args.tender_id, args.fixture)
+    except RunRefused as exc:
+        print(f"anbud prep: refused: {exc}", file=sys.stderr)
+        return REFUSED
+    if kind == "fixture":
+        inbox = args.fixture.expanduser().resolve()
+        out = paths.company_dir(args.company_id) / "fixtures" / inbox.name / "prep"
+        manifest = None
+    else:
+        tender = paths.dev_tender_dir(args.company_id, args.tender_id)
+        inbox, out, manifest = tender / "inbox", tender / "prep", tender / "inbox.sha256"
+    try:
+        summary = prepare(args.company_id, inbox, out, manifest)
+    except (PrepError, SourceError, StoreError) as exc:
+        print(f"anbud prep: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    for key, value in summary.items():
+        print(f"{key}: {value}")
+    return 0
+
+
 def _stop(args: argparse.Namespace) -> int:
     from anbud.store import StoreError, request_stop
 
@@ -82,7 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
     ev = sub.add_parser("eval", help="evals (dev now; held-out and prospective from phase 2, never from an agent)")
     ev.add_argument("kind", choices=["dev", "heldout", "prospective"])
-    sub.add_parser("prep", help="document preparation (phase 1)")
+    prep = sub.add_parser("prep", help="document preparation: blocks, outline, tiles and the masking report")
+    prep.add_argument("company_id")
+    prep.add_argument("tender_id", nargs="?")
+    prep.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
     sub.add_parser("replay", help="replay a stored run at $0 (phase 1)")
     sub.add_parser("guards", help="repo guards: names, document files, licensed text")
     sub.add_parser("split", help="assign new tenders to dev, held-out or prospective")
@@ -101,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         return _eval(args)
     if args.command == "stop":
         return _stop(args)
+    if args.command == "prep":
+        return _prep(args)
     return _not_built(args.command)
 
 
