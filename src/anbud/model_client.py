@@ -196,6 +196,9 @@ class ModelClient:
             raise ValueError("the store belongs to another company")
         self.store = store
         self.salt = store.open_run(run_id, salt) if store is not None else salt
+        if store is not None:
+            budget.settle(0.0, store.run_spend(run_id))  # a resumed run keeps counting against the same hard stop
+        self.persist_failures = 0  # store writes that failed; the caller should stop the run if this isn't 0
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -242,7 +245,10 @@ class ModelClient:
             run_id=self.run_id, company_id=self.company_id, step=step, kind=kind, at=datetime.now(UTC), **fields
         )
         if self.store is not None:
-            self.store.append_event(event)
+            try:
+                self.store.append_event(event)
+            except OSError:  # never let a full or read-only disk hide the call's own result or error
+                self.persist_failures += 1
         if self.on_event:
             self.on_event(event)
 
@@ -274,13 +280,15 @@ class ModelClient:
         messages: list[dict[str, Any]],
         max_tokens: int,
         effort: str,
+        sample: int = 0,
     ) -> CallResult:
+        """`sample` asks for a fresh answer to a request already made in this run (a second verifier vote)."""
         params = self.request(role=role, system=system, messages=messages, max_tokens=max_tokens, effort=effort)
         self._check_prefix(role, params)
         model = params["model"]
         if self.store is not None and self.store.stop_requested(self.run_id):
             raise RunStopped(f"run {self.run_id} has a stop marker")
-        key = self.store.step_key(self.salt, params) if self.store is not None else None
+        key = self.store.step_key(self.salt, params, step, sample) if self.store is not None else None
         if key is not None and (hit := self._cached(step, model, key)) is not None:
             return hit
         if self.sdk is None:
@@ -310,23 +318,20 @@ class ModelClient:
         usage = message.usage
         duration = self._ms(start)
         blobs: dict[str, Any] = {}
+        response_bytes = None
         if self.store is not None and key is not None:
             response_bytes = message.model_dump_json().encode()
-            blobs = {
-                "request_blob": self.store.put_blob(canonical(params)),
-                "blob": self.store.put_blob(response_bytes),
-            }
-            # Only a finished stream reaches here, so only complete responses are cached.
-            self.store.step_put(
-                key,
-                {
-                    "request": blobs["request_blob"],
-                    "response": blobs["blob"],
-                    "model": model,
-                    "request_id": request_id,
-                    "cost_usd": cost,
-                },
-            )
+            try:
+                blobs = {
+                    "request_blob": self.store.put_blob(canonical(params)),
+                    "blob": self.store.put_blob(response_bytes),
+                }
+                # Only a finished stream reaches here, so only complete responses are cached.
+                record = {"request": blobs["request_blob"], "response": blobs["blob"], "model": model}
+                self.store.step_put(key, {**record, "request_id": request_id, "cost_usd": cost})
+            except OSError:  # the paid response still goes back to the caller, and the cost into the event
+                self.persist_failures += 1
+                blobs = {}
         self._emit(
             step,
             "model_call",
@@ -336,7 +341,7 @@ class ModelClient:
             cache_read_tokens=usage.cache_read_input_tokens,
             cache_write_tokens=usage.cache_creation_input_tokens,
             cost_usd=cost,
-            size_bytes=len(response_bytes) if blobs else None,
+            size_bytes=len(response_bytes) if response_bytes is not None else None,
             **blobs,
         )
         return CallResult(message, model, cost, duration, request_id)

@@ -35,8 +35,9 @@ def _eval(args: argparse.Namespace) -> int:
 def _stop(args: argparse.Namespace) -> int:
     from anbud.store import StoreError, request_stop
 
-    if args.all == bool(args.company_id or args.run_id):
-        print("anbud stop: give a company id and a run id, or --all", file=sys.stderr)
+    one_run = bool(args.company_id and args.run_id)
+    if args.all == one_run or (args.all and (args.company_id or args.run_id)):
+        print("anbud stop: give a company id and a run id, or --all alone", file=sys.stderr)
         return REFUSED
     try:
         request_stop(args.company_id, args.run_id, clear=args.clear)

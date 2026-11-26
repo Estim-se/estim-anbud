@@ -196,3 +196,112 @@ def test_the_stop_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
     assert cli.main(["stop", "--all"]) == 0 and (tmp_path / "STOP").exists()
     assert cli.main(["stop"]) == cli.REFUSED
     assert cli.main(["stop", "acme", "run-1"]) == cli.REFUSED  # company ids look like co-001
+
+
+def test_stop_needs_both_ids_or_all_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from anbud import cli
+
+    monkeypatch.setenv("ANBUD_DATA_ROOT", str(tmp_path))
+    assert cli.main(["stop", "co-999"]) == cli.REFUSED  # a forgotten run id must not stop every run
+    assert cli.main(["stop", "--all", "co-999"]) == cli.REFUSED
+    assert not (tmp_path / "STOP").exists()
+
+
+def test_a_resumed_run_keeps_counting_against_its_budget(tmp_path: Path) -> None:
+    store = RunStore("co-999", root=tmp_path)
+    spent = _ask(_client(store, FakeSDK()), "q1").cost_usd
+    resumed = _client(store, FakeSDK())
+    assert resumed.budget.spent == pytest.approx(spent)
+
+
+def test_sdk_content_blocks_passed_back_in_a_tool_loop_can_be_stored(tmp_path: Path) -> None:
+    store = RunStore("co-999", root=tmp_path)
+    sdk = FakeSDK()
+    client = _client(store, sdk)
+    reply = _ask(client, "q1").message
+    turn_two = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": reply.content},  # SDK objects, as a tool loop passes them back
+        {"role": "user", "content": "q2"},
+    ]
+    for _ in range(2):
+        client.call(role="map", step="s", system=SYSTEM, messages=turn_two, max_tokens=64, effort="low")
+    assert len(sdk.sent) == 2
+
+
+def test_a_damaged_cache_entry_is_a_miss(tmp_path: Path) -> None:
+    store = RunStore("co-999", root=tmp_path)
+    sdk = FakeSDK()
+    client = _client(store, sdk)
+    first = _ask(client, "q1")
+    (event,) = store.events("run-1")
+    (store.dir / "blobs" / event.blob[:2] / event.blob).unlink()
+    again = _ask(client, "q1")
+    assert not again.cached and len(sdk.sent) == 2
+    assert _ask(client, "q1").cached  # the entry was rewritten
+    assert first.message.model_dump() == again.message.model_dump()
+
+
+def test_the_first_process_to_create_a_run_sets_its_salt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = RunStore("co-999", root=tmp_path)
+    real_link = os.link
+
+    def racing_link(src: str, dst: Path) -> None:
+        Path(dst).write_text('{"salt": "theirs", "company_id": "co-999"}')  # another process got there first
+        real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    assert store.open_run("run-7") == "theirs"
+
+
+def test_a_sample_number_or_another_step_asks_for_a_fresh_answer(tmp_path: Path) -> None:
+    store = RunStore("co-999", root=tmp_path)
+    sdk = FakeSDK()
+    client = _client(store, sdk)
+    args = {"role": "verifier", "system": SYSTEM, "max_tokens": 64, "effort": "low"}
+    messages = [{"role": "user", "content": "flag"}]
+    client.call(step="verify", messages=messages, **args)
+    assert client.call(step="verify", messages=messages, **args).cached
+    assert not client.call(step="verify", messages=messages, sample=1, **args).cached
+    assert not client.call(step="verify-again", messages=messages, **args).cached
+    assert len(sdk.sent) == 3
+
+
+def test_a_failed_store_write_never_loses_a_paid_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = RunStore("co-999", root=tmp_path)
+    client = _client(store, FakeSDK())
+
+    def disk_full(data: bytes) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "put_blob", disk_full)
+    result = _ask(client, "q1")
+    assert result.cost_usd > 0 and client.persist_failures == 1
+    (event,) = store.events("run-1")
+    assert event.kind == "model_call" and event.cost_usd == pytest.approx(result.cost_usd)
+
+
+def test_a_failed_event_write_never_hides_the_api_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import anthropic
+    import httpx2
+
+    from anbud.model_client import ModelError
+
+    store = RunStore("co-999", root=tmp_path)
+    sdk = FakeSDK()
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    error = anthropic.RateLimitError("slow down", response=httpx2.Response(429, request=request), body=None)
+    sdk.stream = lambda **params: (_ for _ in ()).throw(error)
+    client = _client(store, sdk)
+    monkeypatch.setattr(store, "append_event", lambda event: (_ for _ in ()).throw(OSError("read-only")))
+    with pytest.raises(ModelError) as caught:
+        _ask(client, "q1")
+    assert caught.value.kind == "rate_limited" and client.persist_failures == 1
+
+
+def test_every_new_folder_is_private(tmp_path: Path) -> None:
+    root = tmp_path / "a" / "b"
+    store = RunStore("co-999", root=root)
+    store.put_blob(b"x")
+    for folder in (tmp_path / "a", root, store.dir, store.dir / "blobs"):
+        assert stat.S_IMODE(folder.stat().st_mode) == 0o700, folder
