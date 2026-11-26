@@ -52,7 +52,8 @@ It still cites the block that creates the need.
 name the item, with quantity and unit if the documents give them), `quantity_gap` (a calc post's quantity is wrong; \
 give the post id and the quantity the documents support), `hours_gap` (hours missing or too low; give hours and the \
 post id if one exists), `contract_formula` (a contract term priced by formula: vite_per_week, security, index_drift \
-or wage_step, with its inputs).
+or wage_step, with its inputs). For a `missing_post` or `quantity_gap`, look the item up with catalog_search and put \
+the id that fits in `catalog_id`; when nothing fits, leave `catalog_id` out and name the item in `item`.
 - Calc posts are cited by their id (for example in `money_basis.post_ref`); they are the contractor's own figures.
 - Set `contractual_exposure` when the risk is a term, deadline or liability rather than a missing quantity.
 - Material means roughly 20 000 kr or more, or a contractual exposure. Leave out trivia, wording issues and things \

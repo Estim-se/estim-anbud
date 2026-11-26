@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 
@@ -37,13 +37,27 @@ class VerifierLoop(Protocol):
 
 
 def select(
-    items: list[Item], kronor_high: Callable[[Item], float], top_n: int, sampled: int, seed: str
+    items: list[Item],
+    kronor_high: Callable[[Item], float],
+    top_n: int,
+    sampled: int,
+    seed: str,
+    reserved: Sequence[Item] = (),
+    reserved_slots: int = 0,
 ) -> list[tuple[Item, Verification]]:
-    """The top `top_n` by kronor high (ties by fingerprint, so the cut is stable), then `sampled` random items below
-    the cut, drawn with `seed` (use the run id or salt, so a replay draws the same sample)."""
-    ranked = sorted(items, key=lambda i: (-kronor_high(i), i.fingerprint))
-    top = [(i, "verified") for i in ranked[:top_n]]
-    below = ranked[top_n:]
+    """`top_n` flags to verify, then `sampled` random flags below the cut, drawn with `seed` (use the run id or salt,
+    so a replay draws the same sample). Never more than `top_n + sampled` in all.
+
+    Up to `reserved_slots` of the top go to the front of `reserved` (the unpriced queue, already in its order); the
+    rest, and any reserved slot left free, go by kronor high (ties by fingerprint, so the cut is stable)."""
+    by_fingerprint = {i.fingerprint: i for i in items}
+    queue = [by_fingerprint[f] for f in dict.fromkeys(i.fingerprint for i in reserved) if f in by_fingerprint]
+    first = queue[: max(0, min(reserved_slots, top_n))]
+    taken = {i.fingerprint for i in first}
+    rest = sorted((i for i in items if i.fingerprint not in taken), key=lambda i: (-kronor_high(i), i.fingerprint))
+    cut = top_n - len(first)  # reserved slots the queue couldn't fill go back to the kronor side
+    top = [(i, "verified") for i in first + rest[:cut]]
+    below = rest[cut:]
     sample = random.Random(seed).sample(below, min(sampled, len(below)))
     return top + [(i, "sample") for i in sorted(sample, key=lambda i: i.fingerprint)]
 
