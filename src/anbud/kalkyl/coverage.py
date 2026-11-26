@@ -14,7 +14,8 @@ A line the model set aside as another trade's work (`other_trade`) needs its cit
 the two headings above it names another trade or its contractor, the client's side, or a contract boundary
 (`lines.other_party_line_ids`). Without that, the model's judgement is an inference from what the line is about, and an
 inference can drop work this contract does (a feed or a connection to another trade's equipment). Such a line stays
-"Ej omhändertaget" as unclear, with the model's reason and a request to check who does the work.
+"Ej omhändertaget" as unclear, with the model's reason and a request to check who does the work; a demolition line
+asks whether removing the existing electrical installation is in this contract (`connections`).
 """
 
 from __future__ import annotations
@@ -23,6 +24,11 @@ from anbud.kalkyl.extract import ChunkResult
 from anbud.kalkyl.lines import Chunk
 from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered, VerifiedRecord
 
+DEMOLITION_QUESTION = (
+    "Fråga: ingår rivning av befintlig elinstallation i denna entreprenad? Vid ombyggnad brukar el riva sin egen "
+    "installation; andra entreprenörers rivning ingår inte. Modellen bedömde raden som annan entreprenörs arbete: "
+    "{reason}"
+)
 OTHER_TRADE_CHECK = (
     "Kontrollera: modellen bedömde raden som annan entreprenörs arbete, men raden nämner ingen annan entreprenör, "
     "beställaren eller en entreprenadgräns. Modellens skäl: {reason}"
@@ -45,9 +51,10 @@ def uncovered_lines(
     counted: set[str] | None = None,
     not_included: set[str] | None = None,
     other_party: set[str] | None = None,
+    demolition: set[str] | None = None,
 ) -> list[Uncovered]:
     """`other_party`, when given, is the lines that name another party to the work; an `other_trade` set-aside of any
-    other line stays unresolved."""
+    other line stays unresolved, asked as the demolition question when it is in `demolition`."""
     used = {b for v in verified for b in v.block_ids} | (counted or set())
     not_included = not_included or set()
     out: list[Uncovered] = []
@@ -66,7 +73,9 @@ def uncovered_lines(
                     out.append(
                         Uncovered(
                             block_id=block_id,
-                            reason=OTHER_TRADE_CHECK.format(reason=item.reason),
+                            reason=(
+                                DEMOLITION_QUESTION if block_id in (demolition or set()) else OTHER_TRADE_CHECK
+                            ).format(reason=item.reason),
                             set_aside_by_model=True,
                             set_aside_kind="unclear",
                             other_trade_unchecked=True,
