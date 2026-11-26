@@ -113,7 +113,7 @@ class Event(_Model):
     run_id: str
     company_id: str
     step: str
-    kind: Literal["start", "model_call", "tool_call", "result", "error", "end"]
+    kind: Literal["start", "model_call", "cache_hit", "tool_call", "result", "error", "end"]
     at: datetime
     duration_ms: int | None = None
     input_tokens: int | None = None
@@ -121,7 +121,8 @@ class Event(_Model):
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
     cost_usd: float | None = None
-    blob: str | None = Field(default=None, description="Content hash of the stored request or response")
+    blob: str | None = Field(default=None, description="Content hash of the stored response")
+    request_blob: str | None = Field(default=None, description="Content hash of the stored request")
     size_bytes: int | None = None
 
 

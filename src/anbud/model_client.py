@@ -10,6 +10,10 @@
 - Events carry ids, sizes, timings and costs, never prompt text or model output. Error messages from the API stay on
   the exception (`.message`) and never go into an event.
 - The key is read from the macOS Keychain at run time and is never printed or logged.
+- With a RunStore, every finished call is stored (request, response, step-cache entry, event), and a request already
+  in the step cache is answered from it at $0 without counting tokens or reserving budget. That gives resume after a
+  crash and free replay. Without an SDK client (replay), a request not in the cache is refused, never sent.
+- A stop marker (`anbud stop`) is checked before every call.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from typing import Any
 
 from anbud.config import Config
 from anbud.models import Event
+from anbud.store import RunStore, canonical
 from anbud.tools import ROLES, shared_tools
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -43,6 +48,14 @@ class PrefixDrift(RuntimeError):
 
 
 class KeyMissing(RuntimeError):
+    pass
+
+
+class RunStopped(RuntimeError):
+    pass
+
+
+class ReplayMiss(RuntimeError):
     pass
 
 
@@ -94,6 +107,7 @@ class CallResult:
     cost_usd: float
     duration_ms: int
     request_id: str | None
+    cached: bool = False
 
     @property
     def stop_reason(self) -> str | None:
@@ -175,7 +189,16 @@ class ModelClient:
         company_id: str,
         on_event: Callable[[Event], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        store: RunStore | None = None,
+        salt: str | None = None,
     ) -> None:
+        if store is not None and store.company_id != company_id:
+            raise ValueError("the store belongs to another company")
+        self.store = store
+        self.salt = store.open_run(run_id, salt) if store is not None else salt
+        if store is not None:
+            budget.settle(0.0, store.run_spend(run_id))  # a resumed run keeps counting against the same hard stop
+        self.persist_failures = 0  # store writes that failed; the caller should stop the run if this isn't 0
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -218,12 +241,35 @@ class ModelClient:
             raise PrefixDrift(f"{role} would send a different tools or system prefix than earlier calls on its model")
 
     def _emit(self, step: str, kind: str, **fields: Any) -> None:
+        event = Event(
+            run_id=self.run_id, company_id=self.company_id, step=step, kind=kind, at=datetime.now(UTC), **fields
+        )
+        if self.store is not None:
+            try:
+                self.store.append_event(event)
+            except OSError:  # never let a full or read-only disk hide the call's own result or error
+                self.persist_failures += 1
         if self.on_event:
-            self.on_event(
-                Event(
-                    run_id=self.run_id, company_id=self.company_id, step=step, kind=kind, at=datetime.now(UTC), **fields
-                )
-            )
+            self.on_event(event)
+
+    def _cached(self, step: str, model: str, key: str) -> CallResult | None:
+        record = self.store.step_get(key) if self.store is not None else None
+        if record is None:
+            return None
+        import anthropic
+
+        message = anthropic.types.Message.model_validate_json(self.store.get_blob(record["response"]))
+        usage = message.usage
+        self._emit(
+            step,
+            "cache_hit",
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cost_usd=0.0,
+            blob=record["response"],
+            request_blob=record["request"],
+        )
+        return CallResult(message, model, 0.0, 0, record.get("request_id"), cached=True)
 
     def call(
         self,
@@ -234,10 +280,19 @@ class ModelClient:
         messages: list[dict[str, Any]],
         max_tokens: int,
         effort: str,
+        sample: int = 0,
     ) -> CallResult:
+        """`sample` asks for a fresh answer to a request already made in this run (a second verifier vote)."""
         params = self.request(role=role, system=system, messages=messages, max_tokens=max_tokens, effort=effort)
         self._check_prefix(role, params)
         model = params["model"]
+        if self.store is not None and self.store.stop_requested(self.run_id):
+            raise RunStopped(f"run {self.run_id} has a stop marker")
+        key = self.store.step_key(self.salt, params, step, sample) if self.store is not None else None
+        if key is not None and (hit := self._cached(step, model, key)) is not None:
+            return hit
+        if self.sdk is None:
+            raise ReplayMiss("this request isn't in the step cache, and replay never calls a model")
         price = self.config.price_for(model)
         count_params = {k: v for k, v in params.items() if k != "max_tokens"}
         try:
@@ -262,6 +317,21 @@ class ModelClient:
         self.budget.settle(reserved, cost)
         usage = message.usage
         duration = self._ms(start)
+        blobs: dict[str, Any] = {}
+        response_bytes = None
+        if self.store is not None and key is not None:
+            response_bytes = message.model_dump_json().encode()
+            try:
+                blobs = {
+                    "request_blob": self.store.put_blob(canonical(params)),
+                    "blob": self.store.put_blob(response_bytes),
+                }
+                # Only a finished stream reaches here, so only complete responses are cached.
+                record = {"request": blobs["request_blob"], "response": blobs["blob"], "model": model}
+                self.store.step_put(key, {**record, "request_id": request_id, "cost_usd": cost})
+            except OSError:  # the paid response still goes back to the caller, and the cost into the event
+                self.persist_failures += 1
+                blobs = {}
         self._emit(
             step,
             "model_call",
@@ -271,6 +341,8 @@ class ModelClient:
             cache_read_tokens=usage.cache_read_input_tokens,
             cache_write_tokens=usage.cache_creation_input_tokens,
             cost_usd=cost,
+            size_bytes=len(response_bytes) if response_bytes is not None else None,
+            **blobs,
         )
         return CallResult(message, model, cost, duration, request_id)
 

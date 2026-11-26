@@ -32,6 +32,23 @@ def _eval(args: argparse.Namespace) -> int:
     return NOT_BUILT
 
 
+def _stop(args: argparse.Namespace) -> int:
+    from anbud.store import StoreError, request_stop
+
+    one_run = bool(args.company_id and args.run_id)
+    if args.all == one_run or (args.all and (args.company_id or args.run_id)):
+        print("anbud stop: give a company id and a run id, or --all alone", file=sys.stderr)
+        return REFUSED
+    try:
+        request_stop(args.company_id, args.run_id, clear=args.clear)
+    except (StoreError, ValueError) as exc:
+        print(f"anbud stop: {exc}", file=sys.stderr)
+        return REFUSED
+    target = "every run" if args.all else f"{args.company_id}/{args.run_id}"
+    print(f"anbud stop: {'cleared' if args.clear else 'stop marker written'} for {target}")
+    return 0
+
+
 def _not_built(name: str) -> int:
     print(f"anbud {name}: not built yet", file=sys.stderr)
     return NOT_BUILT
@@ -71,12 +88,19 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("split", help="assign new tenders to dev, held-out or prospective")
     sub.add_parser("split-status", help="counts per status, and the dev tender ids")
     sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
+    stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
+    stop.add_argument("company_id", nargs="?")
+    stop.add_argument("run_id", nargs="?")
+    stop.add_argument("--all", action="store_true", help="every run, in every company")
+    stop.add_argument("--clear", action="store_true", help="remove the marker, so the run can resume")
 
     args = parser.parse_args(argv)
     if args.command == "run":
         return _run(args)
     if args.command == "eval":
         return _eval(args)
+    if args.command == "stop":
+        return _stop(args)
     return _not_built(args.command)
 
 
