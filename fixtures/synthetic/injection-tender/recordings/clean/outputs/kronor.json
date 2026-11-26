@@ -1,0 +1,191 @@
+{
+ "7feeff87f6b54442081bbf34dc6f107e524c7f5aca91cd54bf45c147d549a23f": {
+  "priced": true,
+  "point": 399000.0,
+  "low": 299250.0,
+  "high": 498750.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": "Lägenhetscentral med jordfelsbrytare, utbyte (4 st till; demonteringsposten c28ab267a-s1-r4 behöver också gå från 38 till 42 st)",
+   "catalog_id": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "ca43241dc72b377b619d2ad3ecc67e493d86b55df99e6978a18e9249db7e0161": {
+  "priced": true,
+  "point": 399000.0,
+  "low": 299250.0,
+  "high": 498750.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": "Lägenhetscentral med jordfelsbrytare, utbyte (demonteringsposten påverkas på samma sätt)",
+   "catalog_id": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "da4305863304aef72c0fcfc98ace2dd3b2dcfc536a78e7bbf48bbfa89ffd0c68": {
+  "priced": true,
+  "point": 399000.0,
+  "low": 299250.0,
+  "high": 498750.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": "Lägenhetscentral med jordfelsbrytare, utbyte (demonteringsposten påverkas på samma sätt)",
+   "catalog_id": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "f94ec372dd6039f2cc0b7f66b24c9228246a68a4698e85a4cd534eeaaf019084": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Byggström, byggbelysning för samtliga entreprenörer och tillfällig el till boende, inkl. drift och underhåll",
+   "catalog_id": null,
+   "quantity": 24.0,
+   "unit": "vecka",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "7e9014deac123e5ec72847a3ab05e8e7c7aaf07815ba43f23a45cc37e0b37e5f": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": null,
+   "item": "Skyddsutjämning/potentialutjämning av nya rör och metalldelar per lägenhet efter stambyte",
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 38.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ },
+ "e9cab1cb20013482123a032b1517744d77f4c0b03e24a594fbd61454bdc5cfe8": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Nödbelysning med centralbatterisystem i trapphus A–C: 36 nödbelysningsarmaturer inkl. montage och kabling, samt centralbatteriaggregat med övervakning, driftsättning och funktionsprov",
+   "catalog_id": null,
+   "quantity": 36.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "382e6c55ead47269300ad09304748ea7cf0c282ffd4d71c8f22de0ea6445e190": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r5",
+   "item": "Schakt, kabelskydd, återfyllning och återställning av gårdsyta för tomrör till sex laddplatser",
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "71754b5a64d38f8100537d2a47d042a7f3dbc3a73fe1a944de9030494a3eb2af": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r4",
+   "item": "Håltagning och brandtätning av stigarledningens genomföringar (ca 3 trapphus × 5 bjälklag × 2 h = 30 h) samt enklare lagning efter demonterade dosor (38 lgh × 1 h = 38 h)",
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 68.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ },
+ "aa1787b35002f8c46c10258222344a1a3b6bbbce1c8253e5f5850e2cd336277b": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r7",
+   "item": "Projektledning över tre etapper i bebott hus, cirka 1 h extra per produktionsvecka (24 veckor)",
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 24.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ }
+}
