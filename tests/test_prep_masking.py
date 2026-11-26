@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from synthetic_docs import personnummer
 
-from anbud.prep.masking import Cell, Masker, markings
+from anbud.prep.masking import NAME_HEADER, Cell, Masker, markings
 
 
 def masked(text: str) -> tuple[str, list[str]]:
@@ -16,6 +16,12 @@ def test_security_markings_stop_but_ordinary_words_do_not() -> None:
     assert markings("Krav på säkerhetsskyddsavtal kan ställas") == ["sakerhetsskydd"]
     assert markings("en hemlig ingång i källaren") == []
     assert markings("Allmänna bestämmelser") == []
+
+
+def test_markings_split_by_a_line_break_hyphen_still_stop() -> None:
+    assert markings("Krav enligt säkerhets- skydd") == ["sakerhetsskydd"]
+    assert markings("Krav enligt säkerhets-\nskyddslagen") == ["sakerhetsskydd"]
+    assert markings("el- och teleinstallation") == []
 
 
 def test_checksum_valid_personnummer_is_masked_and_invalid_is_not() -> None:
@@ -40,6 +46,26 @@ def test_email_and_iban() -> None:
     )
     assert masked("Konto SE45 5000 0000 0583 9825 7466 gäller")[1] == ["iban"]  # the published example IBAN
     assert masked("Konto SE45 5000 0000 0583 9825 7467 gäller")[1] == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("IBAN SE45 5000 0000 0583 9825 7466 BIC ESSESESS", "IBAN [IBAN] BIC ESSESESS"),
+        ("Konto SE45 5000 0000 0583 9825 7466 2026", "Konto [IBAN] 2026"),
+        ("SE4550000000058398257466 SEK", "[IBAN] SEK"),
+        ("DE89 3704 0044 0532 0130 00", "[IBAN]"),
+    ],
+)
+def test_an_iban_followed_by_other_codes_is_still_masked(text: str, expected: str) -> None:
+    assert masked(text)[0] == expected
+
+
+def test_name_columns_are_person_names_only() -> None:
+    people = ["Förnamn", "Efternamn", "Namn", "Kontaktperson", "Boende", "Hyresgäster"]
+    things = ["Rumsnamn", "Artikelnamn", "Företagsnamn", "Filnamn", "Benämning"]
+    assert all(NAME_HEADER.search(h) for h in people)
+    assert not any(NAME_HEADER.search(h) for h in things)
 
 
 @pytest.mark.parametrize(

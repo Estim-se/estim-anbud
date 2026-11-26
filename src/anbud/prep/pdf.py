@@ -6,10 +6,18 @@
   space between them. A bullet or list marker starts a new paragraph.
 - **Headings** are short lines set larger than the body text, short bold lines, or short lines that start with a
   multi-level number or a dotted code. Bookmarks, when the file has them, give the outline instead.
-- **Page furniture** (a line in the top or bottom band that repeats on at least half the pages, digits ignored) is kept
-  once, on its first page, so a header with the revision survives but isn't repeated.
+- **Coordinates** are display coordinates: a page's /Rotate and crop box are applied to every character box, so a
+  landscape drawing stored as a rotated portrait page reads left to right, and boxes line up with the rendered tiles.
+- **Page furniture** (a line in the top or bottom band that repeats on at least half the pages, with only the page
+  number and page count ignored) is kept once, on its first page, so a header with the revision survives but isn't
+  repeated. A title block whose drawing number changes from page to page is not furniture.
 - **Pages** are text, mixed (text plus an image covering half the page), scan (little or no text, mostly image),
-  drawing (vector work with little text, or A3 and larger with heavy vector or image content) or blank.
+  drawing (vector work with little text, or A3 and larger with heavy vector or image content) or blank (no characters
+  at all). Any characters a page has become blocks, so a short stamp still reaches the gate.
+- **Soft hyphens** (PDFium's end-of-line hyphen) join the word across the line break without a space.
+- **Masked text on tiles**: personal data the masking finds in a page's text layer is painted over with a black box
+  before a mixed or drawing page is tiled, so the image a model sees carries no more than the masked text does. A scan
+  has no reliable text layer; its tiles are sent as they are, and what a page card transcribes from them is masked.
 - **Tiles** cover scan, drawing and mixed pages: rendered at the embedded image's own resolution (150-300 dpi, 200 for
   vector pages), lowered by up to 10% when that saves a row or column, then cut into tiles of at most 2,576 px a side
   with at least 10% overlap.
@@ -28,9 +36,11 @@ from dataclasses import dataclass, field
 
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
+from PIL import ImageDraw
 
 from anbud.models import Box
 from anbud.prep.build import DocBuilder, Piece
+from anbud.prep.masking import find_spans
 from anbud.prep.model import OutlineEntry, PageInfo, PageKind, Tile
 from anbud.prep.text import heading_number, normalise
 
@@ -49,6 +59,8 @@ FURNITURE_BAND = 0.15
 FURNITURE_DRIFT = 12.0
 MAX_HEADING = 150
 BOLD_STEP = 200
+SOFT_HYPHEN = "\u00ad"
+MASK_PAD = 1.0  # points around a masked glyph box
 BULLET = re.compile(r"^(?:[•●▪■◦○·\-–*]|\(?[0-9]{1,2}[.)]|\(?[a-zåäö][.)])\s")
 _BOLD_NAMES = (b"bold", b"black", b"heavy", b"semibold", b"demi")
 
@@ -81,6 +93,7 @@ class _Line:
     table: bool
     page: int
     index: int
+    owners: list[_Glyph | None] = field(default_factory=list, repr=False)  # the glyph behind each character of text
     bold: bool = False
 
     @property
@@ -98,7 +111,21 @@ class _Para:
 
     @property
     def text(self) -> str:
-        return " ".join(line.text for line in self.lines)
+        return self.text_and_owners()[0]
+
+    def text_and_owners(self) -> tuple[str, list[_Glyph | None]]:
+        """Lines joined by a space, or by nothing after a soft hyphen (which is dropped)."""
+        text = ""
+        owners: list[_Glyph | None] = []
+        for line in self.lines:
+            if text.endswith(SOFT_HYPHEN):
+                text, owners = text[:-1], owners[:-1]
+            elif text:
+                text += " "
+                owners.append(None)
+            text += line.text
+            owners += line.owners
+        return text, owners
 
     @property
     def box(self) -> Box:
@@ -110,7 +137,34 @@ class _Para:
         )
 
 
-def _glyphs(textpage: pdfium.PdfTextPage, height: float) -> list[_Glyph | None]:
+Transform = Callable[[float, float, float, float], tuple[float, float, float, float]]
+
+
+def display_transform(page: pdfium.PdfPage) -> Transform:
+    """Maps a PDF-space box (left, bottom, right, top) to display coordinates (x0, top, x1, bottom), measured in points
+    from the top-left corner of the page as rendered: crop box origin and /Rotate applied."""
+    rotation = page.get_rotation() % 360
+    left, bottom, right, top = page.get_cropbox()
+    w, h = right - left, top - bottom
+
+    def point(x: float, y: float) -> tuple[float, float]:
+        u, v = x - left, y - bottom
+        if rotation == 90:
+            return v, u
+        if rotation == 180:
+            return w - u, v
+        if rotation == 270:
+            return h - v, w - u
+        return u, h - v
+
+    def box(x0: float, y0: float, x1: float, y1: float) -> tuple[float, float, float, float]:
+        (ax, ay), (bx, by) = point(x0, y0), point(x1, y1)
+        return min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)
+
+    return box
+
+
+def _glyphs(textpage: pdfium.PdfTextPage, to_display: Transform) -> list[_Glyph | None]:
     """The page's characters in PDFium's order; None where PDFium breaks a line."""
     raw = textpage.raw
     name = ctypes.create_string_buffer(256)
@@ -123,7 +177,7 @@ def _glyphs(textpage: pdfium.PdfTextPage, height: float) -> list[_Glyph | None]:
             continue
         if code == 0 or 0xD800 <= code <= 0xDFFF:
             continue
-        ch = "-" if code in (0x02, 0xFFFE) else chr(code)
+        ch = SOFT_HYPHEN if code in (0x02, 0xFFFE) else chr(code)
         if ch.isspace():
             out.append(_SPACE)
             continue
@@ -135,12 +189,16 @@ def _glyphs(textpage: pdfium.PdfTextPage, height: float) -> list[_Glyph | None]:
         pdfium_c.FPDFText_GetFontInfo(raw, i, name, len(name), ctypes.byref(flags))
         named_bold = any(b in name.value.lower() for b in _BOLD_NAMES)
         size = pdfium_c.FPDFText_GetFontSize(raw, i)
-        out.append(_Glyph(ch, left, height - top, right, height - bottom, size, weight, named_bold))
+        x0, y0, x1, y1 = to_display(left, bottom, right, top)
+        out.append(_Glyph(ch, x0, y0, x1, y1, size, weight, named_bold))
     return out
 
 
-def _line_text(glyphs: list[_Glyph]) -> tuple[str, bool]:
+def _line_text(glyphs: list[_Glyph]) -> tuple[str, list[_Glyph | None], bool]:
+    """The line's text, the glyph behind each character (None for inserted spaces and separators), and whether it
+    has a column gap."""
     parts: list[str] = []
+    owners: list[_Glyph | None] = []
     prev: _Glyph | None = None
     space = table = False
     for g in glyphs:
@@ -152,12 +210,15 @@ def _line_text(glyphs: list[_Glyph]) -> tuple[str, bool]:
             gap = g.x0 - prev.x1
             if gap > COLUMN_GAP * size:
                 parts.append(" | ")
+                owners += [None, None, None]
                 table = True
             elif space or gap > 0.25 * size:
                 parts.append(" ")
+                owners.append(None)
         parts.append(g.ch)
+        owners.append(g)
         prev, space = g, False
-    return "".join(parts), table
+    return "".join(parts), owners, table
 
 
 def _lines(glyphs: list[_Glyph | None], page: int, split_columns: bool = False) -> list[_Line]:
@@ -169,11 +230,13 @@ def _lines(glyphs: list[_Glyph | None], page: int, split_columns: bool = False) 
     def flush() -> None:
         marks = [g for g in current if g is not _SPACE]
         if marks:
-            text, table = _line_text(current)
+            text, owners, table = _line_text(current)
+            lead = len(text) - len(text.lstrip())
+            text = text.strip()
             sizes = [g.size for g in marks]
             lines.append(
                 _Line(
-                    text=text.strip(),
+                    text=text,
                     x0=min(g.x0 for g in marks),
                     top=min(g.top for g in marks),
                     x1=max(g.x1 for g in marks),
@@ -184,6 +247,7 @@ def _lines(glyphs: list[_Glyph | None], page: int, split_columns: bool = False) 
                     table=table,
                     page=page,
                     index=len(lines) + 1,
+                    owners=owners[lead : lead + len(text)],
                 )
             )
         current.clear()
@@ -232,13 +296,15 @@ def _classify(page: pdfium.PdfPage, chars: int, map_errors: int) -> tuple[PageKi
     cover = min(image_area / area, 1.0) if area else 0.0
     dpi = max(native) if native else None
     large = area >= 1.4 * A4_AREA
-    unreliable = chars and map_errors > 0.3 * chars
+    unreliable = _unreliable(chars, map_errors)
     if chars < MIN_TEXT_CHARS or unreliable:
         if cover >= 0.5:
             return "scan", dpi
         if paths >= 50:
             return "drawing", dpi
-        return ("scan" if unreliable else "blank"), dpi
+        if unreliable:
+            return "scan", dpi
+        return ("text" if chars else "blank"), dpi
     if large and (paths >= 200 or cover >= 0.5):
         return "drawing", dpi
     if cover >= 0.5:
@@ -246,15 +312,20 @@ def _classify(page: pdfium.PdfPage, chars: int, map_errors: int) -> tuple[PageKi
     return "text", dpi
 
 
+def _unreliable(chars: int, map_errors: int) -> bool:
+    return bool(chars) and map_errors > 0.3 * chars
+
+
 def _scan_page(pdf: pdfium.PdfDocument, index: int) -> _PageScan:
     page = pdf[index]
     width, height = page.get_size()
     textpage = page.get_textpage()
-    glyphs = _glyphs(textpage, height)
+    glyphs = _glyphs(textpage, display_transform(page))
     chars = sum(1 for g in glyphs if g is not None and g is not _SPACE)
     errors = sum(1 for i in range(textpage.count_chars()) if pdfium_c.FPDFText_HasUnicodeMapError(textpage.raw, i) == 1)
     kind, dpi = _classify(page, chars, errors)
-    lines = _lines(glyphs, index + 1, split_columns=kind == "drawing") if kind != "scan" else []
+    # A scan's few characters (a stamp, a page number) still become blocks; a broken text layer does not.
+    lines = [] if _unreliable(chars, errors) else _lines(glyphs, index + 1, split_columns=kind == "drawing")
     info = PageInfo(page=index + 1, width=round(width, 1), height=round(height, 1), kind=kind, chars=chars)
     return _PageScan(info, lines, dpi)
 
@@ -266,11 +337,17 @@ def _furniture(scans: list[_PageScan]) -> set[int]:
     FURNITURE_DRIFT points."""
     seen: dict[tuple[str, int], set[int]] = {}
     band_lines: list[tuple[tuple[str, int], _Line]] = []
+    total = len(scans)
     for scan in scans:
         band = FURNITURE_BAND * scan.info.height
+        page_numbers = {scan.info.page, total}
+
+        def wildcard(m: re.Match[str], numbers: set[int] = page_numbers) -> str:
+            return "#" if int(m.group()) in numbers else m.group()
+
         for line in scan.lines:
             if line.top < band or line.bottom > scan.info.height - band:
-                key = (re.sub(r"\d+", "#", normalise(line.text)), round(line.top / FURNITURE_DRIFT))
+                key = (re.sub(r"\d+", wildcard, normalise(line.text)), round(line.top / FURNITURE_DRIFT))
                 seen.setdefault(key, set()).add(line.page)
                 band_lines.append((key, line))
     threshold = max(3, math.ceil(0.5 * len(scans)))
@@ -397,6 +474,29 @@ def render_dpi(width_pt: float, height_pt: float, native: float | None) -> int:
     return best
 
 
+def _masked_boxes(texts: list[tuple[str, list[_Glyph | None]]]) -> list[tuple[float, float, float, float]]:
+    """One display box per line of each span the masking finds, covering the gaps between its glyphs too."""
+    boxes = []
+    for text, owners in texts:
+        for start, end, _kind in find_spans(text):
+            runs: list[list[_Glyph]] = []
+            for g in (g for g in owners[start:end] if g is not None):
+                if runs and abs(g.top - runs[-1][-1].top) < 0.5 * max(g.size, 1.0):
+                    runs[-1].append(g)
+                else:
+                    runs.append([g])
+            for run in runs:
+                boxes.append(
+                    (
+                        min(g.x0 for g in run),
+                        min(g.top for g in run),
+                        max(g.x1 for g in run),
+                        max(g.bottom for g in run),
+                    )
+                )
+    return boxes
+
+
 def _tiles(
     page: pdfium.PdfPage,
     info: PageInfo,
@@ -404,9 +504,18 @@ def _tiles(
     reason: str,
     native: float | None,
     put_blob: Callable[[bytes], str],
+    masked: list[tuple[float, float, float, float]] | None = None,
 ) -> list[Tile]:
     dpi = render_dpi(info.width, info.height, native)
     image = page.render(scale=dpi / 72).to_pil().convert("RGB")
+    if masked:
+        draw = ImageDraw.Draw(image)
+        scale = dpi / 72
+        for x0, y0, x1, y1 in masked:
+            draw.rectangle(
+                [(x0 - MASK_PAD) * scale, (y0 - MASK_PAD) * scale, (x1 + MASK_PAD) * scale, (y1 + MASK_PAD) * scale],
+                fill=(0, 0, 0),
+            )
     tiles = []
     for k, (x0, y0, x1, y1) in enumerate(tile_grid(*image.size), 1):
         buf = io.BytesIO()
@@ -460,7 +569,7 @@ def read_pdf(
         drop = _furniture(scans)
         kept = {s.info.page: [ln for ln in s.lines if id(ln) not in drop] for s in scans}
         _set_bold([ln for lines in kept.values() for ln in lines])
-        text_pages = [s.info.page for s in scans if s.info.kind in ("text", "mixed")]
+        text_pages = [s.info.page for s in scans if s.info.kind != "drawing" and kept[s.info.page]]
         body = _body_size([ln for page in text_pages for ln in kept[page]])
         paras = {page: _paragraphs(kept[page]) for page in text_pages}
         headings = {id(p) for page in text_pages for p in _demote_label_runs(paras[page], body) if _is_heading(p, body)}
@@ -499,7 +608,12 @@ def read_pdf(
         for scan in scans:
             info = scan.info
             if info.kind in ("scan", "drawing", "mixed"):
-                page_tiles = _tiles(pdf[info.page - 1], info, builder.doc_id, info.kind, scan.native_dpi, put_blob)
+                texts = [(line.text, line.owners) for line in scan.lines]  # furniture included: it is in the image
+                texts += [para.text_and_owners() for para in paras.get(info.page, [])]
+                masked = _masked_boxes(texts)
+                page_tiles = _tiles(
+                    pdf[info.page - 1], info, builder.doc_id, info.kind, scan.native_dpi, put_blob, masked
+                )
                 tiles += page_tiles
                 info = info.model_copy(update={"tiles": len(page_tiles)})
             pages.append(info)
