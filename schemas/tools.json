@@ -1,0 +1,683 @@
+[
+  {
+    "name": "search_blocks",
+    "description": "Search the tender's blocks, outline and page cards. Returns block ids with short snippets.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "description": "Words to look for. Ranked by BM25.",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Only search documents with these roles from the tender map, for example AF or drawing."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "name": "read_blocks",
+    "description": "Read whole blocks by id, with their document, page or row, and position.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "description": "Block ids from search results or the outline.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "name": "outline",
+    "description": "The headings tree of one document or of all documents.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "doc_id": {
+          "type": "string",
+          "description": "One document. Leave out for all documents."
+        }
+      },
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "name": "calc_posts",
+    "description": "The calculation's posts, typed, with ids for citing.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "filter": {
+          "type": "string",
+          "description": "Words matched against post ids and texts. Leave out for every post."
+        }
+      },
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "name": "law_lookup",
+    "description": "One section of a public statute or regulation from the harness's public-law corpus, verbatim.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "description": "The statute or regulation, as cited.",
+          "type": "string"
+        },
+        "section": {
+          "description": "The chapter and section, as cited.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "section"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "name": "view_tile",
+    "description": "One tile of a drawing sheet, as an image.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "sheet": {
+          "description": "The drawing sheet id from the outline.",
+          "type": "string"
+        },
+        "tile": {
+          "description": "The tile id from the sheet's page card.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sheet",
+        "tile"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "name": "submit_map",
+    "description": "Submit the tender map. Call it once, at the end. Code checks it; if a check fails you get the reasons and one chance to fix them.",
+    "input_schema": {
+      "$defs": {
+        "Citation": {
+          "additionalProperties": false,
+          "properties": {
+            "block_id": {
+              "type": "string"
+            },
+            "quote": {
+              "description": "Exact text from the block; checked by code after normalisation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "block_id",
+            "quote"
+          ],
+          "type": "object"
+        },
+        "DocumentRole": {
+          "additionalProperties": false,
+          "properties": {
+            "doc_id": {
+              "type": "string"
+            },
+            "role": {
+              "description": "For example AF, rambeskrivning, drawing, schedule, calc",
+              "type": "string"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "doc_id",
+            "role"
+          ],
+          "type": "object"
+        },
+        "LensPlan": {
+          "additionalProperties": false,
+          "properties": {
+            "lens_id": {
+              "type": "string"
+            },
+            "focus_questions": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 6,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "lens_id",
+            "focus_questions"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "documents": {
+          "items": {
+            "$ref": "#/$defs/DocumentRole"
+          },
+          "type": "array"
+        },
+        "contract_form": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "building_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "occupancy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stated_scope": {
+          "type": "string"
+        },
+        "stage_plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "documents_named_not_present": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "permit_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lenses": {
+          "items": {
+            "$ref": "#/$defs/LensPlan"
+          },
+          "type": "array"
+        },
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "documents",
+        "stated_scope",
+        "lenses"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "submit_flags",
+    "description": "Submit this lens's findings. Call it once, at the end. Code checks every citation and quote; if a check fails you get the reasons and one chance to fix them.",
+    "input_schema": {
+      "$defs": {
+        "Citation": {
+          "additionalProperties": false,
+          "properties": {
+            "block_id": {
+              "type": "string"
+            },
+            "quote": {
+              "description": "Exact text from the block; checked by code after normalisation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "block_id",
+            "quote"
+          ],
+          "type": "object"
+        },
+        "Flag": {
+          "additionalProperties": false,
+          "properties": {
+            "lens_id": {
+              "type": "string"
+            },
+            "claim_type": {
+              "description": "Taxonomy item, for example trade_boundary or contract_vite",
+              "type": "string"
+            },
+            "claim": {
+              "type": "string"
+            },
+            "citations": {
+              "items": {
+                "$ref": "#/$defs/Citation"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "money_basis": {
+              "$ref": "#/$defs/MoneyBasis"
+            },
+            "absence": {
+              "default": false,
+              "description": "The finding is that something is missing",
+              "type": "boolean"
+            },
+            "searches": {
+              "description": "Searches run, required for an absence finding",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "reference_rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The rule an absence is measured against"
+            },
+            "contractual_exposure": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "lens_id",
+            "claim_type",
+            "claim",
+            "citations",
+            "money_basis"
+          ],
+          "type": "object"
+        },
+        "FormulaInput": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "name",
+            "value"
+          ],
+          "type": "object"
+        },
+        "MoneyBasis": {
+          "additionalProperties": false,
+          "description": "How code prices a flag. Flat on purpose: one object, `kind` says which fields apply.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "missing_post",
+                "quantity_gap",
+                "hours_gap",
+                "contract_formula"
+              ],
+              "type": "string"
+            },
+            "post_ref": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Calc post id, if one is affected"
+            },
+            "item": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Catalog item or description for a missing post"
+            },
+            "quantity": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "unit": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "hours": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "formula": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "vite_per_week",
+                    "security",
+                    "index_drift",
+                    "wage_step"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "formula_inputs": {
+              "items": {
+                "$ref": "#/$defs/FormulaInput"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "flags": {
+          "description": "Every finding, each with citations and a money basis. Empty if none.",
+          "items": {
+            "$ref": "#/$defs/Flag"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "flags"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "submit_verdict",
+    "description": "Submit the verdict on the flag under review. Call it once, at the end. Code checks it; if a check fails you get the reasons and one chance to fix them.",
+    "input_schema": {
+      "$defs": {
+        "FormulaInput": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "name",
+            "value"
+          ],
+          "type": "object"
+        },
+        "MoneyBasis": {
+          "additionalProperties": false,
+          "description": "How code prices a flag. Flat on purpose: one object, `kind` says which fields apply.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "missing_post",
+                "quantity_gap",
+                "hours_gap",
+                "contract_formula"
+              ],
+              "type": "string"
+            },
+            "post_ref": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Calc post id, if one is affected"
+            },
+            "item": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Catalog item or description for a missing post"
+            },
+            "quantity": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "unit": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "hours": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "formula": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "vite_per_week",
+                    "security",
+                    "index_drift",
+                    "wage_step"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "formula_inputs": {
+              "items": {
+                "$ref": "#/$defs/FormulaInput"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "fingerprint": {
+          "description": "sha256 of the flag's sorted block ids plus claim type",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "confirmed",
+            "partly",
+            "refuted"
+          ],
+          "type": "string"
+        },
+        "electrical_scope": {
+          "description": "The money belongs to the electrical subcontractor",
+          "type": "boolean"
+        },
+        "covered_by_calc": {
+          "type": "boolean"
+        },
+        "calc_post": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "corrected_money_basis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MoneyBasis"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "would_be_wrong_if": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "verdict",
+        "electrical_scope",
+        "covered_by_calc",
+        "would_be_wrong_if"
+      ],
+      "type": "object"
+    }
+  }
+]
