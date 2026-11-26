@@ -7,8 +7,9 @@
   address (a contact line).
 - **Never mask** numeric spreadsheet cells, or anything shorter than eight digits, so E-numbers and quantities survive
   for the number checks.
-- **Names in known structures:** cells under a column headed namn or hyresgäst become role tokens, one per distinct
-  name in the file. Names in free text are not masked; that limit is stated to the customer.
+- **Names in known structures:** spreadsheet cells under a column headed namn, förnamn, efternamn, kontaktperson,
+  hyresgäst or boende become role tokens, one per distinct name in the file. Names in free text and in PDF or Word
+  tables are not masked; that limit is stated to the customer.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ _SAKERHETSSKYDD = re.compile(r"s[äa]kerhetsskydd", re.IGNORECASE)
 
 _PNR = re.compile(r"(?<![\d-])((?:19|20)?\d{2})(\d{2})(\d{2})([-+]?)(\d{4})(?![\d-])")
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+(?![\w-])")
-_IBAN = re.compile(r"\b([A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?)\b")
+_IBAN_START = re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}")
+_IBAN_CHAR = re.compile(r"[A-Z0-9]")
 _PHONE_LABEL = re.compile(
     r"\b(?:tel|tfn|telefon|telefonnummer|mobil|mobilnummer|mobiltelefon|mob|växel|direkt|fax)\b\.?(?:\s*nr\.?)?\s*[:.]?\s*",
     re.IGNORECASE,
@@ -31,7 +33,14 @@ _PHONE_LABEL = re.compile(
 _PHONE = re.compile(r"(?:\+\s?46|0)[\d\s()\-–—]{5,17}\d")  # hyphen, en dash or em dash between groups
 _PHONE_SEP = re.compile(r"\s*(?:,|/|och|eller)\s*")
 _AFTER_EMAIL = re.compile(r"\s*[,;/]?\s*")
-NAME_HEADER = re.compile(r"\b(?:namn|hyresgäst|hyresgäster)\b", re.IGNORECASE)
+# Column headers that hold people's names. Compounds for rooms, items, files or companies (rumsnamn, artikelnamn,
+# företagsnamn) don't match: only a bare "namn" or a person compound does.
+NAME_HEADER = re.compile(
+    r"(?<![a-zåäö])(?:för|efter|tilltals|mellan|kontakt)?namn(?![a-zåäö])"
+    r"|(?<![a-zåäö])(?:hyresgäst(?:er)?|kontaktperson(?:er)?|boende)(?![a-zåäö])",
+    re.IGNORECASE,
+)
+_HYPHEN_BREAK = re.compile(r"-\s+")
 
 TOKENS: dict[MaskKind, str] = {
     "personnummer": "[personnummer]",
@@ -43,10 +52,12 @@ TOKENS: dict[MaskKind, str] = {
 
 
 def markings(text: str) -> list[MarkingKind]:
+    """Checked on the text as given and with line-break hyphens closed up ("säkerhets- skydd")."""
+    joined = _HYPHEN_BREAK.sub("", text)
     found: list[MarkingKind] = []
-    if _HEMLIG.search(text):
+    if _HEMLIG.search(text) or _HEMLIG.search(joined):
         found.append("hemlig")
-    if _SAKERHETSSKYDD.search(text):
+    if _SAKERHETSSKYDD.search(text) or _SAKERHETSSKYDD.search(joined):
         found.append("sakerhetsskydd")
     return found
 
@@ -77,6 +88,33 @@ def _iban_ok(raw: str) -> bool:
     return int("".join(str(int(c, 36)) for c in moved)) % 97 == 1
 
 
+def _ibans(text: str) -> list[tuple[int, int]]:
+    """IBANs, written compact or in groups with single spaces. The longest checksum-valid prefix wins, so a BIC, a
+    currency or a year after the number never hides it."""
+    found = []
+    pos = 0
+    while m := _IBAN_START.search(text, pos):
+        ends = []  # end offset after each further character, skipping single spaces
+        i, count = m.end(), 4
+        while i < len(text) and count < 34:
+            j = i + 1 if text[i] == " " else i
+            if j < len(text) and _IBAN_CHAR.fullmatch(text[j]) and not (j > i and text[i - 1] == " "):
+                count += 1
+                i = j + 1
+                ends.append(i)
+            else:
+                break
+        hit = next((e for e in reversed(ends) if not _IBAN_CHAR.match(text, e) and _iban_ok(text[m.start() : e])), None)
+        if hit is None:
+            hit = next((e for e in reversed(ends) if _iban_ok(text[m.start() : e])), None)
+        if hit is not None:
+            found.append((m.start(), hit))
+            pos = hit
+        else:
+            pos = m.start() + 1
+    return found
+
+
 @dataclass(frozen=True)
 class Span:
     kind: MaskKind
@@ -97,7 +135,7 @@ def _find(text: str) -> list[tuple[int, int, MaskKind]]:
     for email in emails:  # a contact line: the number right after an address is a phone even without a label
         if (m := _PHONE.match(text, _AFTER_EMAIL.match(text, email.end()).end())) and _phone_digits(m.group()):
             hits.append((m.start(), m.end(), "phone"))
-    hits += [(m.start(1), m.end(1), "iban") for m in _IBAN.finditer(text) if _iban_ok(m.group(1))]
+    hits += [(start, end, "iban") for start, end in _ibans(text)]
     hits += [(m.start(), m.end(), "personnummer") for m in _PNR.finditer(text) if _is_pnr(m)]
     for label in _PHONE_LABEL.finditer(text):
         pos = label.end()
@@ -117,6 +155,11 @@ def _find(text: str) -> list[tuple[int, int, MaskKind]]:
 
 
 SEP = " | "
+
+
+def find_spans(text: str) -> list[tuple[int, int, MaskKind]]:
+    """What the masking would replace in `text`, as (start, end, kind) offsets into `text` itself."""
+    return _find(text)
 
 
 @dataclass(frozen=True)

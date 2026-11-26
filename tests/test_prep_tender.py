@@ -65,13 +65,46 @@ def test_the_intake_manifest_must_match(data_root: Path) -> None:
         load_folder(folder, manifest)
 
 
-def test_a_zip_that_unpacks_too_large_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_oversized_files_and_zip_bombs_are_skipped_not_read(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sources, "MAX_UNZIPPED_BYTES", 1000)
+    monkeypatch.setattr(sources, "MAX_FILE_BYTES", 6000)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("xl/workbook.xml", "0" * 5000)
-    with pytest.raises(SourceError, match="unpacks"):
-        detect_kind(buf.getvalue(), "big.xlsx")
+    big = b"%PDF-1.7 " + b"0" * 7000
+    folder = inbox(data_root, {"bomb.xlsx": buf.getvalue(), "big.pdf": big})
+    loaded = load_folder(folder)
+    assert sorted((s.too_large, s.kind, s.data) for s in loaded.sources) == [(True, "other", b"")] * 2
+    assert hashlib.sha256(big).hexdigest() in {s.sha256 for s in loaded.sources}  # hashed in a stream
+    assert {s.size for s in loaded.sources} == {len(buf.getvalue()), len(big)}
+    summary = tender.prepare("co-001", folder, folder.parent / "prep", root=data_root)
+    assert summary["skipped"] == 2
+
+
+def test_a_linked_inbox_manifest_or_escaping_folder_is_refused(data_root: Path, tmp_path: Path) -> None:
+    pdf = text_pdf("En rad text som är tillräckligt lång för ett textlager.")
+    folder = inbox(data_root, {"a.pdf": pdf})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.pdf").write_bytes(pdf + b"%other")
+    (folder / "sub").symlink_to(outside, target_is_directory=True)
+    assert load_folder(folder).skipped_links == 1 and len(load_folder(folder).sources) == 1
+    linked = folder.parent / "linked-inbox"
+    linked.symlink_to(folder, target_is_directory=True)
+    with pytest.raises(SourceError, match="link"):
+        load_folder(linked)
+    real = folder.parent / "real.sha256"
+    real.write_text(f"{hashlib.sha256(pdf).hexdigest()}  a.pdf\n")
+    (folder.parent / "inbox.sha256").symlink_to(real)
+    with pytest.raises(SourceError, match="regular file"):
+        load_folder(folder, folder.parent / "inbox.sha256")
+
+
+def test_a_sealed_inbox_is_refused(data_root: Path) -> None:
+    sealed = data_root / "heldout" / "co-001" / "t-0002" / "docs"
+    sealed.mkdir(parents=True)
+    with pytest.raises(tender.PrepError, match="sealed"):
+        tender.prepare("co-001", sealed, data_root / "co-001" / "x" / "prep", root=data_root)
 
 
 def test_prepare_writes_private_outputs_and_caches(data_root: Path) -> None:
@@ -110,6 +143,61 @@ def test_a_security_marking_stops_before_any_output(data_root: Path) -> None:
         tender.prepare("co-001", folder, out, root=data_root)
     assert "hemlig" in str(stop.value) and "HEMLIG" not in str(stop.value)
     assert not out.exists()
+
+
+def test_a_marked_file_leaves_no_cache_no_tiles_and_removes_an_earlier_prep(data_root: Path) -> None:
+    clean = text_pdf("En rad text som är tillräckligt lång för ett textlager.")
+    folder = inbox(data_root, {"a.pdf": clean})
+    out = folder.parent / "prep"
+    tender.prepare("co-001", folder, out, root=data_root)
+    assert (out / "blocks.jsonl").exists()
+    company = paths.company_dir("co-001", data_root)
+    blobs_before = sorted((company / "blobs").rglob("*")) if (company / "blobs").exists() else []
+    marked = make_pdf(
+        [
+            Page(texts=[Text(60, 100, "Ritningen omfattas av säkerhetsskydd enligt lagen.", 10)]),
+            Page(size=A2, image=(120, 170)),
+        ]
+    )
+    (folder / "b.pdf").write_bytes(marked)
+    with pytest.raises(tender.IntakeStop):
+        tender.prepare("co-001", folder, out, root=data_root)
+    assert not out.exists()  # the earlier outputs no longer describe the inbox
+    sha = hashlib.sha256(marked).hexdigest()
+    assert not list((company / "prep-cache").rglob(f"{sha}.json"))
+    assert not (company / "prep-staging" / sha).exists()
+    after = sorted((company / "blobs").rglob("*")) if (company / "blobs").exists() else []
+    assert after == blobs_before  # the marked drawing's tiles never reached the blob store
+
+
+def test_outputs_are_swapped_in_whole(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = inbox(data_root, {"a.txt": "Första stycket.".encode()})
+    out = folder.parent / "prep"
+    tender.prepare("co-001", folder, out, root=data_root)
+    first = (out / "blocks.jsonl").read_bytes()
+    (folder / "b.txt").write_bytes(b"Andra filen.")
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tender, "_write_outputs", broken)
+    with pytest.raises(OSError):
+        tender.prepare("co-001", folder, out, root=data_root)
+    assert not out.exists() and not list(folder.parent.glob(".prep.*"))
+    monkeypatch.undo()
+    tender.prepare("co-001", folder, out, root=data_root)
+    assert (out / "blocks.jsonl").read_bytes() != first and not list(folder.parent.glob(".prep.*"))
+
+
+def test_a_multi_page_tiff_is_one_page_per_frame(data_root: Path) -> None:
+    from PIL import Image
+
+    frames = [Image.new("RGB", (400, 300), c) for c in ("white", "gray", "black")]
+    buf = io.BytesIO()
+    frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:])
+    folder = inbox(data_root, {"skanning.tif": buf.getvalue()})
+    summary = tender.prepare("co-001", folder, folder.parent / "prep", root=data_root)
+    assert summary["pages_by_kind"] == {"scan": 3} and summary["tiles"] == 3
 
 
 def test_cli_prep_only_for_dev_tenders_and_prints_counts(data_root: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -43,17 +43,22 @@ def _prep(args: argparse.Namespace) -> int:
     except RunRefused as exc:
         print(f"anbud prep: refused: {exc}", file=sys.stderr)
         return REFUSED
-    if kind == "fixture":
-        inbox = args.fixture.expanduser().resolve()
-        out = paths.company_dir(args.company_id) / "fixtures" / inbox.name / "prep"
-        manifest = None
-    else:
-        tender = paths.dev_tender_dir(args.company_id, args.tender_id)
-        inbox, out, manifest = tender / "inbox", tender / "prep", tender / "inbox.sha256"
     try:
+        if kind == "fixture":
+            inbox = args.fixture.expanduser().resolve()
+            out = paths.company_dir(args.company_id) / "fixtures" / inbox.name / "prep"
+            manifest = None
+        else:
+            tender = paths.dev_tender_dir(args.company_id, args.tender_id)
+            inbox, out, manifest = tender / "inbox", tender / "prep", tender / "inbox.sha256"
+            if not inbox.resolve().is_relative_to(tender.resolve()):
+                raise PrepError("the inbox resolves outside the tender's folder")
         summary = prepare(args.company_id, inbox, out, manifest)
     except (PrepError, SourceError, StoreError) as exc:
         print(f"anbud prep: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    except (OSError, ValueError) as exc:  # the message may hold a path, so only the type is shown
+        print(f"anbud prep: stopped: {type(exc).__name__} while reading the tender", file=sys.stderr)
         return REFUSED
     for key, value in summary.items():
         print(f"{key}: {value}")
