@@ -2,7 +2,7 @@
 name: missing_documents
 description: Documents the tender names or relies on that are not in the package, and the risk the contract puts on the contractor for what they would have shown.
 role: lens
-tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, catalog_search, submit_flags]
 ---
 
 # Documents named but missing

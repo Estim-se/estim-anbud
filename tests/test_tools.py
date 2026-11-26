@@ -14,13 +14,13 @@ from anbud.schema import complexity
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_the_list_has_six_strict_read_tools_and_three_submit_tools() -> None:
+def test_the_list_has_seven_strict_read_tools_and_three_submit_tools() -> None:
     shared = tools.shared_tools()
     assert [t["name"] for t in shared] == [
-        "search_blocks", "read_blocks", "outline", "calc_posts", "law_lookup", "view_tile",
+        "search_blocks", "read_blocks", "outline", "calc_posts", "law_lookup", "view_tile", "catalog_search",
         "submit_map", "submit_flags", "submit_verdict",
     ]  # fmt: skip
-    assert [t.get("strict", False) for t in shared] == [True] * 6 + [False] * 3
+    assert [t.get("strict", False) for t in shared] == [True] * 7 + [False] * 3
 
 
 def test_the_list_stays_inside_strict_mode_limits() -> None:
@@ -124,4 +124,4 @@ def test_a_role_is_limited_in_the_loop() -> None:
 def test_schema_check_passes_offline(capsys: pytest.CaptureFixture[str]) -> None:
     assert schema_check.main([]) == 0
     out = capsys.readouterr().out
-    assert "9 tools" in out and "strict tools 6/20" in out
+    assert "10 tools" in out and "strict tools 7/20" in out

@@ -2,7 +2,7 @@
 name: contract_terms
 description: Contract terms and deviations from the standard general and subcontract terms - penalties, security, payment, liability, index, change terms and notice deadlines.
 role: lens
-tools: [search_blocks, read_blocks, outline, calc_posts, law_lookup, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, law_lookup, catalog_search, submit_flags]
 ---
 
 # Contract terms

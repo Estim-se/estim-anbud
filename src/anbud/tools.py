@@ -66,6 +66,10 @@ class ViewTileInput(_Input):
     tile: str = Field(min_length=1, max_length=50, description="The tile id from the sheet's page card.")
 
 
+class CatalogSearchInput(_Input):
+    query: str = Field(min_length=1, max_length=200, description="Words for the item, for example 'nödljusarmatur'.")
+
+
 class SubmitFlagsInput(_Input):
     flags: list[Flag] = Field(description="Every finding, each with citations and a money basis. Empty if none.")
 
@@ -100,6 +104,13 @@ _TOOLS = (
         strict=True,
     ),
     ToolSpec("view_tile", "One tile of a drawing sheet, as an image.", ViewTileInput, strict=True),
+    ToolSpec(
+        "catalog_search",
+        "Search the estimating catalog for the item a missing_post or quantity_gap names. Returns item ids, names, "
+        "units and categories, never prices; put the id that fits in money_basis.catalog_id.",
+        CatalogSearchInput,
+        strict=True,
+    ),
     ToolSpec(
         "submit_map",
         "Submit the tender map. Call it once, at the end. Code checks it; if a check fails you get the reasons and one "
@@ -157,8 +168,9 @@ class Role:
 
 ROLES: dict[str, Role] = {
     "map": Role(_READ | {"submit_map"}, shared_prefix=True),
-    "lens": Role(_READ | {"law_lookup", "view_tile", "submit_flags"}, shared_prefix=True),
-    "lens_generic_scope": Role(_READ | {"submit_flags"}, shared_prefix=True),  # Sonnet writes its own prefix
+    "lens": Role(_READ | {"law_lookup", "view_tile", "catalog_search", "submit_flags"}, shared_prefix=True),
+    # Sonnet writes its own prefix
+    "lens_generic_scope": Role(_READ | {"catalog_search", "submit_flags"}, shared_prefix=True),
     "verifier": Role(frozenset({"read_blocks", "search_blocks", "calc_posts", "submit_verdict"}), shared_prefix=True),
     "merge": Role(frozenset({"submit_flags"}), shared_prefix=False),
     "page_cards": Role(frozenset(), shared_prefix=False),  # reads tiles from its prompt; output format comes with prep

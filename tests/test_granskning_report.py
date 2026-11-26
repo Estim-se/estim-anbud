@@ -64,7 +64,16 @@ def test_html_escapes_every_model_and_document_string() -> None:
 def test_the_workbook_has_swedish_labels_text_cells_and_keys() -> None:
     reviewer = (Column("decision", "Beslut", 12), Column("minutes", "Minuter", 8))
     wb = build_workbook(_report(), extra_columns=reviewer)
-    assert wb.sheetnames == ["Flaggor", "Generiska", "Loggade", "Täckning", "Om rapporten", "_nycklar"]
+    assert wb.sheetnames == [
+        "Flaggor",
+        "Krav utan prisuppgift",
+        "Generiska",
+        "Loggade",
+        "Alla flaggor",
+        "Täckning",
+        "Om rapporten",
+        "_nycklar",
+    ]
     assert wb["_nycklar"].sheet_state == "hidden"
     ws = wb["Flaggor"]
     labels = [c.value for c in ws[1]]
