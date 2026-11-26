@@ -214,6 +214,11 @@ def run_dev_tender(
         hint = "start a new --run-id (--base-run reuses its extraction)" if sdk else "replay it with --base-run"
         raise KalkylError(f"run {run_id} is finished and frozen; {hint}")
     salt = base_salt(store, base_run) if base_run is not None else None
+    stored_base = store.stored_base_run(run_id)
+    if base_run is not None and stored_base is not None and stored_base != base_run:
+        raise KalkylError(f"run {run_id} is a rebuild from {stored_base}; resume it with that base or without one")
+    store.open_run(run_id, salt=salt, code=code, base_run=base_run)
+    base_run = base_run or stored_base  # a resumed rebuild keeps the base it started from
     budget = Budget(kalkyl.hard_stop)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
     corpus, cards = with_cards(client, store, corpus, tender_id)

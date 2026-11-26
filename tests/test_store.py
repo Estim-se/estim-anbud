@@ -118,6 +118,17 @@ def test_a_run_keeps_its_salt(tmp_path: Path) -> None:
         store.open_run("run-1", salt="another")
 
 
+def test_a_rebuild_records_its_base_run_once(tmp_path: Path) -> None:
+    store = RunStore("co-999", root=tmp_path)
+    store.open_run("run-1", base_run="run-0")
+    store.open_run("run-1", base_run="run-9")  # an existing manifest is never rewritten
+    assert store.stored_base_run("run-1") == "run-0"
+    store.open_run("run-2")
+    assert store.stored_base_run("run-2") is None and store.stored_base_run("run-missing") is None
+    with pytest.raises(StoreError):
+        store.open_run("run-3", base_run="../escape")
+
+
 def test_a_repeated_request_is_answered_from_the_cache_at_no_cost(tmp_path: Path) -> None:
     store = RunStore("co-999", root=tmp_path)
     sdk = FakeSDK()

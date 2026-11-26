@@ -162,15 +162,20 @@ class RunStore:
     def run_dir(self, run_id: str) -> Path:
         return self.dir / "runs" / check_run_id(run_id)
 
-    def open_run(self, run_id: str, salt: str | None = None, code: dict[str, Any] | None = None) -> str:
+    def open_run(
+        self, run_id: str, salt: str | None = None, code: dict[str, Any] | None = None, base_run: str | None = None
+    ) -> str:
         """The run's salt: read back for an existing run (resume, replay), created for a new one. `code`, the code the
-        run started with, goes into a new run's manifest; an existing manifest is never rewritten."""
+        run started with, and `base_run`, the run a rebuild took its salt from, go into a new run's manifest; an
+        existing manifest is never rewritten, so a resumed rebuild keeps the base it started from."""
         manifest = self.run_dir(run_id) / "run.json"
         if not manifest.exists():
             chosen = salt or secrets.token_hex(16)
             record: dict[str, Any] = {"salt": chosen, "company_id": self.company_id}
             if code is not None:
                 record["code"] = code
+            if base_run is not None:
+                record["base_run"] = check_run_id(base_run)
             tmp = self._temp(manifest, canonical(record))
             try:
                 os.link(tmp, manifest)  # fails if another process created the run first; then its salt wins
@@ -183,6 +188,14 @@ class RunStore:
         if salt is not None and salt != stored:
             raise StoreError("this run already has a different salt")
         return stored
+
+    def stored_base_run(self, run_id: str) -> str | None:
+        """The run a stored rebuild took its salt from; None for a run that isn't a rebuild or doesn't exist."""
+        manifest = self.run_dir(run_id) / "run.json"
+        if not manifest.is_file():
+            return None
+        base = json.loads(manifest.read_text()).get("base_run")
+        return str(base) if base is not None else None
 
     def stored_salt(self, run_id: str) -> str | None:
         """A stored run's salt, read without writing anything to it (a frozen run is read-only); None if there's no
