@@ -62,9 +62,56 @@ def test_constraints_dropped_from_strict_schemas_are_still_enforced_in_code() ->
 def test_the_role_table_matches_the_config_and_the_list() -> None:
     providers = tomllib.loads((ROOT / "config" / "providers.toml").read_text())
     assert set(tools.ROLES) == set(providers["roles"])
-    used = set().union(*(role.tools for role in tools.ROLES.values()))
+    used = set().union(*(role.tools for role in tools.ROLES.values() if not role.own_tools))
     assert used == set(tools.TOOL_NAMES)  # every tool has a role, and no role names a tool that doesn't exist
+    for role in tools.ROLES.values():
+        if role.own_tools:  # a role with its own list may call exactly that list
+            assert role.tools == {spec.name for spec in role.own_tools}
+            assert not role.tools & set(tools.TOOL_NAMES)
     assert tools.ROLES["verifier"].tools == {"read_blocks", "search_blocks", "calc_posts", "submit_verdict"}
+
+
+def test_every_opus_role_sends_the_one_shared_tools_array_and_system_blocks() -> None:
+    from types import SimpleNamespace
+
+    from anbud.config import load_config
+    from anbud.model_client import Budget, ModelClient, PrefixDrift
+
+    config = load_config()
+    opus = [role for role in tools.ROLES if config.model_for(role) == config.models["opus"]]
+    assert opus, "no Opus role"
+    client = ModelClient(config, SimpleNamespace(), Budget(1.0), run_id="r", company_id="co-test")
+    system = [{"type": "text", "text": "Synthetic shared system block."}]
+    messages = [{"role": "user", "content": "x"}]
+    for role in opus:
+        spec = tools.ROLES[role]
+        assert not spec.own_tools and spec.shared_prefix, role
+        params = client.request(role=role, system=system, messages=messages, max_tokens=8, effort="high")
+        assert params["tools"] == tools.shared_tools(), role
+        client._check_prefix(role, params)  # every Opus role in one run: one prefix
+    other = client.request(
+        role=opus[0], system=[{"type": "text", "text": "Other."}], messages=messages, max_tokens=8, effort="high"
+    )
+    with pytest.raises(PrefixDrift):
+        client._check_prefix(opus[-1], other)
+
+
+def test_a_role_with_its_own_list_sends_only_that_list() -> None:
+    from types import SimpleNamespace
+
+    from anbud.config import load_config
+    from anbud.model_client import ModelClient
+
+    client = ModelClient(load_config(), SimpleNamespace(), None, run_id="r", company_id="co-test")  # type: ignore[arg-type]
+    for role, spec in tools.ROLES.items():
+        if not spec.own_tools:
+            continue
+        params = client.request(role=role, system=[], messages=[], max_tokens=8, effort="low")
+        assert [t["name"] for t in params["tools"]] == [s.name for s in spec.own_tools]
+        assert params["model"] != load_config().models["opus"]
+    assert tools.refusal("kalkyl_extract", "submit_quantities") is None
+    assert tools.refusal("kalkyl_extract", "search_blocks") is not None
+    assert tools.refusal("lens", "submit_quantities") is not None
 
 
 def test_a_role_is_limited_in_the_loop() -> None:

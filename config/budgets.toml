@@ -4,6 +4,9 @@
 hard_stop = 20.00
 target_median = 15.00
 
+[kalkyl]
+hard_stop = 3.00 # per Kalkyl run; about $1-2.5 expected at the dev tender's size (plan section 7)
+
 [schema_check]
 hard_stop = 0.10
 

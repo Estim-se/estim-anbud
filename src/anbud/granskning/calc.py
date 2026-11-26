@@ -5,6 +5,7 @@
   header row. A sheet may hold several tables.
 - A row with text and at least one number in a named column is a post. A row with text and no number is a section
   heading for the posts under it. Zero quantities and amounts are kept: a post priced at 0 is often the finding.
+- Subtotal and total rows ("Summa ...", "Delsumma", "Totalt") are not posts: they would count their posts twice.
 - Rows outside any table that hold text and numbers are kept as untyped posts: their values go into the text.
 - Values are the calc's cached ones (openpyxl `data_only`); a formula without a cached value reads as empty.
 - Post ids are stable: the file's sha256 prefix, the sheet's position and the row, for example `c1a2b3c4-s2-r17`.
@@ -35,6 +36,10 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("code", re.compile(r"^nr\.?$|^pos|^kod|art\w*\s*nr|^id$|^e-?nr|^littera")),
 ]
 
+_TOTAL_ROW = re.compile(
+    r"^(?:(?:del|sub)?summa\b|s:a\b|summering\b|totalt?(?:\s*(?:summa|belopp|kr|sek|(?:exkl|inkl)\b.*))?\s*:?$)",
+    re.IGNORECASE,
+)
 _NUMBER = re.compile(r"^-?\d{1,3}(?:[\s ]\d{3})+(?:[.,]\d+)?$|^-?\d+(?:[.,]\d+)?$")
 
 
@@ -150,6 +155,8 @@ def _sheet_posts(prefix: str, index: int, ws: Any) -> list[CalcPost]:
             continue
         if all(v is None for v in numbers.values()):
             section = text
+            continue
+        if _TOTAL_ROW.match(text):
             continue
         if text_col is not None:
             hidden = hidden or _column_letter(text_col) in hidden_cols

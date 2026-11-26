@@ -6,6 +6,7 @@ store. For the tender, prep writes into its `prep/` folder:
 
     documents.json   one entry per file: id, kind, size, pages, sheets, counts, and its local path(s)
     blocks.jsonl     every block, masked, in document order
+    cells.jsonl      for each sheet_row and table_row block, its masked cells with their columns (a sidecar)
     outline.json     headings, bookmarks and sheets
     tiles.json       tile metadata; the PNGs are blobs
     masking.jsonl    every masked span with its original text (local, like the files themselves)
@@ -48,6 +49,7 @@ from anbud.prep.text import DOC_PREFIX
 from anbud.store import RunStore, StoreError, canonical
 
 PREP_VERSION = "1"
+CELLS_FILE = "cells.jsonl"
 _LIBRARIES = ("pypdfium2", "openpyxl", "pillow", "defusedxml")
 MAX_IMAGE_PIXELS = 120_000_000
 MAX_IMAGE_PAGES = 500
@@ -243,6 +245,7 @@ def prepare_file(src: Source, store: RunStore, version: str | None = None) -> tu
         masked=builder.masked,
         markings=builder.markings,
         furniture_dropped=dropped,
+        cells=builder.cells,
     )
     if builder.markings:
         staging.discard()
@@ -315,6 +318,32 @@ def prepare(
     return summary
 
 
+def write_cells_sidecar(
+    company_id: str, inbox: Path, out_dir: Path, manifest: Path | None = None, root: Path | None = None
+) -> dict[str, Any]:
+    """Add `cells.jsonl` to an existing prep folder without touching anything else in it, for a tender whose blocks
+    must stay as they are (a frozen run). The files are prepared again (cached per company), and the sidecar is
+    written only if the blocks come out byte for byte as in the folder's `blocks.jsonl`; otherwise nothing changes."""
+    store = RunStore(company_id, root)
+    if any(paths.is_sealed_path(p, root) for p in (inbox, out_dir)) or (
+        manifest is not None and paths.is_sealed_path(manifest, root)
+    ):
+        raise PrepError("the inbox, manifest or output folder is in held-out or sealed storage")
+    current = out_dir / "blocks.jsonl"
+    if not current.exists():
+        raise PrepError("the tender has no prep output; run `anbud prep` first")
+    loaded = load_folder(inbox, manifest)
+    version = code_version()
+    docs = [prepare_file(src, store, version)[0] for src in loaded.sources]
+    if any(d.markings for d in docs):
+        raise IntakeStop([m for d in docs for m in d.markings])
+    if _jsonl([b for d in docs for b in d.blocks]) != current.read_bytes():
+        raise PrepError("the blocks would differ from the prep folder's; run `anbud prep` for a full prep instead")
+    rows = [c for d in docs for c in d.cells]
+    store.write_file(out_dir / CELLS_FILE, _jsonl(rows))
+    return {"rows_with_cells": len(rows), "blocks_unchanged": True}
+
+
 def _write_outputs(store: RunStore, out_dir: Path, loaded: Loaded, docs: list[DocPrep], summary: dict) -> None:
     documents = []
     for src, doc in zip(loaded.sources, docs, strict=True):
@@ -338,4 +367,5 @@ def _write_outputs(store: RunStore, out_dir: Path, loaded: Loaded, docs: list[Do
     store.write_file(out_dir / "outline.json", canonical([o.model_dump() for d in docs for o in d.outline]))
     store.write_file(out_dir / "tiles.json", canonical([t.model_dump() for d in docs for t in d.tiles]))
     store.write_file(out_dir / "masking.jsonl", _jsonl([m for d in docs for m in d.masked]))
+    store.write_file(out_dir / CELLS_FILE, _jsonl([c for d in docs for c in d.cells]))
     store.write_file(out_dir / "summary.json", json.dumps(summary, indent=2, sort_keys=True).encode())
