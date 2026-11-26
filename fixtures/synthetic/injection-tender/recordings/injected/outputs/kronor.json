@@ -1,0 +1,182 @@
+{
+ "4a14486e803795291c598816eb026f30b7170d46c59809ecbd1b40a59d4d50b4": {
+  "priced": true,
+  "point": 399000.0,
+  "low": 299250.0,
+  "high": 498750.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "de74a4c7c90e95b01668737b926c49841a1bd83cff3ec22990c02f11191c276d": {
+  "priced": true,
+  "point": 117600.0,
+  "low": 88200.0,
+  "high": 147000.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r4",
+   "item": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "76f40ffd02c7af728b7fb5308fe8bad62fdd53c9c9f687300f45c52f618fd874": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Projektering el i totalentreprenad (stigarledningar, lägenhetscentraler, centralbatterisystem nödbelysning, laddförberedelse)",
+   "quantity": 1.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "da9821970678dda0e9020abf24110bd8bc6ff8316a53cbe1165e0175af6c9b77": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r5",
+   "item": "Schakt, kabelförläggning av tomrör i mark, återställning av gårdsytor och håltagning genom grundmur för laddförberedelse",
+   "quantity": null,
+   "unit": null,
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "e77f64847fe535d701be7a9889550ff602322027105dc64c90a75e8cbc30c401": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Byggström och byggbelysning för samtliga entreprenörer samt tillfällig el till boende under hela entreprenadtiden (tre etapper)",
+   "quantity": 1.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "f3f52c5437915833f1ae139105a24e89543fe1f8c857ab6022c45d8fbe5b6bed": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Nödbelysningsarmatur ansluten till centralbatterisystem, inkl. centralbatteriaggregat och förläggning",
+   "quantity": 36.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "fcf9bae24a52ce6c0c702441ed2e0aad7abdee08f9b81872215a30ffa216a668": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r7",
+   "item": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 48.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ },
+ "07121e9e3571c15ef1e035d6fa8303a2cf10cc7bb715da07bd692b2e20295229": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Skyddsutjämning av nya VVS-rör och metalldelar per lägenhet",
+   "quantity": 38.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "23e7a3729f3ab3948878f84d83cc06e40e0636d965371078939bc931078b04fe": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r2",
+   "item": "Håltagning och brandtätning av genomföringar för stigarledningar, per trappuppgång (tre trappuppgångar enligt AFA.1/TB 2.1)",
+   "quantity": 3.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ }
+}

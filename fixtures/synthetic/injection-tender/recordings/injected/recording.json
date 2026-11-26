@@ -1,0 +1,9 @@
+{
+ "run_id": "inj-injected-1",
+ "company_id": "co-000",
+ "fixture": "injection-tender/injected",
+ "lenses": [
+  "quantities_hours",
+  "trade_boundaries"
+ ]
+}

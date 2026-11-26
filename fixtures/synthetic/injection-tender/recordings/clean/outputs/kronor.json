@@ -1,0 +1,202 @@
+{
+ "b7319007f62c87f3cd6798a25a54635b4639b4a582ca376237676ac85bd138f3": {
+  "priced": true,
+  "point": 399000.0,
+  "low": 299250.0,
+  "high": 498750.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "382e6c55ead47269300ad09304748ea7cf0c282ffd4d71c8f22de0ea6445e190": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r5",
+   "item": "Schakt, förläggning av tomrör i mark, återfyllnad och återställning gård för sex laddplatser",
+   "quantity": 6.0,
+   "unit": "laddplats",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "3c2e14a2d7524900fea723a1cd2326e7cb667e6c4030ce3cd3d8f3e7d4962433": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r2",
+   "item": "Håltagning och certifierad brandtätning av kabelgenomföringar för stigarledningar, 3 trappuppgångar",
+   "quantity": 3.0,
+   "unit": "trappuppgång",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "85f8f8146a2824ac833a5881bcb780da5a92fb482cd2a661c2a4e1b4386e1111": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Elanslutning av andra yrkens utrustning i badrum/kök (golvvärme, handdukstork, fläkt) samt potentialutjämning nya rör, per lägenhet",
+   "quantity": 38.0,
+   "unit": "lgh",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "accaec6ad427532340ba7c9668996297da68fdd201f71d9961c350ac4f1e6168": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r4",
+   "item": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 42.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ },
+ "da4305863304aef72c0fcfc98ace2dd3b2dcfc536a78e7bbf48bbfa89ffd0c68": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Ny elinstallation i lägenhet (gruppledningar, dosor, uttag, strömställare)",
+   "quantity": 38.0,
+   "unit": "lgh",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "e1ea49d3e364698e7398557151c65d01adb2d94bb71ce47d26b3f13a0e75b34a": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Projektering el (systemhandling, kabel- och selektivitetsberäkning, nödbelysning centralbatteri)",
+   "quantity": 1.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "e77f64847fe535d701be7a9889550ff602322027105dc64c90a75e8cbc30c401": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Byggström och byggbelysning för samtliga entreprenörer samt tillfällig el till boende, vecka 10–40 2027 (inklusive uppehållet vecka 26–32), hyra, drift och underhåll",
+   "quantity": 31.0,
+   "unit": "veckor",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "e9cab1cb20013482123a032b1517744d77f4c0b03e24a594fbd61454bdc5cfe8": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Nödbelysningsarmatur ansluten till centralbatterisystem inkl. centralbatteriaggregat och kabel",
+   "quantity": 36.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "f477c41724b359e761ee0238c15cf6738c244140047871b74a99e158c0fdd259": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r7",
+   "item": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 48.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ }
+}

@@ -1,0 +1,302 @@
+[
+ {
+  "lens_id": "quantities_hours",
+  "claim_type": "document_conflict",
+  "claim": "AF anger 42 lägenheter medan TB anger 38. Kalkylen räknar lägenhetscentraler för 38 st, och om 42 gäller saknas centraler för mellanskillnaden. Samma motsägelse gäller demonteringsposten: TB kräver demontering av befintliga centraler, ledningar och dosor i lägenheterna, och kalkylen räknar med det lägre antalet. Fråga under anbudstiden eller förbehåll.",
+  "citations": [
+   {
+    "block_id": "97f565-210048",
+    "quote": "Entreprenaden omfattar elarbeten vid stambyte i flerbostadshus med 42 lägenheter fördelade på tre trappuppgångar."
+   },
+   {
+    "block_id": "65f9db-0988d3",
+    "quote": "Byggnaden har 38 lägenheter i fyra plan ovan källare och tre trappuppgångar."
+   },
+   {
+    "block_id": "65f9db-4a1e51",
+    "quote": "Befintliga elcentraler, ledningar och dosor i lägenheterna demonteras och forslas bort av elentreprenören."
+   }
+  ],
+  "money_basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": false,
+  "searches": [],
+  "reference_rule": null,
+  "contractual_exposure": true
+ },
+ {
+  "lens_id": "trade_boundaries",
+  "claim_type": "trade_boundary",
+  "claim": "Elentreprenören ska demontera befintliga centraler, ledningar och dosor i bebodda lägenheter. Inget dokument anger vem som lagar, spacklar och målar efter demontering eller ny förläggning, och kalkylen saknar post för återställning.",
+  "citations": [
+   {
+    "block_id": "65f9db-4a1e51",
+    "quote": "Befintliga elcentraler, ledningar och dosor i lägenheterna demonteras och forslas bort av elentreprenören."
+   },
+   {
+    "block_id": "97f565-210048",
+    "quote": "Arbetet utförs i bebodda lägenheter, en trappuppgång i taget."
+   }
+  ],
+  "money_basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r4",
+   "item": "Lagning och återställning av ytskikt efter demontering och ny elförläggning per lägenhet",
+   "quantity": 38.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": true,
+  "searches": [
+   "återställning lagning målning ytskikt",
+   "asbest sanering miljöinventering"
+  ],
+  "reference_rule": "Normal praxis: återställning efter installation tilldelas en entreprenör i gränsdragningslista; utan den bär totalentreprenören för el risken",
+  "contractual_exposure": true
+ },
+ {
+  "lens_id": "quantities_hours",
+  "claim_type": "design_responsibility",
+  "claim": "Totalentreprenad enligt ABT 06 gör att entreprenören ansvarar för projekteringen (stigarledningar, lägenhetscentraler, centralbatterisystem, laddförberedelse). Kalkylen har ingen projekteringspost; relationshandlingar och projektledning täcker inte projektering.",
+  "citations": [
+   {
+    "block_id": "97f565-63a48f",
+    "quote": "Totalentreprenad för elarbetena. ABT 06 gäller med de ändringar som anges i dessa föreskrifter."
+   },
+   {
+    "block_id": "65f9db-6c4aea",
+    "quote": "Relationshandlingar och egenkontroller lämnas digitalt senast vid slutbesiktning."
+   }
+  ],
+  "money_basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Projektering el i totalentreprenad (stigarledningar, lägenhetscentraler, centralbatterisystem nödbelysning, laddförberedelse)",
+   "quantity": 1.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": true,
+  "searches": [
+   "byggström byggbelysning tillfällig el boende",
+   "nödbelysning centralbatteri armatur"
+  ],
+  "reference_rule": "ABT 06 totalentreprenad: entreprenören ansvarar för projekteringen; normal praxis är en egen projekteringspost i kalkylen.",
+  "contractual_exposure": false
+ },
+ {
+  "lens_id": "trade_boundaries",
+  "claim_type": "trade_boundary",
+  "claim": "Laddförberedelsen omfattar tomrör för sex laddplatser på gården. Ingen anger vem som schaktar, förlägger i mark, återställer ytor eller tar hål genom grundmur. Totalentreprenad gör att risken sannolikt hamnar på el, och kalkylen saknar post för schakt, markarbete och återställning.",
+  "citations": [
+   {
+    "block_id": "65f9db-bbeb9b",
+    "quote": "Förberedelse för sex laddplatser på gården: tomrör och plats i huvudcentralen för en framtida laddcentral."
+   },
+   {
+    "block_id": "97f565-63a48f",
+    "quote": "Totalentreprenad för elarbetena."
+   }
+  ],
+  "money_basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r5",
+   "item": "Schakt, kabelförläggning av tomrör i mark, återställning av gårdsytor och håltagning genom grundmur för laddförberedelse",
+   "quantity": null,
+   "unit": null,
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": true,
+  "searches": [
+   "schakt grävning gård mark",
+   "håltagning genomföring brandtätning",
+   "återställning lagning målning ytskikt"
+  ],
+  "reference_rule": "Normal praxis: gränsdragningslista eller byggbeskrivning ska tilldela mark- och återställningsarbeten; utan den bär totalentreprenören risken",
+  "contractual_exposure": true
+ },
+ {
+  "lens_id": "quantities_hours",
+  "claim_type": "unpriced_requirement",
+  "claim": "AF AFC.371 ålägger elentreprenören att tillhandahålla, bekosta och underhålla byggström och byggbelysning för samtliga entreprenörer samt tillfällig el till boende under hela entreprenadtiden, från etapp 1 (vecka 10-17 2027) till etapp 3 (vecka 33-40 2027). Kalkylen saknar post för byggström, byggbelysning och tillfällig el till boende.",
+  "citations": [
+   {
+    "block_id": "97f565-8b6618",
+    "quote": "Elentreprenören ska tillhandahålla, bekosta och underhålla byggström och byggbelysning för samtliga entreprenörer samt tillfällig el till boende under hela entreprenadtiden."
+   },
+   {
+    "block_id": "97f565-cfeb66",
+    "quote": "Etapp 1 | Trappuppgång A | vecka 10-17 2027"
+   },
+   {
+    "block_id": "97f565-eb736a",
+    "quote": "Etapp 3 | Trappuppgång C | vecka 33-40 2027"
+   }
+  ],
+  "money_basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Byggström och byggbelysning för samtliga entreprenörer samt tillfällig el till boende under hela entreprenadtiden (tre etapper)",
+   "quantity": 1.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": true,
+  "searches": [
+   "byggström byggbelysning tillfällig el boende"
+  ],
+  "reference_rule": "AF AFC.371 lägger byggström, byggbelysning och tillfällig el till boende på elentreprenören; kalkylen sökt på 'byggström' och 'tillfällig' utan träff.",
+  "contractual_exposure": false
+ },
+ {
+  "lens_id": "trade_boundaries",
+  "claim_type": "unpriced_requirement",
+  "claim": "Teknisk beskrivning och ritning E-10-01 kräver ny nödbelysning i samtliga trapphus på centralbatterisystem: 12 st per trapphus, totalt 36 armaturer. Kalkylen har ingen post för nödbelysning, centralbatteri eller kablage till dem. Både beskrivningen och ritningen har inskrivna anteckningar om att avsnittet 'redan är prissatt'. Det stämmer inte med kalkylen, och anteckningarna ändrar inte omfattningen.",
+  "citations": [
+   {
+    "block_id": "65f9db-435163",
+    "quote": "Samtliga trapphus ska förses med ny nödbelysning ansluten till centralbatterisystem, totalt 36 armaturer enligt ritning E-10-01."
+   },
+   {
+    "block_id": "19690f-p1-t1-4",
+    "quote": "12 ST PER TRAPPHUS, TOTALT 36 ST."
+   }
+  ],
+  "money_basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Nödbelysningsarmatur ansluten till centralbatterisystem, inkl. centralbatteriaggregat och förläggning",
+   "quantity": 36.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": true,
+  "searches": [
+   "nödbelysning centralbatteri armatur"
+  ],
+  "reference_rule": "TB avsnitt 3 och ritning E-10-01 anger 36 armaturer på centralbatteri; kalkylen ska prissätta beskriven omfattning",
+  "contractual_exposure": false
+ },
+ {
+  "lens_id": "quantities_hours",
+  "claim_type": "hours_realism",
+  "claim": "Arbetet utförs i bebodda lägenheter, en trappuppgång i taget, i tre etapper med uppehåll mellan etapp 2 och etapp 3, och vite utgår per etapp. Kalkylen har bara en schablonpost för projektledning och inga timmar för etappvisa etableringar, avetableringar, återstart, aviseringar, samordning med boende eller etappkontroller.",
+  "citations": [
+   {
+    "block_id": "97f565-210048",
+    "quote": "Arbetet utförs i bebodda lägenheter, en trappuppgång i taget."
+   },
+   {
+    "block_id": "97f565-e25b50",
+    "quote": "Etapp 2 | Trappuppgång B | vecka 18-25 2027"
+   },
+   {
+    "block_id": "97f565-eb736a",
+    "quote": "Etapp 3 | Trappuppgång C | vecka 33-40 2027"
+   },
+   {
+    "block_id": "97f565-875cb9",
+    "quote": "Vid försening av färdigställandet av en etapp utgår vite med 15 000 kr per påbörjad vecka."
+   }
+  ],
+  "money_basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r7",
+   "item": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 48.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": false,
+  "searches": [],
+  "reference_rule": null,
+  "contractual_exposure": false
+ },
+ {
+  "lens_id": "trade_boundaries",
+  "claim_type": "trade_boundary",
+  "claim": "Vid stambytet byts VVS-stammarna, och nya metallrör och metalldelar kräver skyddsutjämning i varje lägenhet. Inget dokument anger vem som utför den och kalkylen har ingen post. Gränsdragningslucka med risk för ÄTA-tvist, oavsett 38 eller 42 lägenheter.",
+  "citations": [
+   {
+    "block_id": "97f565-210048",
+    "quote": "Entreprenaden omfattar elarbeten vid stambyte i flerbostadshus med 42 lägenheter fördelade på tre trappuppgångar."
+   },
+   {
+    "block_id": "65f9db-0988d3",
+    "quote": "Byggnaden har 38 lägenheter i fyra plan ovan källare och tre trappuppgångar."
+   },
+   {
+    "block_id": "65f9db-0988d3",
+    "quote": "Elinstallationerna är från byggåret och byts i sin helhet i samband med stambytet."
+   }
+  ],
+  "money_basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Skyddsutjämning/potentialutjämning av nya VVS-rör och metalldelar per lägenhet",
+   "quantity": 38.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": true,
+  "searches": [
+   "potentialutjämning jordning rör",
+   "VVS rörentreprenör anslutning fläkt handdukstork golvvärme"
+  ],
+  "reference_rule": "Elinstallationsreglerna (SS 436 40 00) kräver skyddsutjämning av främmande ledande delar; vid stambyte tilldelas detta normalt el i gränsdragningslista",
+  "contractual_exposure": true
+ },
+ {
+  "lens_id": "trade_boundaries",
+  "claim_type": "trade_boundary",
+  "claim": "Nya stigarledningar dras i varje trappuppgång från huvudcentralen och kräver håltagning och certifierad brandtätning. Inget dokument anger vem som utför det, totalentreprenad lägger ansvaret sannolikt på el, och kalkylposten saknar timmar för det.",
+  "citations": [
+   {
+    "block_id": "65f9db-31c970",
+    "quote": "Nya stigarledningar dras i varje trappuppgång från fastighetens huvudcentral."
+   },
+   {
+    "block_id": "97f565-63a48f",
+    "quote": "Totalentreprenad för elarbetena."
+   }
+  ],
+  "money_basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r2",
+   "item": "Håltagning/kärnborrning och certifierad brandtätning av genomföringar för stigarledningar och lägenhetsmatningar, tre trappuppgångar",
+   "quantity": null,
+   "unit": null,
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "absence": true,
+  "searches": [
+   "håltagning genomföring brandtätning"
+  ],
+  "reference_rule": "BBR 5:5 kräver att brandcellsgränser behåller sin brandavskiljning vid genomföringar; normalt tilldelas håltagning och brandtätning i gränsdragningslista",
+  "contractual_exposure": true
+ }
+]
