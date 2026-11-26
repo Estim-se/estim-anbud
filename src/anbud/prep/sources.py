@@ -22,6 +22,7 @@ from anbud.prep.model import DocKind
 from anbud.prep.text import doc_id_of
 
 MAX_FILE_BYTES = 512 * 1024 * 1024
+IGNORED_NAMES = frozenset({"__macosx", "thumbs.db", "desktop.ini"})
 MAX_UNZIPPED_BYTES = 1024 * 1024 * 1024
 MAX_ZIP_ENTRIES = 20_000
 _HTML_SUFFIXES = (".html", ".htm", ".xhtml")
@@ -134,6 +135,13 @@ def read_manifest(path: Path) -> set[str]:
     return hashes
 
 
+def is_ignored(parts: tuple[str, ...] | list[str]) -> bool:
+    """Files nobody delivered on purpose: hidden files (`.DS_Store`, `._` resource forks) and the folders and files an
+    operating system adds (`__MACOSX`, `Thumbs.db`). Intake leaves them out of its manifest and prep skips them, by
+    this one rule, so the two always agree."""
+    return any(part.startswith(".") or part.casefold() in IGNORED_NAMES for part in parts)
+
+
 @dataclass
 class Loaded:
     sources: list[Source]
@@ -158,7 +166,7 @@ def load_folder(folder: Path, manifest: Path | None = None) -> Loaded:
     try:
         for path in sorted(folder.rglob("*")):
             rel = path.relative_to(folder)
-            if any(part.startswith(".") for part in rel.parts):
+            if is_ignored(rel.parts):
                 hidden += path.is_file()
                 continue
             if path.is_symlink() or not path.resolve().is_relative_to(base):

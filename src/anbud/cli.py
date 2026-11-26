@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from anbud.runguard import RunRefused, check_run_allowed, held_out_refusal
 
@@ -69,6 +70,67 @@ def _prep(args: argparse.Namespace) -> int:
     for key, value in summary.items():
         print(f"{key}: {value}")
     return 0
+
+
+def _intake(args: argparse.Namespace) -> int:
+    from anbud.evals.split_heldout import SplitError
+    from anbud.intake import IntakeError, intake, survey, training_cutoff
+
+    try:
+        if args.dry_run:
+            result, _ = survey(args.incoming.expanduser())
+            print(f"anbud intake (dry run, nothing written or split): {result.notices.tenders} zips")
+            for line in intake_report(result, training_cutoff())[2:]:
+                print(line)
+            return 0
+        result = intake(
+            args.company_id, args.incoming.expanduser(), new_ledger=args.new_ledger, company_name=args.company_name
+        )
+    except Exception as exc:  # noqa: BLE001 - a traceback or message could name a file: only ours are printed
+        message = str(exc) if isinstance(exc, IntakeError | SplitError) else type(exc).__name__
+        print(f"anbud intake: stopped: {message}", file=sys.stderr)
+        return REFUSED
+    for line in intake_report(result, training_cutoff() if result.notices.tenders else None):
+        print(line)
+    if result.failed:
+        print(f"anbud intake: {len(result.failed)} not placed: {'; '.join(result.failed)}", file=sys.stderr)
+        print(
+            "anbud intake: each one is back in the incoming folder, or the next intake puts it back; run intake again",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def intake_report(result: Any, cutoff: Any = None) -> list[str]:
+    """Counts only. The notice lines appear for a blind intake of zips."""
+    u, n = result.unpack, result.notices
+    lines = [
+        f"anbud intake: {result.dev} dev, {result.heldout} held-out, {result.prospective} prospective, "
+        f"{result.burned} burned, {result.already_in} already taken in",
+        f"  zips: {u.archives_unpacked} unpacked, {u.archives_kept} kept as delivered; {u.entries} entries, "
+        f"{u.entries_skipped} skipped (links, escaping paths, hidden or system files)",
+    ]
+    if result.rows_without_folder:
+        lines.append(f"  metadata.csv: {result.rows_without_folder} rows name no folder here and no registered tender")
+    if n.tenders:
+        found = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in n.found.items())
+        lines += [
+            f"  notices: {n.tenders} read, {n.without_page} without a notice page; found {found}",
+            f"  split keys: {n.no_entity_key} without a buyer key, {n.no_key} without any key (split alone)",
+            f"  training cutoff {cutoff}: {n.before_cutoff} published before, {n.after_cutoff} after, "
+            f"{n.unknown_date} unknown; {n.framework} framework agreements",
+            f"  prospective by deadline: {n.open} still open, {n.no_deadline} with no deadline read, "
+            f"{n.may_have_moved} passed lately with amendments or answers that may have moved it; "
+            f"{n.deadline_from_pdf} deadlines read from PDFs",
+        ]
+        held = ", ".join(f"{k} {v}" for k, v in sorted(result.held.items())) or "none"
+        lines.append(
+            f"  held as answer keys: {sum(result.held.values())} files in {result.tenders_with_held} tenders ({held})"
+        )
+        if result.tenders_mostly_held:
+            lines.append(f"  {result.tenders_mostly_held} dev tenders had more than half their files held")
+    return lines
 
 
 def _kalkyl(args: argparse.Namespace) -> int:
@@ -292,6 +354,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("recipe-extract", help="write the customer's outlet recipe from a run's calc recipe (explicit only)")
     sub.add_parser("split-status", help="counts per status, and the dev tender ids")
     sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
+    intake = sub.add_parser("intake", help="split new tenders from an incoming folder, then move them unopened")
+    intake.add_argument("company_id")
+    intake.add_argument("incoming", type=Path, help="~/estim-anbud-data/incoming/<company>/ with metadata.csv")
+    intake.add_argument("--new-ledger", action="store_true", help="the company's first intake")
+    intake.add_argument("--company-name", help="the company's name in the local registry, on its first intake")
+    intake.add_argument(
+        "--dry-run", action="store_true", help="zips only: what the notices give, counted; nothing written or split"
+    )
     sub.add_parser("plant", help="a planted variant of a dev tender: plants, both control arms and the answer key")
     sub.add_parser("plant-score", help="score runs on a planted variant's arms against its answer key")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
@@ -336,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stop(args)
     if args.command == "prep":
         return _prep(args)
+    if args.command == "intake":
+        return _intake(args)
     if args.command == "kalkyl":
         return _kalkyl(args)
     return _not_built(args.command)
