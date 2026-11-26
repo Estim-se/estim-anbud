@@ -129,6 +129,9 @@ def _kalkyl(args: argparse.Namespace) -> int:
         misses = summary["replay_misses"]
         print(f"anbud kalkyl: replay incomplete: {misses} calls not in the step cache", file=sys.stderr)
         return REPLAY_INCOMPLETE
+    if summary.get("freeze_failures"):
+        print(f"anbud kalkyl: {summary['freeze_failures']} entries could not be made read-only", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -273,7 +276,10 @@ def main(argv: list[str] | None = None) -> int:
     kalkyl.add_argument("company_id")
     kalkyl.add_argument("tender_id")
     kalkyl.add_argument("--catalog", help="catalog name in ~/estim-anbud-data/catalogs/ (default: config/kalkyl.toml)")
-    kalkyl.add_argument("--run-id", help="resume or replay this run (same salt, so finished calls cost $0)")
+    kalkyl.add_argument(
+        "--run-id",
+        help="resume or replay an unfinished run (same salt, so finished calls cost $0); a finished run is frozen",
+    )
     kalkyl.add_argument("--dry-run", action="store_true", help="chunk counts and a cost estimate, no model call ($0)")
     kalkyl.add_argument("--replay", action="store_true", help="answer every call from the run's step cache ($0)")
     kalkyl.add_argument(
