@@ -14,6 +14,7 @@ from openpyxl import Workbook, load_workbook
 from test_runguard import ledger_with
 
 from anbud import cli, model_client
+from anbud.evals import freeze
 from anbud.evals import split_heldout as sh
 from anbud.granskning import command, provenance
 from anbud.granskning.catalog import Catalog, CatalogItem, calc_hourly_rate, with_calc_rate
@@ -243,6 +244,11 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert prefix["estimated_tokens"] == int(prefix["chars"] / 1.6) and granskning["prefix_tokens"] == 40_000
     assert "prefix 40000 tokens (measured)" in out
 
+    # The paid dev run was frozen before anything else could happen to it, and its outputs are read-only.
+    assert "frozen: ledger line 1, " in out
+    assert freeze.is_frozen("co-001", "t-0001")
+    assert (run_dir / "flags.json").stat().st_mode & 0o777 == 0o400
+
     # Replay: no key, no SDK, every answer from the step cache, the same outputs.
     def no_key(**_: Any) -> str:
         raise AssertionError("replay must not read the key")
@@ -254,7 +260,9 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     paid_summary = summary.read_text()
     sent = len(sdk.sent)
     assert cli.main(["run", "co-001", "t-0001", "--run-id", RUN, "--replay"]) == 0
-    assert "total $0.00" in capsys.readouterr().out
+    replay_out = capsys.readouterr().out
+    assert "total $0.00" in replay_out and "frozen" not in replay_out  # a replay freezes nothing
+    assert freeze.verify(freeze.ledger_file("co-001")).lines == 1
     replay = run_dir / "replay-1"
     for name in names[:3]:
         assert (replay / name).read_text() == before[name]  # the same outputs, in their own folder
@@ -350,3 +358,72 @@ def test_a_paid_run_on_a_dirty_or_unversioned_tree_is_refused(
     out = capsys.readouterr().out
     assert "a paid run is refused on this tree" in out
     assert state.diff_sha256 is None or f"diff {'c' * 12}" in out
+
+
+def test_a_stopped_run_is_not_frozen_and_a_frozen_run_is_never_resumed(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from anbud.store import request_stop
+
+    sdk = ScriptedSDK(script)
+    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
+    monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
+    run_id = "t-0001-stop"
+
+    # Stopped before its first call: an incomplete prediction, so it exits non-zero and is not frozen.
+    request_stop("co-001", run_id)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", run_id]) == command.RUN_HALTED
+    err = capsys.readouterr().err
+    assert "not frozen" in err and "stopped" in err
+    assert not freeze.is_frozen("co-001", "t-0001") and not sdk.sent
+
+    # Cleared, the same id resumes, finishes and is frozen.
+    request_stop("co-001", run_id, clear=True)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", run_id]) == 0
+    assert "frozen: ledger line 1, " in capsys.readouterr().out
+    run_dir = tender / "runs" / run_id
+    frozen = {p: p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+    record = RunStore("co-001").run_dir(run_id)
+    events = (record / "events.jsonl").read_bytes()
+
+    # A paid resume of a frozen run is refused before any call or write.
+    sent = len(sdk.sent)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", run_id]) == cli.REFUSED
+    err = capsys.readouterr().err
+    assert "frozen at ledger line 1" in err and "Traceback" not in err
+    assert len(sdk.sent) == sent
+    assert {p: p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == frozen
+    assert (record / "events.jsonl").read_bytes() == events
+
+
+def test_a_run_that_hits_its_hard_stop_is_not_frozen(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from anbud.model_client import Budget
+
+    sdk = ScriptedSDK(script)
+    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
+    monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
+    monkeypatch.setattr(model_client, "Budget", lambda hard_stop: Budget(0.0))
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-cap"]) == command.RUN_HALTED
+    assert "not frozen" in capsys.readouterr().err
+    assert not freeze.is_frozen("co-001", "t-0001")
+
+
+def test_a_run_with_failed_store_writes_exits_non_zero_and_is_not_frozen(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only an exit-0 run is frozen: a run whose events or step cache didn't all reach disk can't be replayed."""
+    sdk = ScriptedSDK(script)
+    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
+    monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
+
+    def disk_full(self: RunStore, event: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(RunStore, "append_event", disk_full)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-full"]) == 1
+    captured = capsys.readouterr()
+    assert "store writes failed" in captured.err and "frozen" not in captured.out
+    assert not freeze.is_frozen("co-001", "t-0001")
+    assert not freeze.ledger_file("co-001").exists()
