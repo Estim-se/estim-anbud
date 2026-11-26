@@ -59,7 +59,9 @@ def finish(
     of the lens coverage. `checks` is the checks' report sections and coverage."""
     settings = settings or load_settings()
     posts = {p.id: p for p in calc_posts}
-    items = merge([*results, *check_results], corpus, merge_client, settings)
+    # Checks first: when a check's flag and a lens's flag share a fingerprint (a lens citing the same trigger), the
+    # check's claim, which carries code's counts, leads the merged item; the lens's claim is kept with it.
+    items = merge([*check_results, *results], corpus, merge_client, settings)
     provisional = price_items(items, catalog, posts, settings)
     chosen = select(
         provisional,
