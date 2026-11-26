@@ -256,3 +256,17 @@ def test_the_calc_rate_wins_and_says_so() -> None:
     moved = with_calc_rate(base, posts)
     assert moved.hourly_rate == 680 and moved.label == "Estims standardkatalog, timpris 680 kr/h från kundens kalkyl"
     assert with_calc_rate(base, posts[:1]) is base
+
+
+def test_a_dry_run_counts_without_a_key_or_a_call(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_key(**_: Any) -> str:
+        raise AssertionError("a dry run must not read the key")
+
+    monkeypatch.setattr(model_client, "keychain_key", no_key)
+    assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "8 blocks, 3 documents, 2 calc posts" in out and "tiles for page cards: 1" in out
+    assert "lens tier: 8 turns, $1.50 per lens; 8 lenses" in out and "hourly rate from the calc" in out
+    assert "Etappvite" not in out and not (tender / "runs").exists()

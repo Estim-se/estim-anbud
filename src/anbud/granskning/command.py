@@ -11,6 +11,7 @@ import argparse
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from anbud import paths
 
@@ -22,6 +23,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--replay", action="store_true", help="answer from the step cache only, at $0")
     parser.add_argument("--concurrency", type=int, default=3, help="lenses in parallel (default 3)")
     parser.add_argument("--lens", action="append", default=None, help="run only this lens (repeatable)")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="build everything up to the first model call, print counts, call nothing"
+    )
 
 
 def _dirs(args: argparse.Namespace, kind: str) -> tuple[Path, Path, Path]:
@@ -77,6 +81,8 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     except FileNotFoundError:
         catalog = None
         print("anbud run: no catalog file; kronor prices contract formulas and calc posts only", file=sys.stderr)
+    if args.dry_run:
+        return dry_run(corpus, calc, lenses, catalog, config.budgets)
     store = RunStore(args.company_id)
     if args.replay:
         sdk = None
@@ -132,4 +138,29 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     if client.persist_failures:
         print(f"anbud run: {client.persist_failures} store writes failed", file=sys.stderr)
         return 1
+    return 0
+
+
+def dry_run(corpus: Any, calc: list[Any], lenses: list[Any], catalog: Any, budgets: dict[str, Any]) -> int:
+    """Counts for a run that makes no model call: the prefix as the map would send it before page cards add their
+    blocks, the tiles the cards would read, and the lens tier the estimate picks. No key, no store writes."""
+    from anbud.granskning.catalog import calc_hourly_rate
+    from anbud.granskning.prefix import estimate_tokens, system_blocks
+    from anbud.granskning.run import lens_caps
+
+    blocks = system_blocks(corpus, calc)
+    sizes = [len(b["text"]) for b in blocks]
+    tokens = estimate_tokens(blocks)
+    caps = lens_caps(budgets, tokens)
+    print(f"dry run: {len(corpus.blocks)} blocks, {len(corpus.documents)} documents, {len(calc)} calc posts")
+    print(f"  system blocks: {len(blocks)}, chars {sizes} = {sum(sizes)}, about {tokens} tokens (before page cards)")
+    print(f"  tiles for page cards: {len(corpus.tiles)}")
+    print(f"  lens tier: {caps.max_turns} turns, ${caps.max_usd:.2f} per lens; {len(lenses)} lenses")
+    rate = calc_hourly_rate(calc)
+    if catalog is None:
+        print("  catalog: none")
+    else:
+        source = "calc" if rate is not None else "catalog"
+        print(f"  catalog: {catalog.name}, {len(catalog.items)} items, hourly rate from the {source}")
+    print("  no model calls made")
     return 0
