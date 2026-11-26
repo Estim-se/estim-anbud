@@ -230,6 +230,7 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Mängdrader i underlaget", c["quantity_lines"], None),
         ("Omfattningsstycken i underlaget", c["scope_lines"], None),
         ("Rader som säger att något inte ingår", c["not_included_lines"], None),
+        ("Bortval som annan entreprenör utan stöd i raden (till kontroll)", c["other_trade_unchecked"], None),
         ("Rader och stycken utan post", c["lines_not_handled"], None),
         ("varav ej omhändertagna (se Ej omhändertaget)", c["lines_unresolved"], None),
         ("varav bortvalda med skäl (se Bortvalt med skäl)", c["lines_not_handled"] - c["lines_unresolved"], None),

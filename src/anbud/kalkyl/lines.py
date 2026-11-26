@@ -35,6 +35,20 @@ _WRITTEN_NUMBER = re.compile(rf"(?<![\w.,])(?:{_NUMBER})")
 _NOT_INCLUDED = re.compile(
     r"\bing[åa]r\s+(?:ej|inte|icke)\b|\b(?:ej|inte|icke)\s+(?:i|ingående\s+i)\s+(?:denna\s+|den\s+)?entreprenad(?:en)?\b"
 )
+# Naming another party to the work: another trade or its contractor, the client's side, or a contract boundary. Generic
+# Swedish contract vocabulary, lower-cased text; this contract's own trade ("el", "entreprenören") is none of them.
+_OTHER_TRADE = re.compile(
+    r"\b(?:vvs|vs|rör|vent(?:ilation)?s?|sprinkler|styr|sr|bygg|mark|mål(?:eri|nings)?|plåt|hiss|tele|kyl|larm|"
+    r"brandlarm|solcell|tak|golv)[-\s]?(?:entreprenör|entreprenad|leverantör|installatör|firma|arbet)\w*"
+    r"|\b(?:b|be|v|s|vs|vvs|sr)-(?:entreprenör|entreprenad|handling|ritning)\w*"
+    r"|\bvvs\b|\b(?:rörläggare|målare|byggare|snickare|nätägare|elnätsbolag|nätbolag|teleoperatör|operatör)\w*"
+)
+_BOUNDARY = re.compile(
+    r"\b(?:utförs|levereras|monteras|tillhandahålls|installeras|anskaffas|bekostas|ombesörjs|anslut(?:s|es))\s+av\b"
+    r"|\b(?:beställare|byggherre|fastighetsägare|hyresgäst|förvaltare)\w*"
+    r"|\b(?:annan|andra|övriga|respektive)\s+entreprenör\w*|\b(?:sido|huvud|under)entreprenör\w*|\bsidoentreprenad\w*"
+    r"|\bentreprenadgräns\w*|\bgränsdragning\w*"
+)
 _ROW_KINDS = ("table_row", "sheet_row")
 _LINE_KINDS = ("paragraph", "tile_text")
 
@@ -101,6 +115,27 @@ def _is_boundary(block: Block, outline_starts: set[str]) -> bool:
 
 def says_not_included(text: str) -> bool:
     return bool(_NOT_INCLUDED.search(text.lower()))
+
+
+def names_other_party(text: str) -> bool:
+    """The text names another trade or its contractor, the client's side, or a contract boundary (including saying
+    that something isn't part of the contract)."""
+    low = text.lower()
+    return bool(_OTHER_TRADE.search(low) or _BOUNDARY.search(low)) or says_not_included(text)
+
+
+def other_party_line_ids(corpus: Corpus, paths: dict[str, tuple[str, ...]] | None = None) -> set[str]:
+    """Every line whose own text or one of the two headings above it names another party to the work: the evidence a
+    set-aside as another trade's work needs."""
+    paths = paths if paths is not None else heading_paths(corpus)
+    out = set()
+    for block_id in corpus.order:
+        block = corpus.blocks[block_id]
+        if block.kind == "heading" or not block.text.strip():
+            continue
+        if names_other_party(block.text) or any(names_other_party(h) for h in paths.get(block_id, ())[-2:]):
+            out.add(block_id)
+    return out
 
 
 def not_included_line_ids(corpus: Corpus, paths: dict[str, tuple[str, ...]] | None = None) -> set[str]:

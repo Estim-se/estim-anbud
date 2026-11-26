@@ -15,7 +15,7 @@ from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
 from anbud.kalkyl.coverage import uncovered_lines
 from anbud.kalkyl.extract import ChunkResult, extract_all
-from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks, not_included_line_ids
+from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks, not_included_line_ids, other_party_line_ids
 from anbud.kalkyl.match import match_posts
 from anbud.kalkyl.object_list import ObjectList, choose, read_lists
 from anbud.kalkyl.price import (
@@ -134,6 +134,7 @@ class KalkylResult:
             "lines_set_aside_by_model": sum(u.set_aside_by_model for u in self.uncovered),
             "not_included_lines": len(self.not_included),
             "not_included_set_aside_by_code": sum(u.set_aside_by_code for u in self.uncovered),
+            "other_trade_unchecked": sum(u.other_trade_unchecked for u in self.uncovered),
             "posts_citing_not_included": sum(1 for p in self.posts if NOT_INCLUDED_NOTE in p.notes),
             "lines_unresolved": sum(u.unresolved for u in self.uncovered),
             "lines_set_aside_by_kind": dict(
@@ -224,7 +225,9 @@ def run_kalkyl(
         rejected=[r for res in results for r in res.rejected],
         objects=objects,
         posts=posts,
-        uncovered=uncovered_lines(chunks, results, verified, _counted(lists), not_included),
+        uncovered=uncovered_lines(
+            chunks, results, verified, _counted(lists), not_included, other_party_line_ids(corpus, paths)
+        ),
         totals=totals_of(posts),
         match_stats=stats,
         paths=paths,

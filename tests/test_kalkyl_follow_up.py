@@ -161,7 +161,8 @@ def test_readings_that_disagree_leave_the_line_unclear_naming_both_instead_of_a_
     assert "(record / unclear). no type is named" in central["reason"]
 
     # Two readings that agree resolve it, even with a set-aside.
-    summary = _run(fake_sdk(_handler(other_trade)), run_id="kalkyl-fu3")
+    outside = {"block_ids": [CENTRAL], "kind": "not_this_contract", "reason": "another building"}
+    summary = _run(fake_sdk(_handler(message([submit({"records": [], "set_aside": [outside]})]))), run_id="kalkyl-fu3")
     assert summary["follow_up_lines_resolved"] == 1 and summary["lines_unresolved"] == 0
 
 
