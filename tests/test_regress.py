@@ -6,13 +6,14 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
 from anbud import cli, paths
 from anbud.evals import split_heldout as sh
 from anbud.granskning.contracts import fingerprint
-from anbud.granskning.items import Item
+from anbud.granskning.items import Item, Placement
 from anbud.granskning.regress import RegressionSet, check, entry_from_item, matches, regress, siblings
 from anbud.models import Citation, Flag, MoneyBasis, Verdict
 
@@ -93,22 +94,36 @@ def test_a_match_needs_block_overlap_and_a_related_claim_type(tender: Path) -> N
     assert not matches(entry, _item("unpriced_requirement", ["cc-1"]))
 
 
-def test_the_source_run_finds_every_entry_and_counts_shown_apart(tender: Path) -> None:
+def test_only_shown_items_surface_an_entry(tender: Path) -> None:
     result = check(_set(tender), SOURCE_ITEMS, SOURCE)
-    assert (result["found"], result["shown"]) == (3, 1)
-    assert result["missed"] == [] and result["not_shown"] == [0, 1]
+    assert (result["surfaced"], result["found"]) == (1, 3)
+    assert not result["passed"]
+    assert result["not_surfaced"] == [0, 1] and result["not_found"] == []
 
 
-def test_lost_and_refuted_catches_are_missed(tender: Path) -> None:
+def test_generic_logged_and_refuted_items_dont_surface(tender: Path) -> None:
     items = [
-        _item("contract_vite", ["aa-1"]),  # overlap, unrelated claim type
-        _item("grid_interface", ["bb-1"], "refuted"),  # refuted doesn't count
-        _item("document_conflict", ["cc-1"], "generic"),  # sibling, generic counts as shown
+        _item("contract_vite", ["aa-1"]),  # overlap, unrelated claim type: not caught at all
+        _item("grid_interface", ["bb-1"], "refuted"),  # refuted: not found
+        _item("document_conflict", ["cc-1"], "generic"),  # sibling, found, but generic isn't surfaced
     ]
     result = check(_set(tender), items, RUN)
-    assert result["missed"] == [0, 1]
-    assert (result["found"], result["shown"]) == (1, 1)
+    assert result["not_found"] == [0, 1]
+    assert result["not_surfaced"] == [0, 1, 2]
+    assert (result["surfaced"], result["found"]) == (0, 1)
     assert result["results"][1]["items"][0]["placement"] == "refuted"
+
+
+def test_every_entry_surfaced_passes(tender: Path) -> None:
+    items = [_item(i.flag.claim_type, [c.block_id for c in i.flag.citations], "shown") for i in SOURCE_ITEMS]
+    result = check(_set(tender), items, RUN)
+    assert result["passed"] and result["surfaced"] == 3
+
+
+@pytest.mark.skipif("shown_unpriced" not in get_args(Placement), reason="B's shown_unpriced placement hasn't landed")
+def test_shown_unpriced_surfaces_an_entry(tender: Path) -> None:
+    item = _item("unpriced_requirement", ["aa-1"], "shown_unpriced")
+    assert check(_set(tender), [item], RUN)["results"][0]["surfaced"]
 
 
 def test_result_goes_in_the_run_folder_when_writable(tender: Path) -> None:
@@ -116,6 +131,7 @@ def test_result_goes_in_the_run_folder_when_writable(tender: Path) -> None:
     result, out = regress(COMPANY, tender, RUN)
     assert out == run / "regress.json"
     assert json.loads(out.read_text())["found"] == result["found"] == 3
+    assert result["surfaced"] == 1
 
 
 def test_a_frozen_run_is_never_written(tender: Path) -> None:
@@ -133,13 +149,17 @@ def test_cli_prints_counts_and_indexes_only(tender: Path, capsys: pytest.Capture
     code = cli.main(["regress", COMPANY, TENDER, RUN])
     out = capsys.readouterr().out
     assert code == 1
-    assert "found: 1 of 3" in out and "shown or generic: 0 of 3" in out and "missed entries: [1, 2]" in out
+    assert "surfaced: 0 of 3 (FAIL)" in out and "found: 1 of 3" in out
+    assert "not surfaced: [0, 1, 2]" in out and "not found: [1, 2]" in out
     assert SECRET not in out and "Entry" not in out and "aa-1" not in out
 
 
-def test_cli_passes_when_all_are_found(tender: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _write_run(tender, RUN, SOURCE_ITEMS)
-    assert cli.main(["regress", COMPANY, TENDER, RUN]) == 0
+def test_cli_exit_code_follows_the_gate(tender: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_run(tender, RUN, SOURCE_ITEMS)  # all found, one surfaced
+    assert cli.main(["regress", COMPANY, TENDER, RUN]) == 1
+    shown = [_item(i.flag.claim_type, [c.block_id for c in i.flag.citations], "shown") for i in SOURCE_ITEMS]
+    _write_run(tender, "t-0001-shown", shown)
+    assert cli.main(["regress", COMPANY, TENDER, "t-0001-shown"]) == 0
 
 
 def test_cli_refuses_tenders_outside_dev_and_bad_inputs(tender: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -150,3 +170,15 @@ def test_cli_refuses_tenders_outside_dev_and_bad_inputs(tender: Path, capsys: py
     (tender / "labels" / "regression.json").write_text('{"company_id": "co-002", "tender_id": "t-0001", "entries": []}')
     assert cli.main(["regress", COMPANY, TENDER, RUN]) == 3
     assert SECRET not in capsys.readouterr().err
+
+
+def test_runs_written_by_older_code_still_load(tender: Path) -> None:
+    old = [
+        i.model_dump(mode="json") | {"kronor": {"priced": True, "basis": "text from an older version"}}
+        for i in SOURCE_ITEMS
+    ]
+    run = tender / "runs" / RUN
+    run.mkdir(parents=True)
+    (run / "items.json").write_text(json.dumps(old))
+    result, _ = regress(COMPANY, tender, RUN)
+    assert result["found"] == 3

@@ -6,9 +6,11 @@ cites, the calc posts it names, and a one-line paraphrase.
 
 An entry is **caught** by an item of the run under test when they share a cited block and their claim types are the
 same or siblings (the same item in `taxonomy.CLAIM_TYPES`). Two counts are reported:
-- **found:** caught by any item the verifier didn't refute, wherever ranking placed it (shown, generic, or logged as
-  capped, minor, covered or zero). This is the regression gate: ranking may move a catch, losing it is a regression.
-- **shown:** caught by a shown or generic item, the ones a reader of the report sees.
+- **surfaced** (the gate): caught by an item a reader is shown as a priced flag (`shown`) or as a requirement without
+  a price (`shown_unpriced`, once that placement exists). Generic findings and logged ones don't count. A catch that
+  is found but not surfaced is a miss: the reader never sees it.
+- **found:** caught by any item the verifier didn't refute, wherever ranking placed it. Reported next to the gate, it
+  tells a catch ranking buried from one the lenses lost.
 
 Output is counts and entry indexes only. The full result goes to `regress.json` in the run folder, or, when the run
 folder is read-only (a frozen run), to `<tender>/labels/regress-<run_id>.json`.
@@ -19,15 +21,17 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from anbud.granskning.items import Item
+from anbud.granskning.items import Item, Placement
 from anbud.granskning.taxonomy import CLAIM_TYPES
+from anbud.models import Flag
 from anbud.store import RunStore, canonical
 
-SHOWN = frozenset({"shown", "generic"})
+# `shown_unpriced` counts as soon as `Placement` has it; until then only `shown` does.
+SURFACED = frozenset({"shown"} | ({"shown_unpriced"} & set(get_args(Placement))))
 NOT_FOUND = frozenset({"refuted"})
 
 
@@ -69,8 +73,18 @@ def entry_from_item(item: Item, source_run: str, flag_number: int, paraphrase: s
     )
 
 
-def load_items(run_dir: Path) -> list[Item]:
-    return [Item.model_validate(i) for i in json.loads((run_dir / "items.json").read_text())]
+class RunItem(BaseModel):
+    """The part of an `Item` regress reads. Other fields are ignored, so runs written by older code still load."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    flag: Flag
+    fingerprint: str
+    placement: str | None = None
+
+
+def load_items(run_dir: Path) -> list[RunItem]:
+    return [RunItem.model_validate(i) for i in json.loads((run_dir / "items.json").read_text())]
 
 
 def siblings(a: str, b: str) -> bool:
@@ -80,32 +94,34 @@ def siblings(a: str, b: str) -> bool:
     return a in CLAIM_TYPES and b in CLAIM_TYPES and CLAIM_TYPES[a][0] == CLAIM_TYPES[b][0]
 
 
-def matches(entry: RegressionEntry, item: Item) -> bool:
+def matches(entry: RegressionEntry, item: Item | RunItem) -> bool:
     blocks = {c.block_id for c in item.flag.citations}
     return bool(blocks & set(entry.block_ids)) and siblings(entry.claim_type, item.flag.claim_type)
 
 
-def check(regression: RegressionSet, items: list[Item], run_id: str) -> dict[str, Any]:
+def check(regression: RegressionSet, items: list[Item] | list[RunItem], run_id: str) -> dict[str, Any]:
     results = []
     for index, entry in enumerate(regression.entries):
         hits = [(n, item) for n, item in enumerate(items) if matches(entry, item)]
         found = [(n, i) for n, i in hits if i.placement not in NOT_FOUND]
-        shown = [(n, i) for n, i in found if i.placement in SHOWN]
+        surfaced = [(n, i) for n, i in found if i.placement in SURFACED]
         results.append(
             {
                 "entry": index,
+                "surfaced": bool(surfaced),
                 "found": bool(found),
-                "shown": bool(shown),
                 "items": [{"index": n, "fingerprint": i.fingerprint, "placement": i.placement} for n, i in hits],
             }
         )
     return {
         "run_id": run_id,
         "entries": len(results),
+        "surfaced": sum(r["surfaced"] for r in results),
         "found": sum(r["found"] for r in results),
-        "shown": sum(r["shown"] for r in results),
-        "missed": [r["entry"] for r in results if not r["found"]],
-        "not_shown": [r["entry"] for r in results if r["found"] and not r["shown"]],
+        "passed": all(r["surfaced"] for r in results),
+        "not_surfaced": [r["entry"] for r in results if not r["surfaced"]],
+        "not_found": [r["entry"] for r in results if not r["found"]],
+        "surfaced_placements": sorted(SURFACED),
         "results": results,
     }
 

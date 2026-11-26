@@ -134,7 +134,7 @@ def _import_labels(args: argparse.Namespace) -> int:
     return 0
 
 
-# `anbud regress`: are the confirmed catches in the tender's regression set still found by a run?
+# `anbud regress`: are the confirmed catches in the tender's regression set still surfaced by a run?
 def _regress(args: argparse.Namespace) -> int:
     from anbud import paths
     from anbud.granskning.regress import regress
@@ -154,12 +154,12 @@ def _regress(args: argparse.Namespace) -> int:
         print(f"anbud regress: stopped: {type(exc).__name__}", file=sys.stderr)
         return REFUSED
     n = result["entries"]
+    print(f"surfaced: {result['surfaced']} of {n} ({'pass' if result['passed'] else 'FAIL'})")
     print(f"found: {result['found']} of {n}")
-    print(f"shown or generic: {result['shown']} of {n}")
-    print(f"missed entries: {result['missed']}")
-    print(f"found but not shown: {result['not_shown']}")
+    print(f"not surfaced: {result['not_surfaced']}")
+    print(f"not found: {result['not_found']}")
     print(f"result: {out}")
-    return 0 if not result["missed"] else 1
+    return 0 if result["passed"] else 1
 
 
 def _not_built(name: str) -> int:
