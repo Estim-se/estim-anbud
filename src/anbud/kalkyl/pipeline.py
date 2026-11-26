@@ -91,6 +91,7 @@ class KalkylResult:
             "table_rows_read": sum(len(r.table_rows) for r in self.chunk_results),
             "table_rows_unread": sum(len(r.unread_rows) for r in self.chunk_results),
             "records_superseded_by_tables": sum(r.superseded for r in self.chunk_results),
+            "table_rows_extended": sum(r.extended_rows for r in self.chunk_results),
             "object_kinds": len(self.objects),
             "object_counts": self.object_counts(),
             "object_lists_found": len(self.object_lists),

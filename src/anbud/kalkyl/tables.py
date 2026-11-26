@@ -8,12 +8,14 @@ A layout is checked before any row is read: its header and rows lie in the chunk
 have cells, every named column occurs in them, and the roles fit the table (an object table needs an id column and an
 object kind; a requirement table needs a description and a quantity column). A row code can't read (no id, no
 description, a quantity that isn't one number) is listed in "Ej omhändertaget" with the reason. Rows the model set
-aside (headings, totals) are skipped. A row read by code is exact evidence: the citation is the whole row.
+aside (headings, totals) are skipped. A row read by code is exact evidence: the citation is the whole row. A table
+the model ends early is extended over the following rows of the same shape (`extend_layout`).
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -60,6 +62,47 @@ def _rows(layout: TableLayout, chunk: Chunk) -> list[str] | None:
     except ValueError:
         return None
     return chunk.block_ids[i : j + 1] if i <= j else None
+
+
+_NUMERIC = re.compile(r"[-+]?\d[\d  .,]*")
+
+
+def row_pattern(block_id: str, cells: Cells) -> tuple[tuple[str, bool], ...] | None:
+    """A row's shape: its filled columns, and whether each holds a number. None for a row without cells."""
+    row = cells.get(block_id)
+    if not row:
+        return None
+    return tuple((c.col, bool(_NUMERIC.fullmatch(c.text.strip()))) for c in row if c.text.strip())
+
+
+def extend_layout(
+    layout: TableLayout, chunk: Chunk, corpus: Corpus, cells: Cells, taken: set[str]
+) -> tuple[TableLayout, int]:
+    """The layout with its last row moved forward over the rows right after it in this chunk that have the shape of
+    the table's body (the shape most of its rows share, at least three), and the number of rows added.
+
+    The model sometimes ends a table early and leaves the rest of the list neither read nor set aside. Extension stops
+    at the first row of another sheet or another shape, or one the model cited or set aside (`taken`), so totals,
+    notes and rows the model handled itself stay as they are."""
+    rows = _rows(layout, chunk)
+    if not rows:
+        return layout, 0
+    shapes = Counter(p for b in rows if b != layout.header_block_id and (p := row_pattern(b, cells)))
+    if not shapes:
+        return layout, 0
+    body, n = shapes.most_common(1)[0]
+    if n < 3 or n * 2 < len(rows):
+        return layout, 0
+    header = corpus.blocks[layout.header_block_id]
+    last, added = layout.last_block_id, 0
+    for block_id in chunk.block_ids[chunk.block_ids.index(layout.last_block_id) + 1 :]:
+        block = corpus.blocks[block_id]
+        if block.kind not in _ROW_KINDS or (block.doc_id, block.sheet) != (header.doc_id, header.sheet):
+            break
+        if block_id in taken or row_pattern(block_id, cells) != body:
+            break
+        last, added = block_id, added + 1
+    return (layout.model_copy(update={"last_block_id": last}), added) if added else (layout, 0)
 
 
 def check_layout(layout: TableLayout, chunk: Chunk, corpus: Corpus, cells: Cells) -> str | None:

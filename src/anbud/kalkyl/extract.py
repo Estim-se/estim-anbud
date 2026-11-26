@@ -24,7 +24,7 @@ from anbud.kalkyl.catalog import prompt_lines
 from anbud.kalkyl.lines import Chunk
 from anbud.kalkyl.records import Level, QuantityRecord, Rejected, SetAside, TableLayout
 from anbud.kalkyl.settings import EXTRACT, RoleSettings
-from anbud.kalkyl.tables import Cells, cols_attr, parse_layout, read_table
+from anbud.kalkyl.tables import Cells, cols_attr, extend_layout, parse_layout, read_table
 from anbud.kalkyl.verify import check_record, level_of, parse_record, parse_set_aside, without_unknown_catalog_id
 from anbud.model_client import BudgetExceeded, ModelClient, ModelError, ReplayMiss, RunStopped
 
@@ -171,6 +171,7 @@ class ChunkResult:
     table_rows: list[str] = field(default_factory=list)  # rows code read from the tables
     unread_rows: dict[str, str] = field(default_factory=dict)  # table rows code couldn't read, with the reason
     superseded: int = 0  # model records for rows a table also covers, dropped so nothing counts twice
+    extended_rows: int = 0  # rows code added to a table the model ended early (`tables.extend_layout`)
     turns: int = 0
     cost_usd: float = 0.0
     error: str | None = None  # a kind (ModelError.kind, budget, stopped), never an API message
@@ -303,8 +304,12 @@ def apply_tables(result: ChunkResult, chunk: Chunk, corpus: Corpus, cells: Cells
     """Read every accepted table's rows into records. A row is read once even if two layouts cover it, and a model
     record that cites only rows a table read is dropped (counted in `superseded`), so nothing counts twice."""
     skip = {b for s in result.set_aside for b in s.block_ids}
+    cited = {c.block_id for record, _ in result.records for c in record.citations}
     read: list[str] = []
-    for layout in result.tables:
+    for n, layout in enumerate(result.tables):
+        layout, added = extend_layout(layout, chunk, corpus, cells, skip | cited | set(read))
+        result.tables[n] = layout
+        result.extended_rows += added
         rows, unread = read_table(layout, chunk, corpus, cells, skip | set(read))
         for block_id, record in rows:
             read.append(block_id)

@@ -29,7 +29,7 @@ from anbud.granskning.corpus import Corpus
 from anbud.kalkyl.lines import make_chunks
 from anbud.kalkyl.records import TableLayout
 from anbud.kalkyl.run import run_dev_tender
-from anbud.kalkyl.tables import check_layout, load_cells, number_and_unit, read_table
+from anbud.kalkyl.tables import check_layout, extend_layout, load_cells, number_and_unit, read_table
 from anbud.models import Block
 
 DOC_C = "cccccccccccc"
@@ -186,3 +186,57 @@ def test_a_bad_layout_goes_back_once_and_its_rows_stay_visible(tender: Path) -> 
     repairs = [p for p in sdk.messages.sent if first_block(p) == "bbbbbb-000001" and len(p["messages"]) == 3]
     assert repairs and "table 1: column Z" in repairs[0]["messages"][-1]["content"][0]["content"]
     assert summary["tables"] == 0 and summary["lines_not_handled"] == 4  # three apartment rows and the summary row
+
+
+DOC_D = "dddddddddddd"
+LIST_ROWS = ["Lgh | Typ | Plan"] + [f"10{n} | {2 + n % 2} rok | {n}" for n in range(1, 8)] + ["Summa | 7 lgh | "]
+LIST = [
+    Block(id=f"dddddd-{n:06d}", doc_id=DOC_D, kind="sheet_row", text=t, sheet="Lista", row=n)
+    for n, t in enumerate(LIST_ROWS, 1)
+]
+
+
+def _list_cells() -> dict:
+    out = {}
+    for block in LIST:
+        cols = [c.strip() for c in block.text.split("|")]
+        out[block.id] = [{"col": "ABC"[i], "text": t, "numeric": False} for i, t in enumerate(cols) if t]
+    return out
+
+
+def _list_layout(last: int) -> TableLayout:
+    return TableLayout.model_validate(
+        {
+            "header_block_id": "dddddd-000001",
+            "first_block_id": "dddddd-000002",
+            "last_block_id": f"dddddd-{last:06d}",
+            "row_kind": "object",
+            "object_kind": "apartment",
+            "scope": "included",
+            "columns": [{"col": "A", "role": "id"}, {"col": "B", "role": "contains", "object_kind": "room"}],
+        }
+    )
+
+
+def test_a_table_the_model_ends_early_is_extended_over_rows_of_the_same_shape(tmp_path: Path) -> None:
+    corpus = _corpus(tmp_path, LIST)
+    write_cells(tmp_path / "prep", _list_cells())
+    cells = load_cells(tmp_path / "prep" / "cells.jsonl")
+    chunk = make_chunks(corpus, 12000, 30)[0]
+    layout, added = extend_layout(_list_layout(5), chunk, corpus, cells, set())
+    assert added == 3 and layout.last_block_id == "dddddd-000008"  # the total row has another shape: not read
+    rows, _ = read_table(layout, chunk, corpus, cells, set())
+    assert len(rows) == 7
+    stopped, added = extend_layout(_list_layout(5), chunk, corpus, cells, {"dddddd-000007"})
+    assert added == 1 and stopped.last_block_id == "dddddd-000006"  # a row the model handled stops it
+    whole, added = extend_layout(_list_layout(8), chunk, corpus, cells, set())
+    assert added == 0 and whole.last_block_id == "dddddd-000008"
+
+
+def test_a_short_table_without_a_clear_body_shape_is_not_extended(tmp_path: Path) -> None:
+    corpus = _corpus(tmp_path, LIST)
+    write_cells(tmp_path / "prep", _list_cells())
+    cells = load_cells(tmp_path / "prep" / "cells.jsonl")
+    chunk = make_chunks(corpus, 12000, 30)[0]
+    layout, added = extend_layout(_list_layout(3), chunk, corpus, cells, set())  # two rows: no body shape yet
+    assert added == 0 and layout.last_block_id == "dddddd-000003"
