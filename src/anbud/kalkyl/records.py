@@ -96,8 +96,29 @@ class QuantityRecord(_Model):
     citations: list[Citation] = Field(min_length=1, max_length=3, description="One to three consecutive blocks")
 
 
+SetAsideKind = Literal[
+    "heading_or_contents", "total_or_repeat", "other_trade", "not_this_contract", "no_requirement", "unclear"
+]
+# Swedish labels for the calc. Every kind but `unclear` is set aside with a reason; `unclear` stays "Ej omhändertaget".
+SET_ASIDE_LABELS: dict[str, str] = {
+    "heading_or_contents": "Rubrik, innehållsförteckning eller numrering",
+    "total_or_repeat": "Summa eller upprepad uppgift",
+    "other_trade": "Annan entreprenör eller beställaren",
+    "not_this_contract": "Utanför denna entreprenad",
+    "no_requirement": "Inget krav: information, villkor eller tidplan",
+    "unclear": "Oklart: kan vara ett krav, men vad eller hur mycket framgår inte",
+}
+
+
 class SetAside(_Model):
     block_ids: list[str] = Field(min_length=1, max_length=60)
+    kind: SetAsideKind = Field(
+        description="heading_or_contents: a heading, a table-of-contents entry, a page, section or drawing number. "
+        "total_or_repeat: a total, or a quantity stated again elsewhere. other_trade: work another contractor or the "
+        "client does. not_this_contract: an object or part outside this contract. no_requirement: information, "
+        "conditions, dates, areas or a schedule that asks for no work. unclear: it may be a requirement, but what or "
+        "how much can't be told; code lists it as not handled."
+    )
     reason: str = Field(min_length=1, max_length=300)
 
 
@@ -177,4 +198,10 @@ class Uncovered(_Model):
     block_id: str
     reason: str
     set_aside_by_model: bool = False
+    set_aside_kind: SetAsideKind | None = None
     line: Literal["quantity", "scope"] = "quantity"
+
+    @property
+    def unresolved(self) -> bool:
+        """Still "Ej omhändertaget": not set aside with a reason, or set aside as unclear."""
+        return not self.set_aside_by_model or self.set_aside_kind == "unclear"

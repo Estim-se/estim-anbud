@@ -250,7 +250,7 @@ GOOD = {
             obj("apartment", "list_row", [cite("bbbbbb-000003", "1002")]),
             obj("apartment", "list_row", [cite("bbbbbb-000004", "1003")]),
         ],
-        "set_aside": [{"block_ids": ["bbbbbb-000005"], "reason": "summary row of the list"}],
+        "set_aside": [{"block_ids": ["bbbbbb-000005"], "kind": "total_or_repeat", "reason": "summary row of the list"}],
     },
 }
 

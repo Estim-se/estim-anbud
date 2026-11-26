@@ -1,4 +1,5 @@
-"""The calc as an XLSX with Swedish labels: Översikt, Kalkyl, Underlag, Objektmodell and Ej omhändertaget.
+"""The calc as an XLSX with Swedish labels: Översikt, Kalkyl, Underlag, Objektmodell, Ej omhändertaget and Bortvalt med
+skäl (lines set aside with a kind other than unclear, sorted by kind).
 
 - A post whose count per object comes from a recipe says which recipe ("kundens recept" or Estim's default) in its
   notes and level, and lists the object rows it counts.
@@ -25,6 +26,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from anbud.granskning.catalog import Catalog
 from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Post
+from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered
 
 if TYPE_CHECKING:
     from anbud.granskning.corpus import Corpus
@@ -162,8 +164,12 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
                 _put(ws, r, col, value, fmt)
         if p.status in ("Saknar pris", "Saknar mängd"):
             ws.cell(row=r, column=16).fill = WARN_FILL
+        if p.assumed:
+            ws.cell(row=r, column=17).fill = WARN_FILL
         rows[p.id] = r
         r += 1
+    if result.posts:  # filter on Nivå, Status or Omfattning; the totals below stay outside the filter
+        ws.auto_filter.ref = f"A{FIRST_ROW - 1}:{ws.cell(row=r - 1, column=len(CALC_COLUMNS)).coordinate}"
     t = result.totals
     r += 1
     for label, value, fmt in (
@@ -172,6 +178,7 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
         ("Arbete", t.labour, KR),
         ("Summa (exkl. optioner)", t.total, KR),
         ("varav oklar entreprenadgräns", t.unclear_total, KR),
+        (f"varav antagna mängder ({t.assumed_priced} poster, filtrera Nivå = Antagande)", t.assumed_total, KR),
         ("Optioner (utanför summan)", t.options_total, KR),
     ):
         _put(ws, r, 3, label)
@@ -198,6 +205,8 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Arbete", t.labour, KR),
         ("Timmar", t.hours, HOURS),
         ("varav oklar entreprenadgräns", t.unclear_total, KR),
+        ("varav antagna mängder", t.assumed_total, KR),
+        ("Prissatta poster med antagen mängd", t.assumed_priced, None),
         ("Optioner (utanför summan)", t.options_total, KR),
         ("Poster", c["posts"], None),
         ("Prissatta poster", c["posts_priced"], None),
@@ -205,14 +214,15 @@ def _overview(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str
         ("Saknar mängd", c["posts_missing_quantity"], None),
         ("Mängdrader i underlaget", c["quantity_lines"], None),
         ("Omfattningsstycken i underlaget", c["scope_lines"], None),
-        ("Ej omhändertagna rader och stycken", c["lines_not_handled"], None),
+        ("Rader och stycken utan post", c["lines_not_handled"], None),
+        ("varav ej omhändertagna (se Ej omhändertaget)", c["lines_unresolved"], None),
+        ("varav bortvalda med skäl (se Bortvalt med skäl)", c["lines_not_handled"] - c["lines_unresolved"], None),
         ("varav omfattningsstycken", c["scope_lines_not_handled"], None),
         ("Objekt lästa av kod ur objektlistan (som appen)", _code_objects(result), None),
         ("Modellen avviker från objektlistan för", _disagree(result), None),
         ("Poster per objekt eller rumstyp", c["posts_per_object"], None),
         ("Poster med antal enligt recept", c["posts_from_recipe"], None),
         ("Poster med antaget antal per objekt (1)", c["posts_assumed_per_object"], None),
-        ("varav bortvalda av modellen", c["lines_set_aside_by_model"], None),
         ("Verifierade poster från modellen", c["records_verified"], None),
         ("Underkända poster från modellen", c["records_rejected"], None),
         ("Avsnitt lästa / totalt", f"{c['chunk_status'].get('submitted', 0)} / {c['chunks']}", None),
@@ -321,7 +331,13 @@ def _objects_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status
 
 
 def _uncovered_sheet(
-    ws: Worksheet, result: KalkylResult, corpus: Corpus, catalog: Catalog, status: str, run: str
+    ws: Worksheet,
+    result: KalkylResult,
+    lines: list[Uncovered],
+    corpus: Corpus,
+    catalog: Catalog,
+    status: str,
+    run: str,
 ) -> None:
     columns = [
         ("Källa (block)", 18),
@@ -332,14 +348,16 @@ def _uncovered_sheet(
         ("Text", 70),
         ("Orsak", 60),
         ("Typ", 16),
+        ("Kategori", 30),
     ]
     _header(ws, catalog, status, run, columns)
-    for r, u in enumerate(result.uncovered, FIRST_ROW):
+    for r, u in enumerate(lines, FIRST_ROW):
         b = corpus.blocks[u.block_id]
         where = f"sida {b.page}" if b.page is not None else (b.sheet or "")
         kind = "Omfattningsstycke" if u.line == "scope" else "Mängdrad"
         heading = " > ".join(result.paths.get(u.block_id, ()))
-        values = [u.block_id, b.doc_id, where, b.row, heading, b.text, u.reason, kind]
+        category = SET_ASIDE_LABELS[u.set_aside_kind] if u.set_aside_kind else ""
+        values = [u.block_id, b.doc_id, where, b.row, heading, b.text, u.reason, kind, category]
         for col, value in enumerate(values, 1):
             if value is not None:
                 _put(ws, r, col, value)
@@ -357,7 +375,10 @@ def write_workbook(result: KalkylResult, corpus: Corpus, catalog: Catalog, meta:
     rows = _calc_sheet(wb.create_sheet("Kalkyl"), result, catalog, status, run)
     _evidence_sheet(wb.create_sheet("Underlag"), result, catalog, status, run)
     _objects_sheet(wb.create_sheet("Objektmodell"), result, catalog, status, run)
-    _uncovered_sheet(wb.create_sheet("Ej omhändertaget"), result, corpus, catalog, status, run)
+    unresolved = [u for u in result.uncovered if u.unresolved]
+    reasoned = sorted((u for u in result.uncovered if not u.unresolved), key=lambda u: u.set_aside_kind or "")
+    _uncovered_sheet(wb.create_sheet("Ej omhändertaget"), result, unresolved, corpus, catalog, status, run)
+    _uncovered_sheet(wb.create_sheet("Bortvalt med skäl"), result, reasoned, corpus, catalog, status, run)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), rows

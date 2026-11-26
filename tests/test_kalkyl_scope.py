@@ -468,7 +468,7 @@ SCOPE_ANSWERS: dict[str, dict[str, Any]] = {
                 catalog_id="takuttag",
             ),
         ],
-        "set_aside": [{"block_ids": ["aaaaaa-000004"], "reason": "common space, handled by per-space rules"}],
+        "set_aside": [{"block_ids": ["aaaaaa-000004"], "kind": "unclear", "reason": "common space, per-space rules"}],
     },
     "bbbbbb-000001": {
         "records": [
@@ -502,6 +502,7 @@ def test_a_run_prices_scope_passages_through_the_recipe(scope_tender: Path) -> N
     assert summary["rooms_from_row_descriptors"] == 2 and summary["recipe"] == DEFAULT_LABEL
     assert summary["posts_from_recipe"] == 5 and summary["posts_missing_quantity"] == 0
     assert summary["posts_assumed_per_object"] == 1
+    assert summary["lines_unresolved"] == 1 and summary["lines_set_aside_by_kind"] == {"unclear": 1}
     out = scope_tender / "kalkyl" / "k"
     result = json.loads((out / "result.json").read_text())
     assert result["recipe"]["label"] == DEFAULT_LABEL
@@ -514,3 +515,21 @@ def test_a_run_prices_scope_passages_through_the_recipe(scope_tender: Path) -> N
     assert sockets["object_rows"] == ["bbbbbb-000002", "bbbbbb-000003"]
     uncovered = {u["block_id"]: u for u in result["uncovered"]}
     assert uncovered["aaaaaa-000004"]["line"] == "scope" and uncovered["aaaaaa-000004"]["set_aside_by_model"]
+
+
+def test_the_calc_shows_how_much_of_the_total_rests_on_assumed_counts(scope_tender: Path) -> None:
+    import openpyxl
+
+    summary = run_dev_tender("co-001", "t-0001", sdk=fake_sdk(_scope_handler), catalog_name="synthetic", run_id="k")
+    assert summary["posts_assumed_priced"] == 1
+    out = scope_tender / "kalkyl" / "k"
+    result = json.loads((out / "result.json").read_text())
+    bedroom = next(p for p in result["posts"] if p["name"] == "Takuttag i sovrum")
+    assert result["totals"]["assumed_total"] == bedroom["total"] and result["totals"]["assumed_priced"] == 1
+    assert any("platsbesök" in n and "kundens recept" in n for n in bedroom["notes"])  # what replaces it
+    wb = openpyxl.load_workbook(out / "kalkyl.xlsx")
+    calc = wb["Kalkyl"]
+    assert calc.auto_filter.ref and calc.auto_filter.ref.startswith("A4:")
+    labels = [calc.cell(row=r, column=3).value or "" for r in range(1, calc.max_row + 1)]
+    row = next(i for i, v in enumerate(labels, 1) if str(v).startswith("varav antagna mängder (1 poster"))
+    assert Decimal(str(calc.cell(row=row, column=15).value)) == Decimal(bedroom["total"])

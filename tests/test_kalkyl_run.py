@@ -205,7 +205,8 @@ def data_root_of(tender: Path) -> Path:
 def test_the_xlsx_has_the_label_on_every_sheet_citations_and_ej_omhandertaget(tender: Path) -> None:
     _run(fake_sdk())
     wb = openpyxl.load_workbook(tender / "kalkyl" / "kalkyl-test" / "kalkyl.xlsx")
-    assert wb.sheetnames == ["Översikt", "Kalkyl", "Underlag", "Objektmodell", "Ej omhändertaget"]
+    names = ["Översikt", "Kalkyl", "Underlag", "Objektmodell", "Ej omhändertaget", "Bortvalt med skäl"]
+    assert wb.sheetnames == names
     for ws in wb.worksheets:
         assert ws["A1"].value == "Katalog: Syntetisk testkatalog"
     calc = wb["Kalkyl"]
@@ -216,8 +217,11 @@ def test_the_xlsx_has_the_label_on_every_sheet_citations_and_ej_omhandertaget(te
     assert downlight["Summa"] == pytest.approx(22560.0) and downlight["Typkod"] == "L1"
     central = next(r for r in rows if r["Post"] == "Lägenhetscentral")
     assert central["Status"] == "Saknar pris" and "R3" in central["Anmärkning"]
-    uncovered = wb["Ej omhändertaget"]
-    assert uncovered["A5"].value == "bbbbbb-000005" and uncovered["G5"].value.startswith("Bortvalt av modellen")
+    unresolved = [c.value for c in wb["Ej omhändertaget"]["A"][4:]]
+    assert "bbbbbb-000005" not in unresolved  # a total set aside with its kind is no longer "Ej omhändertaget"
+    reasoned = wb["Bortvalt med skäl"]
+    assert reasoned["A5"].value == "bbbbbb-000005" and reasoned["G5"].value.startswith("Bortvalt av modellen (Summa")
+    assert reasoned["I5"].value == "Summa eller upprepad uppgift"
     objects = wb["Objektmodell"]
     assert objects["A5"].value == "lägenheter" and objects["B5"].value == 3
 

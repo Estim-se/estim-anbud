@@ -63,8 +63,11 @@ heading path: a heading that says option or exclusion applies to everything unde
 
 Citations: one to three consecutive blocks of this chunk, by block id, with a quote copied exactly from each block. \
 The quote must contain the number you put in quantity. Rows marked q="1" state a quantity: each must be used by a \
-record or listed in set_aside with a short reason (a heading row, a total, a date, a quantity for another trade, \
-and so on). Code lists every q="1" row you neither use nor set aside as not handled.
+record or listed in set_aside with its kind and a short reason. Kinds: heading_or_contents (a heading, a \
+table-of-contents entry, a page, section or drawing number), total_or_repeat, other_trade, not_this_contract, \
+no_requirement (information, conditions, dates, areas, a schedule that asks for no work), and unclear (it may be a \
+requirement, but what or how much can't be told). Code lists unclear rows, and every q="1" row you neither use nor \
+set aside, as not handled.
 
 catalog_id: the catalog item that fits the requirement and its unit, from the catalog below. Leave it out when \
 nothing fits; never force the nearest item. Additive: true only when the quote says the quantity comes on top of \

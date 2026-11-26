@@ -4,6 +4,7 @@ posts -> kronor -> coverage. `run` does the reading and writing around it."""
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -104,13 +105,18 @@ class KalkylResult:
             "posts": len(self.posts),
             "posts_per_object": sum(1 for p in self.posts if any(ln.per for ln in p.lines)),
             "posts_from_recipe": sum(1 for p in self.posts if any(ln.recipe for ln in p.lines)),
-            "posts_assumed_per_object": sum(1 for p in self.posts if any(ln.assumed for ln in p.lines)),
+            "posts_assumed_per_object": sum(1 for p in self.posts if p.assumed),
+            "posts_assumed_priced": self.totals.assumed_priced,
             "posts_priced": self.totals.priced,
             "posts_missing_price": self.totals.missing_price,
             "posts_missing_quantity": self.totals.missing_quantity,
             "lines_not_handled": len(self.uncovered),
             "scope_lines_not_handled": sum(u.line == "scope" for u in self.uncovered),
             "lines_set_aside_by_model": sum(u.set_aside_by_model for u in self.uncovered),
+            "lines_unresolved": sum(u.unresolved for u in self.uncovered),
+            "lines_set_aside_by_kind": dict(
+                sorted(Counter(u.set_aside_kind for u in self.uncovered if u.set_aside_kind).items())
+            ),
             "r3": {k: v for k, v in self.match_stats.items() if k != "error"},
             "complete": self.complete,
         }

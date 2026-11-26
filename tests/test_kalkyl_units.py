@@ -306,7 +306,7 @@ def test_every_quantity_line_is_used_or_listed_with_a_reason(corpus: Corpus) -> 
         ChunkResult(
             "c001",
             "submitted",
-            set_aside=[SetAside(block_ids=["aaaaaa-000011"], reason="other trade")],
+            set_aside=[SetAside(block_ids=["aaaaaa-000011"], kind="other_trade", reason="other trade")],
             rejected=[Rejected(chunk_id="c001", reason="record 2: quote", block_ids=["aaaaaa-000007"])],
         ),
         ChunkResult("c002", "not_run", error="budget"),
@@ -348,3 +348,11 @@ def test_a_list_row_counts_what_each_object_holds(corpus: Corpus) -> None:
     objects = count_objects(_verified([row, second, total]))
     assert (objects["apartment"].count, objects["room"].count, objects["kitchen"].count) == (2, 5, 2)
     assert objects["kitchen"].conflict is None  # two rows with one kitchen each agree with 2 apartments of one kitchen
+
+
+def test_only_unclear_set_asides_and_unhandled_lines_stay_unresolved() -> None:
+    from anbud.kalkyl.records import Uncovered
+
+    assert Uncovered(block_id="a", reason="r").unresolved
+    assert Uncovered(block_id="a", reason="r", set_aside_by_model=True, set_aside_kind="unclear").unresolved
+    assert not Uncovered(block_id="a", reason="r", set_aside_by_model=True, set_aside_kind="other_trade").unresolved
