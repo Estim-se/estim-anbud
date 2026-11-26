@@ -52,6 +52,10 @@ def main(argv: list[str] | None = None) -> int:
         from anbud.evals.split_heldout import status_main
 
         return status_main(argv[1:])
+    if argv and argv[0] == "schema-check":
+        from anbud.schema_check import main as schema_check_main
+
+        return schema_check_main(argv[1:])
 
     parser = argparse.ArgumentParser(prog="anbud", description="Estim Anbud harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -66,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("guards", help="repo guards: names, document files, licensed text")
     sub.add_parser("split", help="assign new tenders to dev, held-out or prospective")
     sub.add_parser("split-status", help="counts per status, and the dev tender ids")
+    sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
 
     args = parser.parse_args(argv)
     if args.command == "run":
