@@ -183,8 +183,10 @@ def _append(ledger: Path, payload: bytes) -> None:
 
 def import_manual(company_id: str, source: Path, root: Path | None = None) -> int:
     """Put hand-made, already chained freeze records at the start of the ledger, byte for byte. Returns the number of
-    lines written: 0 when the ledger already starts with exactly those lines. Any other existing ledger is refused,
-    because the hand-made records must come first and lines are never reordered."""
+    lines written: 0 when the ledger already starts with exactly those lines. When the ledger holds an earlier
+    import of the same file and nothing else, and the file has grown since, the new lines are appended (their chain
+    continues from the ledger's last line). Any other existing ledger is refused, because the hand-made records must
+    come first and lines are never reordered."""
     ledger = ledger_file(company_id, root=root)
     if paths.is_sealed_path(source, root):
         raise FreezeError("the hand-made records may not come from held-out or sealed storage")
@@ -204,6 +206,9 @@ def import_manual(company_id: str, source: Path, root: Path | None = None) -> in
             return len(lines)
         if existing[: len(lines)] == lines:
             return 0
+        if len(existing) < len(lines) and lines[: len(existing)] == existing:
+            _append(ledger, b"".join(line + b"\n" for line in lines[len(existing) :]))
+            return len(lines) - len(existing)
         raise FreezeError("the ledger already holds other lines; hand-made records can only start a ledger")
 
 

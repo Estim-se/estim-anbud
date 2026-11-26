@@ -382,3 +382,24 @@ def test_the_ledger_holds_no_customer_file_or_folder_name(data_root: Path, capsy
     assert second["outputs_dir"] == "sha256:" + _sha("co-001/kalkyl/Påhittade Fastigheter".encode())
     assert list(second["outputs_sha256"]) == ["sha256:" + _sha("Örjan Exempelsson.json".encode())]
     assert second["run_record_dir"] == "co-001/runs/r2"
+
+
+def test_a_grown_hand_made_file_extends_a_ledger_that_holds_only_its_earlier_lines(
+    data_root: Path, tmp_path: Path
+) -> None:
+    source = manual_file(tmp_path)
+    assert import_manual("co-001", source) == 2
+    last = source.read_bytes().splitlines()[-1]
+    third = json.dumps({"kind": "manual_freeze_v0", "tender": "co-001/t-0003", "run_id": "hand-3", "prev": _sha(last)})
+    with source.open("ab") as handle:
+        handle.write(third.encode() + b"\n")
+    assert import_manual("co-001", source) == 1
+    ledger = ledger_file("co-001")
+    assert ledger.read_bytes() == source.read_bytes() and verify(ledger).lines == 3
+    run = make_run(data_root, "r-1", "t-0001", "co-001")  # once the harness has frozen a run, the file can't grow in
+    freeze_run("co-001", "r-1", outputs_dir=run[0], run_record_dir=run[1], tender_id="t-0001")
+    fourth = json.dumps({"kind": "manual_freeze_v0", "tender": "co-001/t-0004", "prev": _sha(third.encode())})
+    with source.open("ab") as handle:
+        handle.write(fourth.encode() + b"\n")
+    with pytest.raises(FreezeError, match="other lines"):
+        import_manual("co-001", source)
