@@ -18,6 +18,7 @@ Schema limitations", checked 2026-11-26).
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +38,9 @@ _REFUSED = {
 }  # fmt: skip
 _FORMATS = {"date-time", "time", "date", "duration", "email", "hostname", "uri", "ipv4", "ipv6", "uuid"}
 _ANNOTATIONS = {"description", "default"}
+_DATA = {"default", "const", "enum", "examples"}  # values, not schemas: never rewritten
+# Regex features strict mode can't compile: lookaround, backreferences, word boundaries.
+_BAD_REGEX = re.compile(r"\(\?<?[=!]|\\[1-9]|\\[bB]")
 
 
 class SchemaError(ValueError):
@@ -61,6 +65,8 @@ def _strict_node(node: Any, where: str) -> Any:
             continue
         if key == "minItems" and value > 1:
             continue  # strict mode allows only 0 and 1
+        if key == "pattern" and _BAD_REGEX.search(value):
+            raise SchemaError(f"{where}: strict mode can't compile lookaround, backreferences or word boundaries")
         if key == "properties":
             out[key] = {name: _strict_node(sub, f"{where}.{name}") for name, sub in value.items()}
         elif key in ("items", "additionalItems"):
@@ -119,7 +125,9 @@ def _strip_titles(node: Any) -> Any:
     for key, value in node.items():
         if key == "title" and isinstance(value, str):
             continue
-        if key in ("properties", "$defs", "definitions"):
+        if key in _DATA:
+            out[key] = value
+        elif key in ("properties", "$defs", "definitions"):
             out[key] = {name: _strip_titles(sub) for name, sub in value.items()}  # names are kept, even "title"
         else:
             out[key] = _strip_titles(value)
@@ -157,24 +165,32 @@ class Complexity:
         )
 
 
-def _resolve(ref: str, defs: dict[str, Any]) -> tuple[str, Any]:
-    for prefix in ("#/$defs/", "#/definitions/"):
-        if ref.startswith(prefix) and ref[len(prefix) :] in defs:
-            return ref[len(prefix) :], defs[ref[len(prefix) :]]
-    raise SchemaError(f"unresolvable $ref {ref}")
+def _resolve(ref: str, root: dict[str, Any]) -> Any:
+    """`#/$defs/X` looks only in `$defs`, `#/definitions/X` only in `definitions`."""
+    for section in ("$defs", "definitions"):
+        prefix = f"#/{section}/"
+        if ref.startswith(prefix) and ref[len(prefix) :] in root.get(section, {}):
+            return root[section][ref[len(prefix) :]]
+    return None
 
 
-def _count(node: Any, defs: dict[str, Any], tool: str, path: tuple[str, ...], report: Complexity) -> None:
+def _count(node: Any, root: dict[str, Any], tool: str, path: tuple[str, ...], report: Complexity) -> None:
     """Refs are expanded where they're used, so a shared definition counts once per use (the conservative reading)."""
     if not isinstance(node, dict):
         report.problems.append(f"{tool}: a schema that isn't an object")
         return
     if "$ref" in node:
-        name, target = _resolve(node["$ref"], defs)
-        if name in path:
-            report.problems.append(f"{tool}: recursive schema via {name}")
+        ref = node["$ref"]
+        target = _resolve(ref, root)
+        if target is None:
+            report.problems.append(f"{tool}: unresolvable $ref {ref}")
+        elif ref in path:
+            report.problems.append(f"{tool}: recursive schema via {ref}")
             return
-        _count(target, defs, tool, (*path, name), report)
+        else:
+            _count(target, root, tool, (*path, ref), report)
+    if "pattern" in node and _BAD_REGEX.search(node["pattern"]):
+        report.problems.append(f"{tool}: a pattern strict mode can't compile")
     leftover = (_DROPPED - {"title"} | _REFUSED) & node.keys()
     if leftover:
         report.problems.append(f"{tool}: unsupported keywords {sorted(leftover)}")
@@ -190,23 +206,28 @@ def _count(node: Any, defs: dict[str, Any], tool: str, path: tuple[str, ...], re
         properties = node.get("properties", {})
         report.optional_params += len(set(properties) - set(node.get("required", [])))
         for sub in properties.values():
-            _count(sub, defs, tool, path, report)
+            _count(sub, root, tool, path, report)
     for key in ("items", "additionalItems"):
         if isinstance(node.get(key), dict):
-            _count(node[key], defs, tool, path, report)
+            _count(node[key], root, tool, path, report)
     for key in ("anyOf", "allOf"):
         for sub in node.get(key, []):
-            _count(sub, defs, tool, path, report)
+            _count(sub, root, tool, path, report)
 
 
 def complexity(tools: list[dict[str, Any]]) -> Complexity:
-    """Counts across every strict tool in one request, as the API does."""
+    """Counts across every strict tool in one request, as the API does. Definitions nothing refers to are still checked
+    for problems (the API compiles them too), but add nothing to the counts."""
     report = Complexity()
     for tool in tools:
         if not tool.get("strict"):
             continue
         report.strict_tools += 1
         schema = tool["input_schema"]
-        defs = {**schema.get("definitions", {}), **schema.get("$defs", {})}
-        _count(schema, defs, tool["name"], (), report)
+        _count(schema, schema, tool["name"], (), report)
+        for section in ("$defs", "definitions"):
+            for name, definition in schema.get(section, {}).items():
+                scratch = Complexity()
+                _count(definition, schema, tool["name"], (f"#/{section}/{name}",), scratch)
+                report.problems += [p for p in scratch.problems if p not in report.problems]
     return report

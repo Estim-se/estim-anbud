@@ -238,13 +238,17 @@ class ModelClient:
             raise self._mapped(exc) from exc
         reserved = self.budget.reserve(price.max_cost(input_tokens, max_tokens))
         start = self.clock()
+        opened = False
+        request_id = None
         try:
-            with self.sdk.messages.stream(**params) as stream:
+            with self.sdk.messages.stream(**params) as stream:  # the request is sent here
+                opened = True
+                request_id = getattr(stream, "request_id", None)  # streamed messages don't carry it themselves
                 message = stream.get_final_message()
         except Exception as exc:  # noqa: BLE001
-            # A failure after the stream opened may still be billed: keep the whole reservation as spent.
-            self.budget.settle(reserved, reserved)
-            self._emit(step, "error", duration_ms=self._ms(start), cost_usd=reserved)
+            charged = 0.0 if self._refused_unbilled(exc, opened) else reserved
+            self.budget.settle(reserved, charged)
+            self._emit(step, "error", duration_ms=self._ms(start), cost_usd=charged)
             raise self._mapped(exc) from exc
         cost = price.cost(message.usage)
         self.budget.settle(reserved, cost)
@@ -260,10 +264,18 @@ class ModelClient:
             cache_write_tokens=usage.cache_creation_input_tokens,
             cost_usd=cost,
         )
-        return CallResult(message, model, cost, duration, getattr(message, "_request_id", None))
+        return CallResult(message, model, cost, duration, request_id)
 
     def _ms(self, start: float) -> int:
         return int((self.clock() - start) * 1000)
+
+    @staticmethod
+    def _refused_unbilled(exc: Exception, opened: bool) -> bool:
+        """An error response before the stream opened (400, 401, 429, 529...) is not billed. A connection failure or a
+        failure mid-stream may be, so those keep the whole reservation as spent."""
+        import anthropic
+
+        return not opened and isinstance(exc, anthropic.APIStatusError)
 
     @staticmethod
     def _mapped(exc: Exception) -> ModelError:

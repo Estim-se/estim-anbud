@@ -46,7 +46,7 @@ class Price:
 @dataclass(frozen=True)
 class Config:
     api_base: str
-    workspace: str
+    workspace: str  # also the Keychain account that holds this workspace's key
     models: dict[str, str]  # alias -> model id
     roles: dict[str, str]  # role -> alias
     prices: dict[str, Price]  # model id -> price

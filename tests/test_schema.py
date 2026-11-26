@@ -121,3 +121,26 @@ def test_counter_enforces_each_limit() -> None:
     union = {"anyOf": [{"type": "string"}, {"type": "integer"}]}
     many_unions = _obj({f"u{i}": union for i in range(MAX_UNION_PARAMS + 1)}, [f"u{i}" for i in range(17)])
     assert not complexity([_tool("t", many_unions)]).ok
+
+
+def test_patterns_strict_mode_cant_compile_are_refused_and_counted() -> None:
+    lookahead = {"type": "object", "properties": {"x": {"type": "string", "pattern": "^(?!tmp).*$"}}, "required": ["x"]}
+    with pytest.raises(SchemaError):
+        to_strict(lookahead)
+    assert any("pattern" in p for p in complexity([_tool("t", {**lookahead, "additionalProperties": False})]).problems)
+    simple = {"type": "object", "properties": {"x": {"type": "string", "pattern": "^[A-Z]{2}\\d+$"}}, "required": ["x"]}
+    assert to_strict(simple)["properties"]["x"]["pattern"] == "^[A-Z]{2}\\d+$"
+
+
+def test_unreferenced_definitions_are_checked_and_ref_sections_kept_apart() -> None:
+    unused = {**_obj({"a": {"type": "string"}}, ["a"]), "$defs": {"Spare": {"type": "object", "properties": {}}}}
+    report = complexity([_tool("t", unused)])
+    assert any("additionalProperties" in p for p in report.problems) and report.optional_params == 0
+    crossed = {**_obj({"a": {"$ref": "#/definitions/X"}}, ["a"]), "$defs": {"X": _obj({})}}
+    assert any("unresolvable" in p for p in complexity([_tool("t", crossed)]).problems)
+
+
+def test_plain_export_leaves_data_values_alone() -> None:
+    schema = {"type": "object", "title": "T", "properties": {"d": {"title": "D", "default": {"title": "kept"}}}}
+    out = to_plain(schema)
+    assert out["properties"]["d"] == {"default": {"title": "kept"}}

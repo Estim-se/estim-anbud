@@ -43,7 +43,7 @@ def _compile() -> int:
     config = load_config()
     budget = Budget(float(config.budgets["schema_check"]["hard_stop"]))
     try:
-        sdk = make_sdk_client(config, keychain_key())
+        sdk = make_sdk_client(config, keychain_key(account=config.workspace))  # the entry is named after the workspace
     except KeyMissing as exc:
         print(f"schema-check --compile: {exc}")
         return NO_KEY

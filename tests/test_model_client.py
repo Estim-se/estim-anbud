@@ -35,8 +35,12 @@ def _status_error(cls: type, status: int, message: str) -> Exception:
 
 
 class FakeStream:
-    def __init__(self, message: Any) -> None:
+    """Like the SDK's: the request id is on the stream, not on the final message."""
+
+    def __init__(self, message: Any, mid_stream_error: Exception | None = None) -> None:
         self.message = message
+        self.mid_stream_error = mid_stream_error
+        self.request_id = "req_stream"
 
     def __enter__(self) -> FakeStream:
         return self
@@ -45,13 +49,18 @@ class FakeStream:
         return None
 
     def get_final_message(self) -> Any:
+        if self.mid_stream_error:
+            raise self.mid_stream_error
         return self.message
 
 
 class FakeMessages:
-    def __init__(self, usage: Usage | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self, usage: Usage | None = None, error: Exception | None = None, mid_stream_error: Exception | None = None
+    ) -> None:
         self.usage = usage or _usage()
         self.error = error
+        self.mid_stream_error = mid_stream_error
         self.sent: list[dict[str, Any]] = []
         self.counted: list[dict[str, Any]] = []
 
@@ -62,8 +71,9 @@ class FakeMessages:
     def stream(self, **params: Any) -> FakeStream:
         self.sent.append(params)
         if self.error:
-            raise self.error
-        return FakeStream(SimpleNamespace(usage=self.usage, stop_reason="end_turn", content=[], _request_id="req_x"))
+            raise self.error  # an error response: the stream never opens
+        message = SimpleNamespace(usage=self.usage, stop_reason="end_turn", content=[])
+        return FakeStream(message, self.mid_stream_error)
 
     def create(self, **params: Any) -> Any:
         raise AssertionError("ModelClient must stream")
@@ -107,6 +117,7 @@ def test_cost_comes_from_usage_and_the_budget_is_settled() -> None:
     result = _call(client)
     expected = (1000 * 4.0 + 100 * 20.0 + 2000 * 8.0 + 5000 * 0.2) / 1_000_000
     assert result.cost_usd == pytest.approx(expected)
+    assert result.request_id == "req_stream"
     assert client.budget.spent == pytest.approx(expected) and client.budget.reserved == pytest.approx(0)
     (event,) = events
     assert event.kind == "model_call" and event.cost_usd == pytest.approx(expected)
@@ -138,8 +149,22 @@ def test_a_rejected_schema_is_classified_and_the_message_stays_off_logs() -> Non
         _call(client)
     assert caught.value.kind == "schema_rejected" and caught.value.status == 400
     assert "complex" in caught.value.message and "complex" not in str(caught.value)
-    assert client.budget.reserved == pytest.approx(0) and client.budget.spent > 0  # kept as spent, to be safe
-    assert [e.kind for e in events] == ["error"]
+    assert client.budget.reserved == pytest.approx(0) and client.budget.spent == 0  # an error response isn't billed
+    assert [(e.kind, e.cost_usd) for e in events] == [("error", 0.0)]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        FakeMessages(mid_stream_error=_status_error(anthropic.OverloadedError, 529, "overloaded")),
+        FakeMessages(error=anthropic.APIConnectionError(request=REQUEST)),
+    ],
+)
+def test_a_failure_that_may_be_billed_keeps_the_reservation(messages: FakeMessages) -> None:
+    client = _client(messages)
+    with pytest.raises(ModelError):
+        _call(client)
+    assert client.budget.reserved == pytest.approx(0) and client.budget.spent > 0
 
 
 @pytest.mark.parametrize(
@@ -201,6 +226,11 @@ def test_the_key_comes_from_the_keychain_and_is_never_echoed(monkeypatch: pytest
     assert "sk-" not in str(caught.value)
 
 
+def _key_for_anbud_dev(account: str) -> str:
+    assert account == "anbud-dev"  # the Keychain account is the workspace in config/providers.toml
+    return "sk-test-value"
+
+
 def test_compile_check_never_runs_in_ci(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setenv("CI", "true")
     assert schema_check.main(["--compile"]) == schema_check.REFUSED
@@ -209,7 +239,7 @@ def test_compile_check_never_runs_in_ci(monkeypatch: pytest.MonkeyPatch, capsys:
 def test_compile_check_without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    monkeypatch.setattr(schema_check, "keychain_key", lambda: (_ for _ in ()).throw(KeyMissing("no entry")))
+    monkeypatch.setattr(schema_check, "keychain_key", lambda **_: (_ for _ in ()).throw(KeyMissing("no entry")))
     assert schema_check.main(["--compile"]) == schema_check.NO_KEY
 
 
@@ -217,7 +247,7 @@ def test_compile_check_calls_each_model_once(monkeypatch: pytest.MonkeyPatch, ca
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     fake = FakeMessages(_usage(input_tokens=4000, output_tokens=64))
-    monkeypatch.setattr(schema_check, "keychain_key", lambda: "sk-test-value")
+    monkeypatch.setattr(schema_check, "keychain_key", _key_for_anbud_dev)
     monkeypatch.setattr(schema_check, "make_sdk_client", lambda config, key: SimpleNamespace(messages=fake))
     assert schema_check.main(["--compile"]) == 0
     assert sorted(p["model"] for p in fake.sent) == ["claude-opus-5-5", "claude-sonnet-5-5"]
@@ -230,7 +260,7 @@ def test_compile_check_reports_a_rejected_schema(monkeypatch, capsys: pytest.Cap
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     error = _status_error(anthropic.BadRequestError, 400, "Schema is too complex for compilation.")
-    monkeypatch.setattr(schema_check, "keychain_key", lambda: "sk-test-value")
+    monkeypatch.setattr(schema_check, "keychain_key", _key_for_anbud_dev)
     rejecting = SimpleNamespace(messages=FakeMessages(error=error))
     monkeypatch.setattr(schema_check, "make_sdk_client", lambda config, key: rejecting)
     assert schema_check.main(["--compile"]) == schema_check.FAILED
