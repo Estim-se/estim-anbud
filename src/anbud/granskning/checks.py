@@ -62,6 +62,7 @@ class ChecksReport(BaseModel):
     recipe: RecipeSection | None = None
     coverage: list[CheckCoverage] = Field(default_factory=list)
     cost_usd: float = 0.0
+    skipped: str | None = Field(default=None, description="Why the checks didn't run at all, in Swedish")
 
 
 def _coverage(run: CheckRun, checked: str) -> CheckCoverage:
@@ -95,20 +96,36 @@ def _zero_text(rows: Sequence[ZeroRow]) -> str:
 
 
 def _space_text(rules: Sequence[SpaceRule]) -> str:
-    short = sum(1 for r in rules if r.status != "ok")
-    return f"{len(rules)} regler per utrymme hittade; {short} där kalkylen har för lite eller saknar post."
+    short = sum(1 for r in rules if r.status in ("gap", "no_post"))
+    unknown = sum(1 for r in rules if r.status == "unknown")
+    text = f"{len(rules)} regler per utrymme hittade; {short} där kalkylen har för lite eller saknar post."
+    if unknown:
+        text += f" {unknown} där kalkylposten inte anger något antal; de prissätts inte."
+    return text
 
 
 def _recipe_text(section: RecipeSection) -> str:
     if section.status == "no_trigger":
         return "Ingen hänvisning till en standard för uttag per rumstyp hittades."
+    if section.status == "trigger_unverified":
+        return (
+            "En hänvisning till en standard för uttag per rumstyp hittades, men dess citat kunde inte verifieras; "
+            "ingen flagga ges. Kontrollera hänvisningen för hand."
+        )
     if section.status == "failed":
         return "Kontrollen gav inget användbart svar."
     rows = sum(1 for r in section.rows if r.posts)
+    extra = ""
+    unmapped = sum(1 for r in section.rows if r.unmapped)
+    if unmapped:
+        extra += f" {unmapped} receptrader har ingen kalkylpost kopplad (ej kopplad, ej prissatt)."
+    if section.rooms_unverified:
+        extra += f" Antal rum per lägenhet inte styrkt för: {', '.join(section.rooms_unverified)} (ej prissatt)."
     if section.status == "no_recipe":
-        return f"FU hänvisar till {section.reference or 'en standard'}; kundens recept saknas. {rows} receptrader."
+        ref = section.reference or "en standard"
+        return f"FU hänvisar till {ref}; kundens recept saknas. {rows} receptrader.{extra}"
     short = sum(1 for r in section.rows if r.gap_per_room)
-    return f"Jämfört med kundens recept ({section.recipe_source}): {rows} receptrader, {short} under receptet."
+    return f"Jämfört med kundens recept ({section.recipe_source}): {rows} receptrader, {short} under receptet.{extra}"
 
 
 class ChecksResult:
@@ -141,6 +158,15 @@ class ChecksResult:
             }
             for run in self.runs
         }
+
+
+def not_run(reason: str) -> ChecksResult:
+    """The checks' result when they don't run (skipped, or failed before they could), with the reason in coverage."""
+    runs = [CheckRun(name) for name in TITLES]
+    for run in runs:
+        run.skipped = reason
+    coverage = [_coverage(run, "Kontrollen kördes inte.") for run in runs]
+    return ChecksResult(ChecksReport(coverage=coverage, skipped=reason), {}, runs)
 
 
 def _safe(check: Callable[..., Any], name: str, empty: Any, *args: Any, **kwargs: Any) -> Any:

@@ -20,14 +20,19 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from anbud.granskning.contracts import ToolCall
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.loop import EFFORT, LoopOutcome, SubmitOutcome, run_tool_loop
+from anbud.granskning.merge import STOP_ERRORS
 from anbud.granskning.rank import document_names
 from anbud.granskning.toolbox import Toolbox
 from anbud.granskning.validate import quote_matches
-from anbud.model_client import ModelClient
+from anbud.model_client import ModelClient, ModelError
 
 CHECK_ROLE = "lens_generic_scope"
 CHECK_TOOLS = frozenset({"search_blocks", "read_blocks", "outline", "calc_posts"})
 CHECK_MAX_TOKENS = 8000
+
+# A loop error that ends a check's remaining batches, and skips the checks when the lenses already ended on one: the
+# stop errors by class name (a ModelError is logged by its kind), and the spend cap, which every later call would hit.
+STOP_NAMES = frozenset(e.__name__ for e in STOP_ERRORS if e is not ModelError) | {"spend_cap"}
 
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 

@@ -146,7 +146,7 @@ RECIPE_ANSWER = {
             "apartments": 10,
             "per_apartment": 1,
             "block_id": "f0f0f0-000003",
-            "quote": "10 lägenheter av typ 2 rok",
+            "quote": "10 lägenheter av typ 2 rok med ett sovrum och ett kök vardera",
         },
         {
             "room_type": "kök",
@@ -154,7 +154,7 @@ RECIPE_ANSWER = {
             "apartments": 10,
             "per_apartment": 1,
             "block_id": "f0f0f0-000003",
-            "quote": "10 lägenheter av typ 2 rok",
+            "quote": "10 lägenheter av typ 2 rok med ett sovrum och ett kök vardera",
         },
     ],
     "mapping": [

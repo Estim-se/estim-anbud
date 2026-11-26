@@ -25,8 +25,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--concurrency", type=int, default=3, help="lenses in parallel (default 3)")
     parser.add_argument("--lens", action="append", default=None, help="run only this lens (repeatable)")
     parser.add_argument(
+        "--checks", action="store_true", help="with --lens, also run the focused checks (they run by default otherwise)"
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="build everything up to the first model call, print counts, call nothing"
     )
+
+
+def checks_wanted(args: argparse.Namespace) -> bool:
+    """The focused checks run by default; a run of selected lenses (`--lens`) runs them only with `--checks`."""
+    return not args.lens or bool(args.checks)
 
 
 def _dirs(args: argparse.Namespace, kind: str) -> tuple[Path, Path, Path]:
@@ -123,6 +131,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             settings=settings,
             concurrency=args.concurrency,
             on_progress=lambda msg: print(f"  {msg}", flush=True),
+            checks=checks_wanted(args),
         )
     except IntakeStop as exc:
         print(f"anbud run: stopped: {exc}", file=sys.stderr)

@@ -20,9 +20,18 @@ from anbud.granskning.checks import ChecksReport
 from anbud.granskning.zero_rows import NOT_FOUND
 
 ZERO_STATUS = {"explained": "Förklarad", "contradicted": "Motsägs", "not_found": "Ingen hänvisning hittad"}
-RULE_STATUS = {"gap": "Kalkylen har för lite", "ok": "Stämmer", "no_post": "Ingen post i kalkylen"}
+RULE_STATUS = {
+    "gap": "Kalkylen har för lite",
+    "ok": "Stämmer",
+    "no_post": "Ingen post i kalkylen",
+    "unknown": "Kalkylposten anger inget antal; ej prissatt",
+}
 RECIPE_STATUS = {
     "no_trigger": "Ingen hänvisning till en standard för uttag per rumstyp hittades.",
+    "trigger_unverified": (
+        "En hänvisning till en standard för uttag per rumstyp hittades, men dess citat kunde inte verifieras. "
+        "Ingen flagga ges; kontrollera hänvisningen för hand."
+    ),
     "no_recipe": "Kundens recept finns inte inlagt. Jämför kalkylens recept per rum för hand.",
     "compared": "Jämfört med kundens recept.",
     "failed": "Kontrollen gav inget användbart svar.",
@@ -106,7 +115,7 @@ def _recipe_rows(checks: ChecksReport) -> list[list[Any]]:
         [
             r.room_type,
             r.item_kind,
-            _n(r.calc_count),
+            UNMAPPED if r.unmapped else _n(r.calc_count),
             ", ".join(r.posts),
             _n(r.recipe_count),
             _n(r.rooms),
@@ -116,6 +125,8 @@ def _recipe_rows(checks: ChecksReport) -> list[list[Any]]:
         for r in section.rows
     ]
 
+
+UNMAPPED = "ej kopplad"
 
 RECIPE_HEADERS = [
     "Rumstyp",
@@ -139,23 +150,39 @@ def _recipe_lines(checks: ChecksReport) -> list[str]:
         lines.append(f"FU hänvisar{ref}: {section.trigger_where} · {section.trigger_block_id}")
     if section.recipe_source:
         lines.append(f"Kundens recept: {section.recipe_source}")
+    if any(r.unmapped for r in section.rows):
+        lines.append(f"«{UNMAPPED}»: ingen kalkylpost kopplad till receptraden; den prissätts inte.")
+    if section.rooms_unverified:
+        rooms = ", ".join(section.rooms_unverified)
+        lines.append(f"Antal rum per lägenhet inte styrkt med citat för: {rooms}. De raderna prissätts inte.")
     return lines
+
+
+def _empty(checks: ChecksReport, check: str, done: str) -> str:
+    """An empty section's line: what the check found, or why it didn't finish (a section never reads as clean when
+    the check failed)."""
+    cov = next((c for c in checks.coverage if c.check == check), None)
+    return " ".join(cov.not_checked) if cov is not None and cov.not_checked else done
 
 
 def checks_html(checks: ChecksReport | None) -> list[str]:
     """The checks' sections, for the page before coverage."""
     if checks is None:
         return []
+    if checks.skipped:
+        return ["<h2>Kontroller</h2>", f"<p>Kontrollerna kördes inte: {_e(checks.skipped)}</p>"]
     out = [f"<h2>Nollrader och ingår ej ({len(checks.zero_rows)})</h2>"]
     if checks.zero_rows:
         out += _table(ZERO_HEADERS, _zero_rows(checks))
     else:
-        out.append("<p>Kalkylen har inga nollrader eller ingår ej-rader.</p>")
+        none = "Kalkylen har inga nollrader eller ingår ej-rader."
+        out.append(f"<p>{_e(_empty(checks, 'check_zero_rows', none))}</p>")
     out.append(f"<h2>Regler per utrymme ({len(checks.space_rules)})</h2>")
     if checks.space_rules:
         out += _table(RULE_HEADERS, _rule_rows(checks))
     else:
-        out.append("<p>Inga regler per utrymme hittades i handlingarna.</p>")
+        none = "Inga regler per utrymme hittades i handlingarna."
+        out.append(f"<p>{_e(_empty(checks, 'check_space_rules', none))}</p>")
     out.append("<h2>Uttag per rumstyp</h2>")
     out += [f"<p>{_e(line)}</p>" for line in _recipe_lines(checks)]
     if checks.recipe is not None and checks.recipe.trigger_quote:

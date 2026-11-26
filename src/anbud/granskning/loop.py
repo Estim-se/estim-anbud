@@ -252,7 +252,10 @@ class FlagSubmission:
             if final:
                 return SubmitOutcome(True, "Received, but the input had no flags list.")
             return SubmitOutcome(False, 'submit_flags takes {"flags": [...]}, a list of findings (empty if none).')
-        items = [dict(i, lens_id=self.lens_id) if isinstance(i, dict) else i for i in items]
+        items = [
+            dict({k: v for k, v in i.items() if k != "check_key"}, lens_id=self.lens_id) if isinstance(i, dict) else i
+            for i in items
+        ]
         accepted, bad = self.validator(items, tool_log)
         bad = list(bad)
         for flag in accepted:

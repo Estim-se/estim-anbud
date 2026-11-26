@@ -5,7 +5,8 @@ room, technical room and corridor"), the quantity must follow the spaces that ex
   It then lists every qualifying space, each with a block id and a quote naming it (room schedules, room lists,
   drawing text from page cards), and maps the calc post that prices the item, if any.
 - Code verifies every quote, counts distinct spaces, computes spaces times count per space, and compares it with the
-  calc post's quantity. A shortfall becomes a quantity gap on that post (or a missing post) that kronor prices.
+  calc post's quantity. A shortfall becomes a quantity gap on that post (or a missing post) that kronor prices. A
+  mapped post with no quantity is "unknown": shown in the table, never priced as if it had 0.
 - Each rule is its own check: a rule for outlets is checked even when a lens flagged lighting in the same spaces.
 """
 
@@ -95,8 +96,8 @@ class SpaceRule(BaseModel):
     required: float
     post_id: str | None = None
     calc_quantity: float | None = None
-    gap: float = 0.0
-    status: Literal["gap", "ok", "no_post"]
+    gap: float | None = 0.0
+    status: Literal["gap", "ok", "no_post", "unknown"]
 
 
 def _space_key(space: _Space) -> str:
@@ -138,9 +139,16 @@ class _Rules:
 def _checked(corpus: Corpus, rule: _Rule, spaces: list[_Space], posts: dict[str, CalcPost]) -> SpaceRule:
     required = len(spaces) * rule.per_space
     post = posts.get(rule.post_id) if rule.post_id else None
-    calc_quantity = (post.quantity or 0.0) if post is not None else None
-    gap = max(0.0, required - (calc_quantity or 0.0))
-    status = "no_post" if post is None and required > 0 else ("gap" if gap > 0 else "ok")
+    calc_quantity = post.quantity if post is not None else None
+    gap: float | None
+    if post is None:
+        gap = required
+        status = "no_post" if required > 0 else "ok"
+    elif calc_quantity is None:  # the post has no quantity (untyped, or a lump sum): unknown, not 0
+        gap, status = None, "unknown"
+    else:
+        gap = max(0.0, required - calc_quantity)
+        status = "gap" if gap > 0 else "ok"
     return SpaceRule(
         item=rule.item,
         per_space=rule.per_space,
@@ -153,7 +161,7 @@ def _checked(corpus: Corpus, rule: _Rule, spaces: list[_Space], posts: dict[str,
         required=required,
         post_id=rule.post_id if post is not None else None,
         calc_quantity=calc_quantity,
-        gap=gap if post is not None else required,
+        gap=gap,
         status=status,
     )
 
@@ -162,7 +170,7 @@ def _n(value: float) -> str:
     return f"{value:g}"
 
 
-def _flag(checked: SpaceRule, rule: _Rule, spaces: list[_Space], posts: dict[str, CalcPost]) -> Flag:
+def _flag(checked: SpaceRule, rule: _Rule, spaces: list[_Space], posts: dict[str, CalcPost], n: int) -> Flag:
     citations = [Citation(block_id=rule.rule.block_id, quote=rule.rule.quote)]
     citations += [Citation(block_id=s.block_id, quote=s.quote) for s in spaces]
     types = ", ".join(checked.space_types)
@@ -174,7 +182,7 @@ def _flag(checked: SpaceRule, rule: _Rule, spaces: list[_Space], posts: dict[str
         basis = MoneyBasis(kind="missing_post", item=checked.item, quantity=checked.required, unit="st")
     else:
         post = posts[checked.post_id or ""]
-        claim = f"{counted} Kalkylen har {_n(checked.calc_quantity or 0)}; det fattas {_n(checked.gap)}."
+        claim = f"{counted} Kalkylen har {_n(checked.calc_quantity or 0)}; det fattas {_n(checked.gap or 0)}."
         basis = MoneyBasis(
             kind="quantity_gap", post_ref=post.id, item=checked.item, quantity=checked.gap, unit=post.unit or "st"
         )
@@ -184,6 +192,7 @@ def _flag(checked: SpaceRule, rule: _Rule, spaces: list[_Space], posts: dict[str
         claim=claim,
         citations=citations,
         money_basis=basis,
+        check_key=f"{CHECK_ID}:{n}:{normalise(checked.item).casefold()}",  # each rule priced on its own
     )
 
 
@@ -195,7 +204,8 @@ def check_space_rules(
     system: list[dict[str, Any]],
     toolbox: Toolbox,
 ) -> tuple[list[SpaceRule], list[Flag], CheckRun]:
-    """Every rule found with its count and calc comparison, a flag per rule that falls short, and the check's loop."""
+    """Every rule found with its count and calc comparison, a flag per rule that falls short (none for a rule whose
+    post has no quantity), and the check's loop."""
     posts = {p.id: p for p in calc}
     handler = _Rules(corpus, posts)
     run = CheckRun(CHECK_ID)
@@ -213,9 +223,9 @@ def check_space_rules(
     )
     checked: list[SpaceRule] = []
     flags: list[Flag] = []
-    for rule, spaces in handler.rules:
+    for n, (rule, spaces) in enumerate(handler.rules, 1):
         one = _checked(corpus, rule, spaces, posts)
         checked.append(one)
-        if one.status != "ok":
-            flags.append(_flag(one, rule, spaces, posts))
+        if one.status in ("gap", "no_post"):
+            flags.append(_flag(one, rule, spaces, posts, n))
     return checked, flags, run

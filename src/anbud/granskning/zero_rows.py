@@ -2,7 +2,7 @@
 
 - Code picks the rows: a typed post with quantity 0 or amount 0, an untyped row whose values are all 0 or that has a 0
   under a quantity or amount label, or text that says the work isn't included (ingår ej, ej ingående, exkl. and
-  similar).
+  similar; "exkl. moms" is a price note, not an exclusion).
 - A cheap check role (Sonnet) gets them in batches and searches the documents. Per row it answers explained (the
   documents put the work outside this contract), contradicted (the documents say it IS included) or not found, with a
   block id and a quote that code verifies. A quote that fails after the repair turn counts as not found.
@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from anbud.granskning.calc import as_number, header_role
 from anbud.granskning.check_loop import (
+    STOP_NAMES,
     Answer,
     CheckRun,
     Cite,
@@ -45,7 +46,7 @@ NOT_FOUND = "ingen hänvisning hittad i handlingarna"
 _EXCLUDED = re.compile(
     r"\b(?:ingår|ingående|medräknad|medräknat|medräknas)\s+(?:ej|inte)\b"
     r"|\b(?:ej|inte|icke)\s+(?:ingående|medräknad|medräknat|inräknad|inräknat|i\s+anbudet)\b"
-    r"|\bexkl(?:\.|usive\b|\b)|\butanför\s+(?:entreprenaden|anbudet)\b",
+    r"|\bexkl(?:usive)?\b(?!\.?\s*(?:moms|mervärdesskatt|vat)\b)|\butanför\s+(?:entreprenaden|anbudet)\b",
     re.IGNORECASE,
 )
 
@@ -184,6 +185,7 @@ def _flag(row: ZeroRow) -> Flag:
         claim=f"Kalkylraden «{row.text}» är noll eller tas inte med, men handlingarna anger att arbetet ingår.{note}",
         citations=[Citation(block_id=row.block_id or "", quote=row.quote or "")],
         money_basis=MoneyBasis(kind="missing_post", post_ref=row.post_id, item=row.text),
+        check_key=f"{CHECK_ID}:{row.post_id}",
     )
 
 
@@ -219,7 +221,7 @@ def check_zero_rows(
         )
         run.outcomes.append(outcome)
         found.update(handler.entries)
-        if outcome.error in ("RunStopped", "BudgetExceeded", "spend_cap", "ReplayMiss"):
+        if outcome.error in STOP_NAMES:
             break
     out = []
     for row in rows:

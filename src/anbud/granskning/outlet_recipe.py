@@ -5,14 +5,16 @@ compare the calc's recipe per room type with the customer's own recipe.
   this check also looks for it). The standard is only ever named by the code and clause that block itself writes.
   No standard's text or table is in the repo or in any prompt.
 - Recipe: a cheap check role (Sonnet) maps calc posts to room types and item kinds and reads the number of rooms of
-  each type (apartments per type times rooms per apartment) from the documents, with quotes code verifies. Code
-  computes every count from the posts.
+  each type (apartments per apartment type times rooms per apartment) from the documents, with quotes code verifies:
+  the number of apartments must be in the quote, and the rooms per apartment in it or in a second cited block. A room
+  type whose rooms per apartment no quote shows keeps its rows, unpriced. Code computes every count from the posts.
 - Reference: the customer's own recipe, `<data>/<company>/references/outlet-recipe.toml`, with a required `source`
   ("entered by customer" or "extracted from customer calc <tender id>"). Only code reads its values; only its room
   type and item kind names go into the prompt, as the words to map onto.
 - Pricing: the shortfall per room type times the rooms of that type is a quantity gap per item kind, priced by
-  kronor. Without a customer recipe the check gives one unpriced flag citing the trigger, with the calc's recipe in
-  the claim, so the estimator can compare by hand.
+  kronor. A recipe cell no calc post maps to is "ej kopplad": unknown, never priced as if the calc had 0. Without a
+  customer recipe the check gives one unpriced flag citing the trigger, with the calc's recipe in the claim, so the
+  estimator can compare by hand.
 - `extract_recipe` turns a run's calc recipe into a customer recipe; only `anbud recipe-extract` writes it.
 """
 
@@ -106,10 +108,16 @@ def parse_recipe(text: str) -> Recipe:
 
 
 def load_recipe(company_id: str, root: Path | None = None) -> Recipe | None:
+    """The customer's recipe, None if there is none. A file that can't be read or decoded raises RecipeError, like
+    one that isn't a valid recipe."""
     path = recipe_path(company_id, root)
-    if not path.exists():
-        return None
-    return parse_recipe(path.read_text(encoding="utf-8"))
+    try:
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RecipeError(f"the recipe file can't be read as UTF-8 text ({type(exc).__name__})") from exc
+    return parse_recipe(text)
 
 
 def _toml_key(text: str) -> str:
@@ -139,11 +147,24 @@ class _Trigger(Answer):
 
 class _RoomCount(Answer):
     room_type: str
-    apartment_type: str = ""
+    apartment_type: str = ""  # required by the handler (a repair turn), so one gap doesn't void the whole answer
     apartments: float = Field(gt=0)
     per_apartment: float = Field(gt=0)
     block_id: str
     quote: str
+    per_apartment_block_id: str | None = None
+    per_apartment_quote: str | None = None
+
+    def ident(self) -> tuple[str, str]:
+        return key(self.room_type), key(self.apartment_type)
+
+
+@dataclass(frozen=True)
+class _Rooms:
+    """A verified room count; `per_apartment_shown` is False when no quote shows the rooms per apartment."""
+
+    count: _RoomCount
+    per_apartment_shown: bool
 
 
 class _Mapping(Answer):
@@ -166,6 +187,7 @@ class RecipeRow(BaseModel):
     item_kind: str
     calc_count: float | None = Field(default=None, description="Per room, from the calc posts; None if unknown")
     posts: list[str] = Field(default_factory=list)
+    unmapped: bool = Field(default=False, description="A recipe cell no calc post maps to: unknown, unpriced")
     recipe_count: float | None = None
     rooms: float | None = None
     gap_per_room: float | None = None
@@ -177,7 +199,7 @@ class RecipeSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    status: Literal["no_trigger", "no_recipe", "compared", "failed"]
+    status: Literal["no_trigger", "trigger_unverified", "no_recipe", "compared", "failed"]
     trigger_block_id: str | None = None
     trigger_quote: str | None = None
     trigger_where: str = ""
@@ -185,6 +207,9 @@ class RecipeSection(BaseModel):
     recipe_source: str | None = None
     rooms: dict[str, float] = Field(default_factory=dict, description="Rooms per room type, from the documents")
     room_citations: dict[str, list[Citation]] = Field(default_factory=dict)
+    rooms_unverified: list[str] = Field(
+        default_factory=list, description="Room types whose rooms per apartment no quote shows: their rows are unpriced"
+    )
     rows: list[RecipeRow] = Field(default_factory=list)
 
 
@@ -197,18 +222,66 @@ def _number_in(value: float, quote: str) -> bool:
     return re.search(rf"(?<![\d,.]){re.escape(shown)}(?![\d])", normalise(quote)) is not None
 
 
+_WORDS = {1: ("en", "ett"), 2: ("två",), 3: ("tre",), 4: ("fyra",), 5: ("fem",), 6: ("sex",), 7: ("sju",)}
+
+
+def _count_in(value: float, quote: str) -> bool:
+    """The count is in the quote, as digits or (one to seven) as a Swedish number word."""
+    if _number_in(value, quote):
+        return True
+    words = _WORDS.get(int(value), ()) if value == int(value) else ()
+    text = normalise(quote).casefold()
+    return any(re.search(rf"\b{w}\b", text) for w in words)
+
+
 class _Answer:
     def __init__(self, corpus: Corpus, posts: dict[str, CalcPost]) -> None:
         self.corpus = corpus
         self.posts = posts
         self.trigger: _Trigger | None = None
-        self.rooms: list[_RoomCount] = []
+        self.trigger_failed = False  # a trigger was given but its quote didn't verify, even after the repair
+        self.rooms: list[_Rooms] = []
         self.mapping: list[_Mapping] = []
         self.answered = False
 
+    def _per_apartment_shown(self, room: _RoomCount) -> bool:
+        if _count_in(room.per_apartment, room.quote):
+            return True
+        if not room.per_apartment_block_id:
+            return False
+        cite = Cite(block_id=room.per_apartment_block_id, quote=room.per_apartment_quote or "")
+        return cite_problem(self.corpus, cite, "") is None and _count_in(room.per_apartment, cite.quote)
+
+    def _rooms(self, answer: _RecipeAnswer, problems: list[str]) -> list[_Rooms]:
+        rooms: list[_Rooms] = []
+        seen: dict[tuple[str, str], _RoomCount] = {}
+        for n, room in enumerate(answer.rooms, 1):
+            problem = cite_problem(self.corpus, Cite(block_id=room.block_id, quote=room.quote), f"rooms {n}")
+            if problem is None and not _number_in(room.apartments, room.quote):
+                problem = f"rooms {n}: the quote doesn't contain the number of apartments"
+            if problem is None and not room.apartment_type.strip():
+                problem = f"rooms {n}: give the apartment type, as the documents name it"
+            if problem is not None:
+                problems.append(problem)
+                continue
+            first = seen.get(room.ident())
+            if first is not None:
+                if (first.apartments, first.per_apartment) != (room.apartments, room.per_apartment):
+                    problems.append(f"rooms {n}: the same room type and apartment type twice, with other numbers")
+                continue  # an exact repeat, or a conflict: the first stands
+            seen[room.ident()] = room
+            shown = self._per_apartment_shown(room)
+            if not shown:
+                problems.append(
+                    f"rooms {n}: the rooms per apartment aren't in the quote; cite the block that states them in "
+                    "per_apartment_block_id and per_apartment_quote"
+                )
+            rooms.append(_Rooms(room, shown))
+        return rooms
+
     def __call__(self, text: str, log: list[ToolCall], final: bool) -> SubmitOutcome:
         answer, problems = parse_answer(text, _RecipeAnswer)
-        trigger, rooms, mapping = None, [], []
+        trigger, rooms, mapping, trigger_failed = None, [], [], False
         if answer is not None:
             if answer.trigger is not None:
                 t = answer.trigger
@@ -224,14 +297,8 @@ class _Answer:
                     trigger = t
                 else:
                     problems.append(problem)
-            for n, room in enumerate(answer.rooms, 1):
-                problem = cite_problem(self.corpus, Cite(block_id=room.block_id, quote=room.quote), f"rooms {n}")
-                if problem is None and not _number_in(room.apartments, room.quote):
-                    problem = f"rooms {n}: the quote doesn't contain the number of apartments"
-                if problem is not None:
-                    problems.append(problem)
-                    continue
-                rooms.append(room)
+                    trigger_failed = True
+            rooms = self._rooms(answer, problems)
             for n, item in enumerate(answer.mapping, 1):
                 if item.post_id not in self.posts:
                     problems.append(f"mapping {n}: post {item.post_id} is not in the calc")
@@ -240,6 +307,7 @@ class _Answer:
         if problems and not final:
             return SubmitOutcome(False, repair_text(problems))
         self.trigger, self.rooms, self.mapping, self.answered = trigger, rooms, mapping, answer is not None
+        self.trigger_failed = trigger_failed
         return SubmitOutcome(True, "Received.")
 
 
@@ -268,9 +336,10 @@ Check the outlet recipe per room type.
 many outlets or points each room type gets. Candidate blocks: {", ".join(hints[:30])}. Give its block id, an exact \
 quote, and the standard's code and the clause exactly as that block writes them (null if it gives none). If no \
 passage calls up such a reference, set "trigger" to null.
-2. Rooms: from the documents' apartment and room data, give per room type and apartment type the number of apartments \
-and how many rooms of that type each apartment has, each with a block id and an exact quote that contains the number \
-of apartments.
+2. Rooms: from the documents' apartment and room data, give per room type and apartment type (as the documents name \
+it; required) the number of apartments and how many rooms of that type each apartment has, each with a block id and \
+an exact quote that contains the number of apartments. The rooms per apartment must be in that quote too, or in a \
+second block you cite in per_apartment_block_id and per_apartment_quote; otherwise leave those null.
 3. Mapping: map every calc post that prices outlets, points, switches, data or TV in apartments to a room type and an \
 item kind, and say whether the post's quantity is per room ("room") or the total for all rooms of that type ("total").
 
@@ -279,7 +348,8 @@ clearly has one that none of them fits. Code computes every count; you only map 
 
 Answer with one JSON object in a ```json block, and no tool call:
 {{"trigger": {{"block_id": "...", "quote": "...", "standard": "...", "clause": "..."}}, "rooms": [{{"room_type": \
-"...", "apartment_type": "...", "apartments": 1, "per_apartment": 1, "block_id": "...", "quote": "..."}}], \
+"...", "apartment_type": "...", "apartments": 1, "per_apartment": 1, "block_id": "...", "quote": "...", \
+"per_apartment_block_id": null, "per_apartment_quote": null}}], \
 "mapping": [{{"post_id": "...", "room_type": "...", "item_kind": "...", "per": "room"}}]}}
 </task>"""
 
@@ -304,18 +374,29 @@ def calc_recipe(
     return out
 
 
-def room_totals(rooms: Sequence[_RoomCount]) -> tuple[dict[str, float], dict[str, list[Citation]]]:
+def room_totals(rooms: Sequence[_Rooms]) -> tuple[dict[str, float], dict[str, list[Citation]], list[str]]:
+    """Rooms per room type, summed over apartment types; their citations; and the room types left out of the totals
+    because a quote doesn't show their rooms per apartment. An exact repeat counts once."""
     totals: dict[str, float] = {}
     cites: dict[str, list[Citation]] = {}
-    seen: set[tuple[str, str]] = set()
-    for room in rooms:
-        ident = (key(room.room_type), key(room.apartment_type))
+    unverified: set[str] = set()
+    seen: set[tuple[str, str, float, float]] = set()
+    for one in rooms:
+        room = one.count
+        ident = (*room.ident(), room.apartments, room.per_apartment)
         if ident in seen:
             continue
         seen.add(ident)
-        totals[ident[0]] = totals.get(ident[0], 0.0) + room.apartments * room.per_apartment
-        cites.setdefault(ident[0], []).append(Citation(block_id=room.block_id, quote=room.quote))
-    return totals, cites
+        room_type = ident[0]
+        if not one.per_apartment_shown:
+            unverified.add(room_type)
+        totals[room_type] = totals.get(room_type, 0.0) + room.apartments * room.per_apartment
+        cites.setdefault(room_type, []).append(Citation(block_id=room.block_id, quote=room.quote))
+        if one.per_apartment_shown and room.per_apartment_block_id:
+            second = Citation(block_id=room.per_apartment_block_id, quote=room.per_apartment_quote or "")
+            if second not in cites[room_type]:
+                cites[room_type].append(second)
+    return {r: n for r, n in totals.items() if r not in unverified}, cites, sorted(unverified)
 
 
 def compare(
@@ -324,7 +405,8 @@ def compare(
     wanted = {(r, k): v for r, kinds in (recipe.rooms if recipe else {}).items() for k, v in kinds.items()}
     rows = []
     for cell in sorted(set(cells) | set(wanted)):
-        count, ids = cells.get(cell, (0.0, []))
+        unmapped = cell not in cells
+        count, ids = cells.get(cell, (None, []))  # no post maps to it: unknown, not 0
         target = wanted.get(cell)
         n = rooms.get(cell[0])
         gap = max(0.0, target - count) if target is not None and count is not None else None
@@ -338,6 +420,7 @@ def compare(
                 rooms=n,
                 gap_per_room=gap,
                 gap_quantity=gap * n if gap is not None and n else None,
+                unmapped=unmapped,
             )
         )
     return rows
@@ -372,7 +455,8 @@ def recipe_flags(section: RecipeSection, posts: dict[str, CalcPost]) -> list[Fla
             f"jämför kalkylens recept per rum för hand: {_recipe_text(section.rows)}."
         )
         basis = MoneyBasis(kind="quantity_gap", item="uttag per rumstyp")  # no quantity: unpriced, a check
-        return [Flag(lens_id=CHECK_ID, claim_type=CLAIM_TYPE, claim=claim, citations=[trigger], money_basis=basis)]
+        flag = Flag(lens_id=CHECK_ID, claim_type=CLAIM_TYPE, claim=claim, citations=[trigger], money_basis=basis)
+        return [flag.model_copy(update={"check_key": f"{CHECK_ID}:no_recipe"})]
     flags = []
     by_kind: dict[str, list[RecipeRow]] = {}
     for row in section.rows:
@@ -380,7 +464,9 @@ def recipe_flags(section: RecipeSection, posts: dict[str, CalcPost]) -> list[Fla
             by_kind.setdefault(row.item_kind, []).append(row)
     for kind, rows in sorted(by_kind.items()):
         parts = [
-            f"{r.room_type}: kundens recept anger {_n(r.recipe_count)}, kalkylen har {_n(r.calc_count)}" for r in rows
+            f"{r.room_type}: kundens recept anger {_n(r.recipe_count)}, kalkylen har {_n(r.calc_count)}"
+            + ("" if r.gap_quantity is not None else " (antal rum inte styrkt, ej prissatt)")
+            for r in rows
         ]
         claim = f"{kind} – " + "; ".join(parts) + f" (FU hänvisar till {ref})."
         priced = [r.gap_quantity for r in rows if r.gap_quantity is not None]
@@ -396,7 +482,16 @@ def recipe_flags(section: RecipeSection, posts: dict[str, CalcPost]) -> list[Fla
             basis = MoneyBasis(kind="quantity_gap", post_ref=priced_post, item=kind, quantity=quantity, unit="st")
         else:
             basis = MoneyBasis(kind="missing_post", item=kind, quantity=quantity, unit="st")
-        flags.append(Flag(lens_id=CHECK_ID, claim_type=CLAIM_TYPE, claim=claim, citations=citations, money_basis=basis))
+        flags.append(
+            Flag(
+                lens_id=CHECK_ID,
+                claim_type=CLAIM_TYPE,
+                claim=claim,
+                citations=citations,
+                money_basis=basis,
+                check_key=f"{CHECK_ID}:{kind}",  # each item kind priced on its own, even on the same citations
+            )
+        )
     return flags
 
 
@@ -433,10 +528,21 @@ def check_outlet_recipe(
     )
     if not handler.answered:
         return RecipeSection(status="failed"), [], run
-    if handler.trigger is None:
-        return RecipeSection(status="no_trigger"), [], run
-    totals, room_cites = room_totals(handler.rooms)
+    totals, room_cites, unverified = room_totals(handler.rooms)
     cells = calc_recipe(handler.mapping, posts, totals)
+    if handler.trigger is None:
+        if not handler.trigger_failed:
+            return RecipeSection(status="no_trigger"), [], run
+        # A reference was found but its quote never verified: say so, show the calc's recipe, flag nothing.
+        unproven = RecipeSection(
+            status="trigger_unverified",
+            recipe_source=recipe.source if recipe else None,
+            rooms=totals,
+            room_citations=room_cites,
+            rooms_unverified=unverified,
+            rows=compare(cells, totals, recipe),
+        )
+        return unproven, [], run
     t = handler.trigger
     section = RecipeSection(
         status="compared" if recipe else "no_recipe",
@@ -447,6 +553,7 @@ def check_outlet_recipe(
         recipe_source=recipe.source if recipe else None,
         rooms=totals,
         room_citations=room_cites,
+        rooms_unverified=unverified,
         rows=compare(cells, totals, recipe),
     )
     return section, recipe_flags(section, posts), run
