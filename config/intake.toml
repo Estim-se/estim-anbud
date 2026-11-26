@@ -1,0 +1,6 @@
+# Blind intake of public tenders.
+
+[contamination]
+# A tender published before this date could be in the models' training data. It is the day after the newest
+# knowledge cutoff among the models in providers.toml (Opus 5.5: June 2026). Update it with any model change.
+training_cutoff = "2026-07-01"

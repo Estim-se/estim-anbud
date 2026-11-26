@@ -10,9 +10,24 @@ COMPANY_ID = re.compile(r"^co-\d{3}$")
 TENDER_ID = re.compile(r"^t-\d{4}$")
 
 
+class RealDataInTest(RuntimeError):
+    """A test reached for the real data folder."""
+
+
 def data_root() -> Path:
     override = os.environ.get("ANBUD_DATA_ROOT")
-    return Path(override).expanduser() if override else Path.home() / "estim-anbud-data"
+    root = Path(override).expanduser() if override else Path.home() / "estim-anbud-data"
+    if os.environ.get("PYTEST_CURRENT_TEST") and _is_real_root(root):
+        raise RealDataInTest("a test may never use the real data folder; set ANBUD_DATA_ROOT to a temp folder")
+    return root
+
+
+def _is_real_root(root: Path) -> bool:
+    real = Path.home() / "estim-anbud-data"
+    try:
+        return root.resolve() == real.resolve() or real.resolve() in root.resolve().parents
+    except OSError:
+        return True  # can't tell: refuse
 
 
 def repo_root() -> Path:
@@ -54,6 +69,14 @@ def fixture_data_dir(company_id: str, fixture: Path, root: Path | None = None) -
 
 def ledger_path(company_id: str, root: Path | None = None) -> Path:
     return company_dir(company_id, root) / "split" / "ledger.jsonl"
+
+
+def predictions_dir(company_id: str, root: Path | None = None) -> Path:
+    return (root or data_root()) / "predictions" / check_company_id(company_id)
+
+
+def answers_dir(company_id: str, tender_id: str, root: Path | None = None) -> Path:
+    return (root or data_root()) / "answers" / check_company_id(company_id) / check_tender_id(tender_id)
 
 
 def sealed_roots(root: Path | None = None) -> tuple[Path, Path]:

@@ -30,6 +30,7 @@ from anbud.granskning.corpus import Corpus
 from anbud.granskning.pipeline import add_cards
 from anbud.kalkyl.catalog import CatalogError, load, prompt_lines
 from anbud.kalkyl.extract import BRIEF, chunk_message, outline_text
+from anbud.kalkyl.frozen import freeze_tree, is_frozen
 from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.pipeline import KalkylResult, run_kalkyl
 from anbud.kalkyl.price import calc_posts
@@ -193,7 +194,11 @@ def run_dev_tender(
 
     `base_run` rebuilds from a stored run: a new run with that run's salt, so every request identical to one the base
     run made (its extraction, unless the prompt or the chunks changed) is answered from the step cache at $0, and a
-    changed request is sent (or, in a replay, counted as a miss). Nothing is written to the base run."""
+    changed request is sent (or, in a replay, counted as a miss). Nothing is written to the base run.
+
+    A run that finished (every chunk read, no replay miss, no failed store write, no unread tile) is frozen at the end:
+    its outputs folder and run record become read-only. A frozen run is never resumed or replayed in place; a rebuild
+    from it gets its own run id. An unfinished run stays writable, so the same run id resumes it."""
     config = config or load_config()
     kalkyl = kalkyl or load_kalkyl_config()
     tender = paths.dev_tender_dir(company_id, tender_id, root)
@@ -204,6 +209,10 @@ def run_dev_tender(
     run_id = run_id or new_run_id(tender_id)
     if base_run is not None and run_id == base_run:
         raise KalkylError("a rebuild needs its own run id")
+    out = tender / "kalkyl" / run_id
+    if is_frozen(out) or is_frozen(store.run_dir(run_id)):
+        hint = "start a new --run-id (--base-run reuses its extraction)" if sdk else "replay it with --base-run"
+        raise KalkylError(f"run {run_id} is finished and frozen; {hint}")
     salt = base_salt(store, base_run) if base_run is not None else None
     budget = Budget(kalkyl.hard_stop)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
@@ -217,7 +226,6 @@ def run_dev_tender(
     meta = {"company_id": company_id, "tender_id": tender_id, "run_id": run_id, "cost_usd": budget.spent}
     workbook, rows = write_workbook(result, corpus, catalog, meta)
     result.calc_posts = calc_posts(result.posts, rows)
-    out = tender / "kalkyl" / run_id
     store.write_file(out / "kalkyl.xlsx", workbook)
     store.write_file(out / "posts.json", canonical([p.model_dump(mode="json") for p in result.calc_posts]))
     store.write_file(out / "result.json", result_json(result))
@@ -239,7 +247,11 @@ def run_dev_tender(
         "replay_misses": client.replay_misses,
         "output": str(out),
     }
+    finished = result.complete and not client.replay_misses and not client.persist_failures and not cards.failed
+    summary["frozen"] = finished
     store.write_file(out / "summary.json", json.dumps(summary, indent=2, sort_keys=True).encode())
+    if finished:  # returned, not written: summary.json is read-only from here
+        summary["freeze_failures"] = len(freeze_tree(out) + freeze_tree(store.run_dir(run_id)))
     return summary
 
 

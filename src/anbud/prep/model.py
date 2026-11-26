@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from anbud.models import Block
 
-DocKind = Literal["pdf", "xlsx", "docx", "text", "image", "dwg", "ifc", "legacy_office", "archive", "other"]
+DocKind = Literal["pdf", "xlsx", "docx", "text", "html", "image", "dwg", "ifc", "legacy_office", "archive", "other"]
 PageKind = Literal["text", "mixed", "scan", "drawing", "blank"]
 MaskKind = Literal["personnummer", "email", "iban", "phone", "name"]
 MarkingKind = Literal["hemlig", "sakerhetsskydd"]
@@ -114,4 +114,5 @@ class DocPrep(_Model):
     masked: list[MaskedSpan] = []
     markings: list[Marking] = []
     furniture_dropped: int = 0
+    withheld: int = 0  # answer-key sections of a web page left out (anbud.answer_terms)
     cells: list[RowCells] = []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from anbud.runguard import RunRefused, check_run_allowed, held_out_refusal
 
@@ -71,6 +72,67 @@ def _prep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _intake(args: argparse.Namespace) -> int:
+    from anbud.evals.split_heldout import SplitError
+    from anbud.intake import IntakeError, intake, survey, training_cutoff
+
+    try:
+        if args.dry_run:
+            result, _ = survey(args.incoming.expanduser())
+            print(f"anbud intake (dry run, nothing written or split): {result.notices.tenders} zips")
+            for line in intake_report(result, training_cutoff())[2:]:
+                print(line)
+            return 0
+        result = intake(
+            args.company_id, args.incoming.expanduser(), new_ledger=args.new_ledger, company_name=args.company_name
+        )
+    except Exception as exc:  # noqa: BLE001 - a traceback or message could name a file: only ours are printed
+        message = str(exc) if isinstance(exc, IntakeError | SplitError) else type(exc).__name__
+        print(f"anbud intake: stopped: {message}", file=sys.stderr)
+        return REFUSED
+    for line in intake_report(result, training_cutoff() if result.notices.tenders else None):
+        print(line)
+    if result.failed:
+        print(f"anbud intake: {len(result.failed)} not placed: {'; '.join(result.failed)}", file=sys.stderr)
+        print(
+            "anbud intake: each one is back in the incoming folder, or the next intake puts it back; run intake again",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def intake_report(result: Any, cutoff: Any = None) -> list[str]:
+    """Counts only. The notice lines appear for a blind intake of zips."""
+    u, n = result.unpack, result.notices
+    lines = [
+        f"anbud intake: {result.dev} dev, {result.heldout} held-out, {result.prospective} prospective, "
+        f"{result.burned} burned, {result.already_in} already taken in",
+        f"  zips: {u.archives_unpacked} unpacked, {u.archives_kept} kept as delivered; {u.entries} entries, "
+        f"{u.entries_skipped} skipped (links, escaping paths, hidden or system files)",
+    ]
+    if result.rows_without_folder:
+        lines.append(f"  metadata.csv: {result.rows_without_folder} rows name no folder here and no registered tender")
+    if n.tenders:
+        found = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in n.found.items())
+        lines += [
+            f"  notices: {n.tenders} read, {n.without_page} without a notice page; found {found}",
+            f"  split keys: {n.no_entity_key} without a buyer key, {n.no_key} without any key (split alone)",
+            f"  training cutoff {cutoff}: {n.before_cutoff} published before, {n.after_cutoff} after, "
+            f"{n.unknown_date} unknown; {n.framework} framework agreements",
+            f"  prospective by deadline: {n.open} still open, {n.no_deadline} with no deadline read, "
+            f"{n.may_have_moved} passed lately with amendments or answers that may have moved it; "
+            f"{n.deadline_from_pdf} deadlines read from PDFs",
+        ]
+        held = ", ".join(f"{k} {v}" for k, v in sorted(result.held.items())) or "none"
+        lines.append(
+            f"  held as answer keys: {sum(result.held.values())} files in {result.tenders_with_held} tenders ({held})"
+        )
+        if result.tenders_mostly_held:
+            lines.append(f"  {result.tenders_mostly_held} dev tenders had more than half their files held")
+    return lines
+
+
 def _kalkyl(args: argparse.Namespace) -> int:
     """Kalkyl in shadow on a dev tender. Paid unless --dry-run or --replay; never in CI."""
     import os
@@ -129,6 +191,9 @@ def _kalkyl(args: argparse.Namespace) -> int:
         misses = summary["replay_misses"]
         print(f"anbud kalkyl: replay incomplete: {misses} calls not in the step cache", file=sys.stderr)
         return REPLAY_INCOMPLETE
+    if summary.get("freeze_failures"):
+        print(f"anbud kalkyl: {summary['freeze_failures']} entries could not be made read-only", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -242,6 +307,68 @@ def _export_recording(args: argparse.Namespace) -> int:
         return REFUSED
     for key, value in summary.items():
         print(f"{key}: {value}")
+
+
+def _freeze(args: argparse.Namespace) -> int:
+    from anbud import paths
+    from anbud.evals import freeze
+
+    try:
+        if args.action == "verify":
+            summary = freeze.verify(freeze.ledger_file(args.company_id))
+            kinds = ", ".join(f"{kind} {n}" for kind, n in summary.kinds.items()) or "none"
+            last = summary.last_sha256[:12] if summary.last_sha256 else "none"
+            print(f"ledger: {summary.lines} lines, last {last}; {len(summary.tenders)} tenders frozen; kinds: {kinds}")
+            return 0
+        if args.action == "import":
+            n = freeze.import_manual(args.company_id, args.file.expanduser())
+            print(f"imported: {n} lines" if n else "imported: 0 lines (already at the start of the ledger)")
+            return 0
+        tender = args.tender
+        if args.outputs is not None:
+            outputs = args.outputs.expanduser()
+        elif tender is not None:
+            outputs = paths.dev_tender_dir(args.company_id, tender) / "runs" / args.run_id
+        else:
+            outputs, tender = freeze.find_run_outputs(args.company_id, args.run_id)
+        record = freeze.freeze_run(
+            args.company_id,
+            args.run_id,
+            outputs_dir=outputs,
+            run_record_dir=freeze.run_record_dir(args.company_id, args.run_id),
+            tender_id=tender,
+        )
+    except freeze.FreezeError as exc:
+        print(f"anbud freeze {args.action}: refused: {exc}", file=sys.stderr)
+        return REFUSED
+    except Exception as exc:  # the message may hold a path, so only the type is shown
+        print(f"anbud freeze {args.action}: refused: {type(exc).__name__}", file=sys.stderr)
+        return REFUSED
+    print(f"frozen: ledger line {record['line_number']}, {record['line_sha256'][:12]}")
+    if (warning := freeze.read_only_warning(record)) is not None:
+        print(f"anbud freeze run: {warning}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _answers(args: argparse.Namespace) -> int:
+    from anbud.evals import answers
+
+    try:
+        if args.action == "add":
+            result = answers.add(args.company_id, args.tender_id, args.files, args.kind)
+            short = ", ".join(sha[:12] for sha in result.sha256)
+            print(f"answers: {result.added} added, {result.skipped} already stored ({args.kind}): {short}")
+            return 0
+        state = answers.status(args.company_id, args.tender_id)
+    except answers.AnswerError as exc:
+        print(f"anbud answers {args.action}: refused: {exc}", file=sys.stderr)
+        return REFUSED
+    except Exception as exc:  # the message may hold a path, so only the type is shown
+        print(f"anbud answers {args.action}: refused: {type(exc).__name__}", file=sys.stderr)
+        return REFUSED
+    kinds = ", ".join(f"{kind} {n}" for kind, n in state.kinds.items()) or "none"
+    print(f"answers: {state.split}, {'frozen' if state.frozen else 'not frozen'}; {state.total} files; kinds: {kinds}")
     return 0
 
 
@@ -306,7 +433,10 @@ def main(argv: list[str] | None = None) -> int:
     kalkyl.add_argument("company_id")
     kalkyl.add_argument("tender_id")
     kalkyl.add_argument("--catalog", help="catalog name in ~/estim-anbud-data/catalogs/ (default: config/kalkyl.toml)")
-    kalkyl.add_argument("--run-id", help="resume or replay this run (same salt, so finished calls cost $0)")
+    kalkyl.add_argument(
+        "--run-id",
+        help="resume or replay an unfinished run (same salt, so finished calls cost $0); a finished run is frozen",
+    )
     kalkyl.add_argument("--dry-run", action="store_true", help="chunk counts and a cost estimate, no model call ($0)")
     kalkyl.add_argument("--replay", action="store_true", help="answer every call from the run's step cache ($0)")
     kalkyl.add_argument(
@@ -319,6 +449,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("recipe-extract", help="write the customer's outlet recipe from a run's calc recipe (explicit only)")
     sub.add_parser("split-status", help="counts per status, and the dev tender ids")
     sub.add_parser("schema-check", help="the shared tool list against strict-mode limits; --compile proves it (paid)")
+    intake = sub.add_parser("intake", help="split new tenders from an incoming folder, then move them unopened")
+    intake.add_argument("company_id")
+    intake.add_argument("incoming", type=Path, help="~/estim-anbud-data/incoming/<company>/ with metadata.csv")
+    intake.add_argument("--new-ledger", action="store_true", help="the company's first intake")
+    intake.add_argument("--company-name", help="the company's name in the local registry, on its first intake")
+    intake.add_argument(
+        "--dry-run", action="store_true", help="zips only: what the notices give, counted; nothing written or split"
+    )
     sub.add_parser("plant", help="a planted variant of a dev tender: plants, both control arms and the answer key")
     sub.add_parser("plant-score", help="score runs on a planted variant's arms against its answer key")
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
@@ -347,7 +485,34 @@ def main(argv: list[str] | None = None) -> int:
     record.add_argument("--fixture", type=Path, required=True, help="a fixture directory under fixtures/synthetic/")
     record.add_argument("--run-id", required=True)
 
+    fr = sub.add_parser("freeze", help="the freeze ledger: hash a run before any answer for its tender arrives")
+    fr_sub = fr.add_subparsers(dest="action", required=True)
+    fr_run = fr_sub.add_parser("run", help="freeze a finished run")
+    fr_run.add_argument("company_id")
+    fr_run.add_argument("run_id")
+    fr_run.add_argument("--tender", help="the run's tender (default: the one dev tender with this run id)")
+    fr_run.add_argument("--outputs", type=Path, help="the run's outputs folder, inside the company folder")
+    fr_verify = fr_sub.add_parser("verify", help="check the ledger's chain; counts only")
+    fr_verify.add_argument("company_id")
+    fr_import = fr_sub.add_parser("import", help="start the ledger with hand-made, chained freeze records")
+    fr_import.add_argument("company_id")
+    fr_import.add_argument("file", type=Path)
+    an = sub.add_parser("answers", help="the answer store: only for tenders with a frozen prediction")
+    an_sub = an.add_subparsers(dest="action", required=True)
+    an_add = an_sub.add_parser("add", help="store answer files by hash")
+    an_add.add_argument("company_id")
+    an_add.add_argument("tender_id")
+    an_add.add_argument("files", nargs="+", type=Path)
+    an_add.add_argument("--kind", required=True, choices=["award", "protocol", "qa", "amendment", "feedback", "other"])
+    an_status = an_sub.add_parser("status", help="answer counts by kind, and whether the tender is frozen")
+    an_status.add_argument("company_id")
+    an_status.add_argument("tender_id")
+
     args = parser.parse_args(argv)
+    if args.command == "freeze":
+        return _freeze(args)
+    if args.command == "answers":
+        return _answers(args)
     if args.command == "run":
         return _run(args)
     if args.command == "eval":
@@ -364,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
         return _regress(args)
     if args.command == "export-recording":
         return _export_recording(args)
+    if args.command == "intake":
+        return _intake(args)
     if args.command == "kalkyl":
         return _kalkyl(args)
     return _not_built(args.command)

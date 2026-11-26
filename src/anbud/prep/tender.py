@@ -38,9 +38,10 @@ from defusedxml import DefusedXmlException
 from openpyxl.utils.exceptions import InvalidFileException
 from PIL import Image, ImageSequence, UnidentifiedImageError
 
-from anbud import models, paths
+from anbud import answer_terms, models, paths
 from anbud.prep.build import DocBuilder, Piece
 from anbud.prep.docx import read_docx
+from anbud.prep.html import read_html
 from anbud.prep.model import DocPrep, Marking, PageInfo, Tile
 from anbud.prep.pdf import read_pdf, tile_grid
 from anbud.prep.sheets import read_xlsx
@@ -75,7 +76,8 @@ def code_version() -> str:
     digest = hashlib.sha256(PREP_VERSION.encode())
     for path in sorted(Path(__file__).parent.glob("*.py")):
         digest.update(path.name.encode() + b"\0" + path.read_bytes())
-    digest.update(Path(models.__file__).read_bytes())
+    for module in (models, answer_terms):  # answer_terms decides what a web page withholds
+        digest.update(Path(module.__file__).read_bytes())
     for lib in _LIBRARIES:
         digest.update(f"{lib}={importlib.metadata.version(lib)}".encode())
     return f"{PREP_VERSION}-{digest.hexdigest()[:12]}"
@@ -205,7 +207,7 @@ def prepare_file(src: Source, store: RunStore, version: str | None = None) -> tu
     pages: list[PageInfo] = []
     sheets = []
     tiles: list[Tile] = []
-    dropped = 0
+    dropped = withheld = 0
     skipped = None
     try:
         if src.too_large:
@@ -218,6 +220,8 @@ def prepare_file(src: Source, store: RunStore, version: str | None = None) -> tu
             read_docx(src.data, builder)
         elif src.kind == "text":
             read_text(src.data, builder)
+        elif src.kind == "html":
+            withheld = read_html(src.data, builder)
         elif src.kind == "image":
             pages, tiles = read_image(src.data, builder, staging.put)
         else:
@@ -228,7 +232,7 @@ def prepare_file(src: Source, store: RunStore, version: str | None = None) -> tu
     except _UNREADABLE:
         staging.discard()
         builder = DocBuilder(src.sha256, src.doc_id)
-        pages, sheets, tiles, dropped = [], [], [], 0
+        pages, sheets, tiles, dropped, withheld = [], [], [], 0, 0
         skipped = "unreadable, damaged or password-protected"
     result = DocPrep(
         version=version,
@@ -245,6 +249,7 @@ def prepare_file(src: Source, store: RunStore, version: str | None = None) -> tu
         masked=builder.masked,
         markings=builder.markings,
         furniture_dropped=dropped,
+        withheld=withheld,
         cells=builder.cells,
     )
     if builder.markings:
@@ -276,6 +281,7 @@ def summarise(docs: list[DocPrep], loaded: Loaded, cache_hits: int) -> dict[str,
         "tiles": sum(len(d.tiles) for d in docs),
         "masked_by_kind": dict(Counter(m.kind for d in docs for m in d.masked)),
         "furniture_dropped": sum(d.furniture_dropped for d in docs),
+        "withheld_sections": sum(d.withheld for d in docs),
         "cache_hits": cache_hits,
         "links_skipped": loaded.skipped_links,
         "hidden_files_skipped": loaded.skipped_hidden,
@@ -369,6 +375,7 @@ def _write_outputs(store: RunStore, out_dir: Path, loaded: Loaded, docs: list[Do
                 "blocks": len(doc.blocks),
                 "tiles": len(doc.tiles),
                 "masked": len(doc.masked),
+                "withheld": doc.withheld,
             }
         )
     store.write_file(out_dir / "documents.json", canonical(documents))

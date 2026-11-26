@@ -85,7 +85,9 @@ def test_kalkyl_reads_the_cards_tile_text_and_accounts_for_its_quantity_lines(se
     assert summary["tiles"] == 1 and summary["cards"] == {"read": 1} and summary["tiles_unread"] == 0
     result = json.loads((tender / "kalkyl" / "kalkyl-e" / "result.json").read_text())
     assert f"{tile.id}-2" in {u["block_id"] for u in result["uncovered"]}  # a card's quantity line is never dropped
-    replay = run_dev_tender("co-001", "t-0001", sdk=None, catalog_name="synthetic", run_id="kalkyl-e")
+    replay = run_dev_tender(
+        "co-001", "t-0001", sdk=None, catalog_name="synthetic", run_id="kalkyl-e2", base_run="kalkyl-e"
+    )  # a finished run is frozen, so its replay is a rebuild with its own run id
     assert replay["cards"] == {"stored": 1} and replay["complete"]
 
 

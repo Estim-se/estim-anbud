@@ -201,6 +201,7 @@ class ModelClient:
             budget.settle(0.0, store.run_spend(run_id))  # a resumed run keeps counting against the same hard stop
         self.persist_failures = 0  # store writes that failed; the caller should stop the run if this isn't 0
         self.replay_misses = 0  # replayed requests not in the step cache; a replay with any is incomplete
+        self.halted = 0  # calls refused by a stop marker, the hard stop or the spend cap; a run with any is incomplete
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -293,6 +294,7 @@ class ModelClient:
         self._check_prefix(role, params)
         model = params["model"]
         if self.store is not None and self.store.stop_requested(self.run_id):
+            self._halt()
             raise RunStopped(f"run {self.run_id} has a stop marker")
         key = self.store.step_key(self.salt, params, step, sample) if self.store is not None else None
         if key is not None and (hit := self._cached(step, model, key)) is not None:
@@ -306,8 +308,12 @@ class ModelClient:
         try:
             input_tokens = self.sdk.messages.count_tokens(**count_params).input_tokens
         except Exception as exc:  # noqa: BLE001 - mapped to ModelError below; any other failure is a bug and re-raised
-            raise self._mapped(exc) from exc
-        reserved = self.budget.reserve(price.max_cost(input_tokens, max_tokens))
+            raise self._failed(exc) from exc
+        try:
+            reserved = self.budget.reserve(price.max_cost(input_tokens, max_tokens))
+        except BudgetExceeded:
+            self._halt()
+            raise
         start = self.clock()
         opened = False
         request_id = None
@@ -320,7 +326,7 @@ class ModelClient:
             charged = 0.0 if self._refused_unbilled(exc, opened) else reserved
             self.budget.settle(reserved, charged)
             self._emit(step, "error", duration_ms=self._ms(start), cost_usd=charged)
-            raise self._mapped(exc) from exc
+            raise self._failed(exc) from exc
         cost = price.cost(message.usage)
         self.budget.settle(reserved, cost)
         usage = message.usage
@@ -353,6 +359,17 @@ class ModelClient:
             **blobs,
         )
         return CallResult(message, model, cost, duration, request_id)
+
+    def _failed(self, exc: Exception) -> ModelError:
+        """The mapped error; the workspace's spend cap halts the run like its own hard stop."""
+        error = self._mapped(exc)
+        if error.kind == "spend_cap":
+            self._halt()
+        return error
+
+    def _halt(self) -> None:
+        with self._lock:
+            self.halted += 1
 
     def _ms(self, start: float) -> int:
         return int((self.clock() - start) * 1000)
