@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  # Every branch push, not only main: a branch is public the moment it is pushed, with or without a PR.
+  push:
+    branches: ["**"]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install uv (version and sha256 pinned; same version as the Mac)
+        env:
+          UV_VERSION: "0.11.23"
+          UV_SHA256: e12c4cda2fe8c305510a78380a88f2c32a27e90cdcd123cefd2873388f0ebb5f
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl --proto '=https' --tlsv1.2 -fsSLo uv.tar.gz \
+            "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${UV_SHA256}  uv.tar.gz" | sha256sum -c -
+          tar -xzf uv.tar.gz
+          echo "$RUNNER_TEMP/uv-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+
+      - name: Install
+        run: uv sync --locked
+
+      # First, so a lint or test failure can't skip it. It scans the whole history every run.
+      - name: Guards (names, document files, licensed text)
+        env:
+          ANBUD_NAMES_HMAC: ${{ secrets.ANBUD_NAMES_HMAC }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: uv run python -m anbud.guards ci
+
+      - name: Lint
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+
+      - name: Test
+        run: uv run pytest

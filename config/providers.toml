@@ -1,0 +1,17 @@
+# Model ids for every role. Changing one is a model change: the PR needs `anbud eval dev` results.
+
+[anthropic]
+api_base = "https://api.anthropic.com"
+workspace = "anbud-dev"
+
+[models]
+opus = "claude-opus-5-5"
+sonnet = "claude-sonnet-5-5"
+
+[roles]
+map = "opus"
+lens = "opus"
+lens_generic_scope = "sonnet"
+merge = "sonnet"
+page_cards = "sonnet"
+verifier = "opus"

@@ -1,0 +1,9 @@
+/AGENTS.md @ibbe-futureventures
+/.github/ @ibbe-futureventures
+/.claude/ @ibbe-futureventures
+/lenses/ @ibbe-futureventures
+/evals/thresholds/ @ibbe-futureventures
+/config/providers.toml @ibbe-futureventures
+/config/prices.toml @ibbe-futureventures
+/config/budgets.toml @ibbe-futureventures
+split_heldout.py @ibbe-futureventures

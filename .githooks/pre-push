@@ -1,0 +1,3 @@
+#!/bin/sh
+# The tip tree and every file version in each pushed range, the new commit messages, and the branch names (from stdin).
+exec uv run --quiet --frozen python -m anbud.guards pre-push

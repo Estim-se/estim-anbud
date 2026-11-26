@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env*)",
+      "Read(~/estim-anbud-data/heldout/**)",
+      "Read(~/estim-anbud-data/sealed/**)",
+      "Bash(security find-generic-password:*)",
+      "Bash(security dump-keychain:*)",
+      "Bash(hdiutil attach:*)"
+    ]
+  }
+}

@@ -1,0 +1,57 @@
+"""Shared test fixtures. Every name here is invented; nothing real is used to test the guards."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+FAKE_NAMES = """\
+# invented names for tests only
+Fiktivbolaget AB
+Påhittade Fastigheter
+=Ampere
+Örjan Exempelsson
+555-123 45 67
+"""
+
+# Every surface form a test might print. Output must never contain any of them.
+FAKE_SURFACES = [
+    "Fiktivbolaget",
+    "fiktivbolaget",
+    "Påhittade",
+    "Pahittade",
+    "Fastigheter",
+    "Ampere",
+    "Örjan",
+    "Orjan",
+    "Exempelsson",
+    "555-123",
+]
+
+
+@pytest.fixture
+def names_file(tmp_path: Path) -> Path:
+    path = tmp_path / "names.txt"
+    path.write_text(FAKE_NAMES, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def local_env(names_file: Path) -> dict[str, str]:
+    """An environment like the Mac's: no CI, no hashed secret, the plain list in a temp file."""
+    return {"ANBUD_NAMES_FILE": str(names_file)}
+
+
+@pytest.fixture
+def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "data"
+    root.mkdir()
+    monkeypatch.setenv("ANBUD_DATA_ROOT", str(root))
+    return root
+
+
+def assert_no_fake_names(*texts: str) -> None:
+    for text in texts:
+        for surface in FAKE_SURFACES:
+            assert surface not in text, "a fake name leaked into output"

@@ -1,0 +1,29 @@
+# Budgets in USD. Never raise a cap or budget without the founder's approval.
+
+[run]
+hard_stop = 20.00
+target_median = 15.00
+
+[schema_check]
+hard_stop = 0.10
+
+# Lens caps scale with the shared prefix size (tokens). Re-derived from measured p90 + 20% after the first runs.
+[[lens_tiers]]
+max_prefix_tokens = 100000
+max_turns = 8
+max_usd = 1.50
+
+[[lens_tiers]]
+max_prefix_tokens = 150000
+max_turns = 10
+max_usd = 2.00
+
+[[lens_tiers]]
+max_prefix_tokens = 1000000
+max_turns = 12
+max_usd = 2.50
+
+[verifier]
+max_turns = 3
+top_n = 25
+sampled_below_cut = 3
