@@ -156,6 +156,11 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
         if call.refused is not None:
             counts["refused"] += 1
             continue
+        if call.tool == "law_lookup":  # counted as a lookup even when the harness has no law corpus yet
+            counts["law_lookup"] += 1
+            if call.error is not None and call.error != "not_available":
+                counts["failed"] += 1
+            continue
         if call.error is not None:
             counts["failed"] += 1
             continue

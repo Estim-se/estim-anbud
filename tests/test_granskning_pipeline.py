@@ -206,6 +206,8 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert "Etappvitet är 25 000 kr" in page and "Gränsdragningslista" in page
     wb = load_workbook(run_dir / "report" / "granskning.xlsx")
     assert wb["Flaggor"].max_row == 3 and wb["Generiska"].max_row == 2
+    about = {r[0].value: r[1].value for r in wb["Om rapporten"].iter_rows()}
+    assert about["Modellkostnad (USD)"] > 0  # the run's own spend, from the budget
 
     lens_calls = [p for p in sdk.sent if p["system"] != CARDS_SYSTEM]
     repair = next(p for p in lens_calls if "lens `regulation`" in first_text(p) and len(p["messages"]) == 3)
@@ -230,6 +232,8 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     replay = run_dir / "replay-1"
     for name in names[:3]:
         assert (replay / name).read_text() == before[name]  # the same outputs, in their own folder
+    replay_about = load_workbook(replay / "report" / "granskning.xlsx")["Om rapporten"]
+    assert {r[0].value: r[1].value for r in replay_about.iter_rows()}["Modellkostnad (USD)"] == 0
     assert {name: (run_dir / name).read_text() for name in names} == before  # the paid run is untouched
     assert len(sdk.sent) == sent
 

@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from types import SimpleNamespace
 
 from _granskning_synth import BLOCKS, DOCUMENTS, TILES, basis, catalog, corpus, flag, lens_result
 
+from anbud.granskning.catalog import with_calc_rate
+from anbud.granskning.contracts import CalcPost, ToolCall
 from anbud.granskning.corpus import Corpus
-from anbud.granskning.kronor import FORMULA_INPUTS
+from anbud.granskning.kronor import FORMULA_INPUTS, price
 from anbud.granskning.lenses import load_lenses
 from anbud.granskning.merge import _merge_request, items_from_results, merge
 from anbud.granskning.prefix import brief_text, defuse
-from anbud.granskning.rank import price_items
+from anbud.granskning.rank import coverage, lens_coverage, price_items, rank
+from anbud.granskning.report import build_report, build_workbook, render_html
 from anbud.granskning.run import _map_summary
 from anbud.granskning.settings import load_settings
 from anbud.granskning.taxonomy import CLAIM_TYPES
@@ -113,3 +117,53 @@ def test_a_model_merge_must_keep_to_the_taxonomy() -> None:
     assert len(merge(results, corpus(), Client(merged))) == 2  # refused: the code merge stands
     good = merged.model_copy(update={"claim_type": "trade_boundary"})
     assert len(merge(results, corpus(), Client(good))) == 1
+
+
+def test_only_a_catalog_value_marks_a_figure_as_the_catalogs() -> None:
+    settings = load_settings()
+    default = catalog()
+    hours = basis(kind="hours_gap", hours=10)
+    from_catalog = price(hours, default, {}, settings)
+    assert from_catalog.default_catalog and from_catalog.catalog == default.name
+    own_rate = with_calc_rate(default, [CalcPost(id="c-1", text="Timpris montör", unit_price=700)])
+    from_calc = price(hours, own_rate, {}, settings)
+    assert from_calc.point == 7000 and not from_calc.default_catalog and from_calc.catalog is None
+    assert "timpris 700 kr/h från kundens kalkyl" in from_calc.basis
+    per_hour = {"hours": 100, "increase_per_hour": 10}
+    flat = price(basis(kind="contract_formula", formula="wage_step", formula_inputs=per_hour), default, {}, settings)
+    assert flat.point == 1000 and not flat.default_catalog and flat.catalog is None
+    pct = {"hours": 100, "increase_percent": 2}
+    by_rate = price(basis(kind="contract_formula", formula="wage_step", formula_inputs=pct), default, {}, settings)
+    assert by_rate.default_catalog
+    own = {**pct, "hourly_rate": 600}
+    stated = price(basis(kind="contract_formula", formula="wage_step", formula_inputs=own), default, {}, settings)
+    assert stated.point == 1200 and not stated.default_catalog
+
+
+def test_law_lookups_count_even_without_a_law_corpus() -> None:
+    log = [
+        ToolCall(role="lens", turn=1, tool="law_lookup", input={}, error="not_available"),
+        ToolCall(role="lens", turn=1, tool="law_lookup", input={}, error="invalid_input"),
+        ToolCall(role="lens", turn=1, tool="law_lookup", input={}, refused="not available to this lens"),
+    ]
+    cov = lens_coverage(lens_result("regulation", [], tool_log=log), corpus())
+    assert (cov.law_lookups, cov.failed_calls, cov.refused_calls) == (2, 1, 1)
+
+
+def test_the_report_cap_comes_from_settings() -> None:
+    settings = replace(load_settings(), max_shown=5)
+    report = build_report(
+        run_id="run-1",
+        company_id="co-001",
+        tender_id="t-0001",
+        ranked=rank([], settings),
+        coverage=coverage([], corpus()),
+        corpus=corpus(),
+        catalog=None,
+        materiality_sek=settings.materiality_sek,
+        max_shown=settings.max_shown,
+        cost_usd=1.234,
+    )
+    assert "Högst 5 flaggor visas" in render_html(report)
+    about = build_workbook(report)["Om rapporten"]
+    assert ("Modellkostnad (USD)", 1.23) in [(r[0].value, r[1].value) for r in about.iter_rows()]

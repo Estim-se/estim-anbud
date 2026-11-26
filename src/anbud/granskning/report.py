@@ -70,6 +70,7 @@ class Report(_Model):
     catalog: str | None = Field(default=None, description="The catalog's label, e.g. Estims standardkatalog")
     default_catalog: bool = False
     materiality_sek: float = 20000.0
+    max_shown: int = 15
     shown: list[Item] = Field(default_factory=list)
     generic: list[Item] = Field(default_factory=list)
     logged: list[Item] = Field(default_factory=list)
@@ -99,6 +100,7 @@ def build_report(
     corpus: Corpus,
     catalog: Catalog | None,
     materiality_sek: float,
+    max_shown: int = 15,
     cost_usd: float | None = None,
     created_at: datetime | None = None,
 ) -> Report:
@@ -116,6 +118,7 @@ def build_report(
         catalog=catalog.label if catalog else None,
         default_catalog=bool(catalog and catalog.default),
         materiality_sek=materiality_sek,
+        max_shown=max_shown,
         shown=ranked.shown,
         generic=ranked.generic,
         logged=ranked.logged,
@@ -226,8 +229,8 @@ def render_html(report: Report) -> str:
         note = " Priserna är Estims standardvärden, inte företagets egna." if report.default_catalog else ""
         parts.append(f'<p class="meta">Kronor beräknade med {_e(report.catalog)}.{_e(note)}</p>')
     parts.append(
-        f'<p class="meta">Högst 15 flaggor visas. Under {_e(sek(report.materiality_sek))} räknas en flagga som mindre, '
-        "om den inte har en avtalsrisk.</p>"
+        f'<p class="meta">Högst {report.max_shown} flaggor visas. Under {_e(sek(report.materiality_sek))} räknas en '
+        "flagga som mindre, om den inte har en avtalsrisk.</p>"
     )
     parts.append(f"<h2>Flaggor ({len(report.shown)})</h2>")
     parts += [_flag_html(n, item, report) for n, item in enumerate(report.shown, 1)] or ["<p>Inga flaggor visas.</p>"]
@@ -409,6 +412,7 @@ def build_workbook(
         ("Estims standardkatalog", _yes(report.default_catalog)),
         ("Väsentlighetsgräns", sek(report.materiality_sek)),
         ("Dokument i underlaget", report.coverage.documents),
+        ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
         ("Täckning", report.coverage.note),
     ]
     for row, (label, value) in enumerate(rows, 1):
