@@ -20,13 +20,15 @@ from anbud.granskning.corpus import Corpus
 from anbud.granskning.lenses import Lens
 from anbud.granskning.loop import EFFORT, LENS_MAX_TOKENS, Validator, pydantic_validator, run_lens
 from anbud.granskning.mapping import MapResult, run_map
-from anbud.granskning.prefix import estimate_tokens, system_blocks
+from anbud.granskning.prefix import CHARS_PER_TOKEN, defuse, estimate_tokens, prefix_chars, system_blocks
 from anbud.granskning.toolbox import Toolbox
 from anbud.model_client import ModelClient
 from anbud.models import Event, TenderMap
 from anbud.store import canonical
 
 DEFAULT_CONCURRENCY = 3
+# A map that fails with one of these stops the run before the lenses: they would fail the same way.
+FATAL_ERRORS = ("RunStopped", "BudgetExceeded", "spend_cap", "ReplayMiss")
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,7 @@ def _map_summary(tender_map: TenderMap | None) -> str:
     if tender_map is None:
         return "The map step failed, so there is no tender map. Work from the corpus directly."
     summary = tender_map.model_dump(mode="json", exclude={"lenses", "citations"})
-    return canonical(summary).decode()
+    return defuse(canonical(summary).decode())
 
 
 def lens_message(lens: Lens, tender_map: TenderMap | None, caps: LensCaps) -> str:
@@ -85,6 +87,7 @@ class GranskningResult:
     map: MapResult
     lenses: list[LensResult] = field(default_factory=list)
     prefix_tokens: int = 0
+    prefix_measured: bool = False
     caps: LensCaps | None = None
     summary_blob: str | None = None
 
@@ -136,6 +139,8 @@ def run_granskning(
     concurrency: int = DEFAULT_CONCURRENCY,
     effort: str = EFFORT,
     on_progress: Callable[[str], None] | None = None,
+    summary_file: str = "granskning.json",
+    code: dict[str, Any] | None = None,
 ) -> GranskningResult:
     """Map, then every lens in parallel. Returns when every lens has finished, failed or hit its cap."""
     events = _Events(client)
@@ -162,9 +167,13 @@ def run_granskning(
     if mapped.tender_map is not None:
         toolbox.set_roles({d.doc_id: d.role for d in mapped.tender_map.documents})
 
-    prefix_tokens = mapped.prefix_tokens or estimate_tokens(system)
+    measured = mapped.prefix_tokens
+    estimated = estimate_tokens(system)
+    prefix_tokens = measured or estimated
     caps = lens_caps(client.config.budgets, prefix_tokens)
-    result = GranskningResult(client.run_id, mapped, prefix_tokens=prefix_tokens, caps=caps)
+    result = GranskningResult(
+        client.run_id, mapped, prefix_tokens=prefix_tokens, prefix_measured=measured is not None, caps=caps
+    )
     lens_blobs: dict[str, str | None] = {}
     lens_errors: dict[str, str | None] = {}
 
@@ -200,7 +209,7 @@ def run_granskning(
         say(f"lens {lens.id}: {lens_result.status}{error}, {len(lens_result.flags)} flags, {lens_result.turns} turns")
         return lens_result
 
-    if mapped.outcome.status == "error" and mapped.outcome.error in ("RunStopped", "BudgetExceeded", "spend_cap"):
+    if mapped.outcome.status == "error" and mapped.outcome.error in FATAL_ERRORS:
         say(f"stopping before the lenses: {mapped.outcome.error}")
     else:
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
@@ -209,6 +218,14 @@ def run_granskning(
     summary = {
         "run_id": client.run_id,
         "prefix_tokens": prefix_tokens,
+        "prefix": {
+            "chars": prefix_chars(system),
+            "estimated_tokens": estimated,
+            "estimate_chars_per_token": CHARS_PER_TOKEN,
+            "measured_tokens": measured,  # cache write plus cache read on the map's first call; None if it failed
+            "tier_from": "measured" if measured is not None else "estimate",
+        },
+        "code": code,
         "caps": {"max_turns": caps.max_turns, "max_usd": caps.max_usd},
         "map": {
             "status": mapped.outcome.status,
@@ -237,7 +254,7 @@ def run_granskning(
     store = client.store
     if store is not None:
         try:
-            store.write_file(store.run_dir(client.run_id) / "granskning.json", canonical(summary))
+            store.write_file(store.run_dir(client.run_id) / summary_file, canonical(summary))
         except OSError:
             client.persist_failures += 1
     duration = int((time.monotonic() - started) * 1000)

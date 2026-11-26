@@ -15,6 +15,7 @@ from test_runguard import ledger_with
 
 from anbud import cli, model_client
 from anbud.evals import split_heldout as sh
+from anbud.granskning import command, provenance
 from anbud.granskning.catalog import Catalog, CatalogItem, calc_hourly_rate, with_calc_rate
 from anbud.granskning.contracts import CalcPost, RunInputs
 from anbud.granskning.items import Kronor
@@ -24,6 +25,15 @@ from anbud.models import Flag
 from anbud.store import RunStore
 
 RUN = "t-0001-e2e"
+CLEAN = provenance.GitState("a" * 40, False, None)
+
+
+@pytest.fixture(autouse=True)
+def clean_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Paid runs need a clean checkout; the tests' own tree may be mid-edit."""
+    monkeypatch.setattr(provenance, "git_state", lambda root=None: CLEAN)
+
+
 VITE = {"block_id": "aaaaaa-000002", "quote": "Etappvite utgår med 25 000 kr per påbörjad vecka"}
 CARD_TEXT = "Planritning, elplan plan 1\n\nCentral A1 | Gruppförteckning\n\nTeckenförklaring: NG närvarogivare"
 
@@ -195,7 +205,7 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert kronor[items["contract_vite"]["fingerprint"]].point == 100_000
     presence = kronor[items["unpriced_requirement"]["fingerprint"]]
     assert presence.point == 40 * (0.8 * 700 + 600)  # the calc's own hourly rate, not the catalog's 500
-    assert "från kundens kalkyl" in presence.basis and "antaget" not in presence.basis
+    assert "från kundens kalkyl" in presence.label and "antaget" not in presence.label
     assert items["trade_boundary"]["placement"] == "refuted"
     assert items["generic_scope"]["placement"] == "generic"
     inputs = RunInputs.model_validate_json((run_dir / "inputs.json").read_text())
@@ -205,6 +215,8 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert "Etappvitet är 25 000 kr" in page and "Gränsdragningslista" in page
     wb = load_workbook(run_dir / "report" / "granskning.xlsx")
     assert wb["Flaggor"].max_row == 3 and wb["Generiska"].max_row == 2
+    about = {r[0].value: r[1].value for r in wb["Om rapporten"].iter_rows()}
+    assert about["Modellkostnad (USD)"] > 0  # the run's own spend, from the budget
 
     lens_calls = [p for p in sdk.sent if p["system"] != CARDS_SYSTEM]
     repair = next(p for p in lens_calls if "lens `regulation`" in first_text(p) and len(p["messages"]) == 3)
@@ -214,17 +226,49 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
     assert "Etappvite" not in out and "närvaro" not in out.lower() and "Central A1" not in out
     assert "verifier: 4 flags" in out and "2 shown, 1 generic" in out
 
+    # The run's manifest and summary record the code it ran with, and the prefix as measured and as estimated.
+    manifest = json.loads((RunStore("co-001").run_dir(RUN) / "run.json").read_text())
+    paid_code = manifest["code"]
+    assert paid_code["harness_sha"] == "a" * 40 and paid_code["dirty"] is False
+    granskning = json.loads((RunStore("co-001").run_dir(RUN) / "granskning.json").read_text())
+    assert granskning["code"] == paid_code
+    prefix = granskning["prefix"]
+    assert prefix["measured_tokens"] == 40_000 and prefix["tier_from"] == "measured"  # the map's cache write
+    assert prefix["estimated_tokens"] == int(prefix["chars"] / 1.6) and granskning["prefix_tokens"] == 40_000
+    assert "prefix 40000 tokens (measured)" in out
+
     # Replay: no key, no SDK, every answer from the step cache, the same outputs.
     def no_key(**_: Any) -> str:
         raise AssertionError("replay must not read the key")
 
     monkeypatch.setattr(model_client, "keychain_key", no_key)
-    before = {name: (run_dir / name).read_text() for name in ("flags.json", "kronor.json", "items.json")}
+    names = ("flags.json", "kronor.json", "items.json", "report/granskning.html")
+    before = {name: (run_dir / name).read_text() for name in names}
+    summary = RunStore("co-001").run_dir(RUN) / "granskning.json"
+    paid_summary = summary.read_text()
     sent = len(sdk.sent)
     assert cli.main(["run", "co-001", "t-0001", "--run-id", RUN, "--replay"]) == 0
     assert "total $0.00" in capsys.readouterr().out
-    assert {name: (run_dir / name).read_text() for name in before} == before
+    replay = run_dir / "replay-1"
+    for name in names[:3]:
+        assert (replay / name).read_text() == before[name]  # the same outputs, in their own folder
+    replay_about = load_workbook(replay / "report" / "granskning.xlsx")["Om rapporten"]
+    assert {r[0].value: r[1].value for r in replay_about.iter_rows()}["Modellkostnad (USD)"] == 0
+    assert {name: (run_dir / name).read_text() for name in names} == before  # the paid run is untouched
     assert len(sdk.sent) == sent
+    assert json.loads((RunStore("co-001").run_dir(RUN) / "run.json").read_text())["code"] == paid_code
+    replay_summary = json.loads((RunStore("co-001").run_dir(RUN) / "granskning-replay-1.json").read_text())
+    assert replay_summary["code"]["harness_sha"] == "a" * 40
+
+    # A replay that misses the cache (here: a different lens set changes the map's request) stops at the map,
+    # exits non-zero, and still leaves the paid run alone.
+    narrowed = ["run", "co-001", "t-0001", "--run-id", RUN, "--replay", "--lens", "regulation"]
+    assert cli.main(narrowed) == command.REPLAY_INCOMPLETE
+    captured = capsys.readouterr()
+    assert "replay incomplete: 1 calls" in captured.err and "stopping before the lenses: ReplayMiss" in captured.out
+    assert (run_dir / "replay-2" / "report" / "granskning.html").exists()
+    assert {name: (run_dir / name).read_text() for name in names} == before
+    assert summary.read_text() == paid_summary
 
 
 def test_a_marking_in_a_page_card_stops_the_run(
@@ -268,5 +312,35 @@ def test_a_dry_run_counts_without_a_key_or_a_call(
     assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "8 blocks, 3 documents, 2 calc posts" in out and "tiles for page cards: 1" in out
-    assert "lens tier: 8 turns, $1.50 per lens; 8 lenses" in out and "hourly rate from the calc" in out
+    assert "lens tier (from the estimate): 8 turns, $1.50 per lens; 8 lenses" in out
+    assert "hourly rate from the calc" in out and "estimated prefix:" in out and "at 1.6 chars/token" in out
+    assert "a paid run is allowed" in out
     assert "Etappvite" not in out and not (tender / "runs").exists()
+
+
+@pytest.mark.parametrize(
+    ("state", "why"),
+    [
+        (provenance.GitState("b" * 40, True, "c" * 64), "needs a clean tree"),
+        (provenance.GitState(None, True, None), "needs a git checkout"),
+    ],
+)
+def test_a_paid_run_on_a_dirty_or_unversioned_tree_is_refused(
+    tender: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: provenance.GitState,
+    why: str,
+) -> None:
+    def no_key(**_: Any) -> str:
+        raise AssertionError("a refused run must not read the key")
+
+    monkeypatch.setattr(provenance, "git_state", lambda root=None: state)
+    monkeypatch.setattr(model_client, "keychain_key", no_key)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-d"]) == cli.REFUSED
+    assert why in capsys.readouterr().err
+    assert not RunStore("co-001").run_dir("t-0001-d").exists() and not (tender / "runs").exists()
+    assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0  # a dry run may run dirty
+    out = capsys.readouterr().out
+    assert "a paid run is refused on this tree" in out
+    assert state.diff_sha256 is None or f"diff {'c' * 12}" in out

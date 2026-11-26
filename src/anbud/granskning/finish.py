@@ -1,5 +1,6 @@
 """Everything after the lenses, in order: merge, provisional kronor, verifier selection and loop, final kronor, rank and
-cap, coverage, reports. The tool loop and the shared system blocks come from the caller.
+cap, coverage, reports. The tool loop and the shared system blocks come from the caller. With `out_dir` None the
+report is built but not written, so the caller can add what it knows only afterwards (the run's cost).
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ def finish(
     calc_posts: list[CalcPost],
     system_blocks: list[dict[str, Any]],
     verifier_loop: VerifierLoop,
-    out_dir: Path,
+    out_dir: Path | None,
     seed: str,
     catalog: Catalog | None,
     merge_client: ModelClient | None = None,
@@ -75,6 +76,8 @@ def finish(
         corpus=corpus,
         catalog=catalog,
         materiality_sek=settings.materiality_sek,
+        max_shown=settings.max_shown,
         cost_usd=cost_usd,
     )
-    return Finished(final, ranked, report, write_reports(report, out_dir))
+    paths = write_reports(report, out_dir) if out_dir is not None else {}
+    return Finished(final, ranked, report, paths)

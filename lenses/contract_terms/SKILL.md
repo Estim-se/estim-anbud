@@ -24,11 +24,12 @@ clause number only, with your own short paraphrase; never reproduce their wordin
 
 - Delay and stage penalties (taxonomy 1, `contract_vite`): amount per week, what it is a share of, whether it is capped,
   whether stage penalties stack with completion penalties, and whether they can be reduced. Chapter 4 of the general
-  terms is the reference. Money basis: `contract_formula` with `vite_per_week`.
+  terms is the reference. Money basis: `contract_formula` with `vite_per_week`; inputs `weeks` (the delay at risk),
+  and `per_week`, or `percent_per_week` with `contract_sum`; `cap` or `cap_percent` if the documents state a cap.
 
 - Security (taxonomy 1, `contract_security`): bank guarantee or other security, its size, how long it runs into the
   warranty period, and whether an advance is refused. Chapter 6 is the reference. Money basis: `contract_formula`
-  with `security`.
+  with `security`; inputs `contract_sum`, `percent` and `months`.
 
 - Payment (taxonomy 1, `contract_payment`): payment only for completed work, payment tied to the main contractor being
   paid, long payment periods, retentions, and short deadlines for the final invoice or for settling all changes.
@@ -38,11 +39,13 @@ clause number only, with your own short paraphrase; never reproduce their wordin
   Chapter 5 is the reference.
 
 - Price adjustment (taxonomy 10, `contract_index`): a fixed price with no index over a long job, especially one running
-  into the next year. Money basis: `contract_formula` with `index_drift`; inputs are the months of work after the
-  tender date and the material share if the documents give it.
+  into the next year. Money basis: `contract_formula` with `index_drift`; inputs `material_amount` (the material in
+  SEK exposed to price change, from the calc's material posts), and `change_percent`, or `annual_percent` with
+  `months` (from the tender date to the purchases).
 
 - Wage steps (taxonomy 10, `contract_index`): a fixed price over a collective-agreement wage step. Money basis:
-  `contract_formula` with `wage_step`; inputs are the hours after the step date.
+  `contract_formula` with `wage_step`; inputs `hours` (worked after the step date), and `increase_per_hour`, or
+  `increase_percent` (with `hourly_rate` if the documents give one).
 
 - Changes and extra work (taxonomy 10, `contract_ata_terms`): fixed rates or mark-ups for changes, a duty to price
   changes before doing them, and rules that a change not notified in writing is lost.
@@ -54,8 +57,8 @@ clause number only, with your own short paraphrase; never reproduce their wordin
 
 A term is material if it can cost about 20 000 kr or more on this job, or if missing it forfeits a claim, triggers a
 penalty or gives the other side a right to terminate. Mark the latter with `contractual_exposure`. A term that merely
-restates the standard terms is not a finding. Name the inputs a formula needs from the documents (amounts, weeks,
-percentages, dates) in `formula_inputs`, and quote the blocks they come from.
+restates the standard terms is not a finding. Give a formula's inputs in `formula_inputs` under the exact names listed
+in the system prompt, and quote the blocks they come from.
 
 ## Tools
 

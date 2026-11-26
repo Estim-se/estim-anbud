@@ -88,7 +88,8 @@ def test_a_failed_check_gets_one_repair_turn(tmp_path: Path) -> None:
     result = _lens(client, toolbox, system)
     assert result.status == "submitted" and result.turns == 2
     assert [f.claim_type for f in result.flags] == ["unpriced_requirement", "regulation_ev_charging"]
-    assert len(result.rejected) == 1 and "citations" in result.rejected[0]["reason"]
+    assert [r["attempt"] for r in result.rejected] == [1, 2]  # every attempt's rejects are recorded
+    assert all("citations" in r["reason"] for r in result.rejected)
     repair = _results(sdk.sent[1])[0]
     assert repair["is_error"] and "one repair" in repair["content"]
     assert [c.error for c in result.tool_log] == ["validation", None]
@@ -136,3 +137,33 @@ def test_with_breakpoint_leaves_the_input_untouched() -> None:
     marked = with_breakpoint(messages)
     assert messages == [{"role": "user", "content": "hi"}]
     assert marked[0]["content"] == [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]
+
+
+def _two_claims(claim: str) -> dict:
+    return {**good_flag(), "claim": claim}
+
+
+def _duplicate_script() -> list:
+    script = [
+        reply(("submit_flags", {"flags": [_two_claims("Närvarostyrning saknas."), _two_claims("Styrning saknas.")]})),
+        reply(("submit_flags", {"flags": [_two_claims("Närvarostyrning saknas."), _two_claims("Annan styrning.")]})),
+    ]
+    return script
+
+
+def test_same_fingerprint_flags_are_combined_not_dropped(tmp_path: Path) -> None:
+    client, sdk, toolbox, system = _setup(tmp_path, _duplicate_script())
+    result = _lens(client, toolbox, system)
+    repair = _results(sdk.sent[1])[0]
+    assert repair["is_error"] and "neither is kept" in repair["content"] and "0 findings passed" in repair["content"]
+    (merged,) = result.flags  # the final attempt still collides: code keeps both claims in one finding
+    assert merged.claim == "Närvarostyrning saknas. / Annan styrning."
+    attempts = [(r["attempt"], r["index"]) for r in result.rejected]
+    assert attempts == [(1, 0), (1, 1), (2, 1)]
+    assert "merged by code" in result.rejected[-1]["reason"]
+
+
+def test_an_exact_repeat_is_ignored(tmp_path: Path) -> None:
+    client, sdk, toolbox, system = _setup(tmp_path, [reply(("submit_flags", {"flags": [good_flag(), good_flag()]}))])
+    result = _lens(client, toolbox, system)
+    assert len(result.flags) == 1 and result.rejected == [] and result.turns == 1
