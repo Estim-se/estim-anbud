@@ -19,6 +19,10 @@ timeout_minutes = 90
 granskning_usd_per_mtok_prefix = 65.0
 baseline_usd_per_page = 0.022
 margin = 1.5
+# The exam counts Granskning dry runs whose estimated prefix is over the context window (the top lens tier ends there
+# too) and over a large-prefix mark.
+context_tokens = 1000000
+large_prefix_tokens = 200000
 
 [schema_check]
 hard_stop = 0.10

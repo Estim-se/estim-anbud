@@ -13,10 +13,11 @@ Per tender of the split status asked for:
    - `kalkyl`: the same plus the amendments, as a bidder would have priced, scored against the opening protocol.
    Each variant is a data root of its own, `sealed/exam/<co>/<kind>/<variant>/`, with the tender laid out as a dev
    tender there, so the engines run unchanged with `ANBUD_DATA_ROOT` pointing at it.
-2. **Prep** of both variants ($0).
+2. **Prep** of both variants ($0). A tender that stops is counted by why, from prep's one stop line (`prep_stop`).
 3. **The estimate**, from prep sizes: each engine's own dry run (Granskning's prefix tokens, Kalkyl's cost range) and
    the old engine's measured cost per page, times a margin, per engine and in total, beside the worst case (every
-   hard stop). Without `--paid` the exam stops here, after the old engine's dry run on each input.
+   hard stop), and the prefix sizes: median, max, and how many are over the context and over a large-prefix mark.
+   Without `--paid` the exam stops here, after the old engine's dry run on each input.
 4. **Runs** (`--paid`, with a scoring plan registered with `anbud freeze plan` and a `--budget` at or above the
    estimate): Granskning on the granskning input, Kalkyl on the
    kalkyl input, and the old engine at matched settings on both (once when they're the same). A run is not started
@@ -34,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tomllib
@@ -283,6 +285,33 @@ _KALKYL_HIGH = re.compile(r"^cost_usd_est_high: ([\d.]+)$", re.M)
 _KALKYL_COST = re.compile(r"^cost_usd: ([\d.]+)$", re.M)
 _GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
 
+# Why prep stopped, from the one line `anbud prep` writes to stderr when it stops (its messages name no file and quote
+# no text). The first fragment found decides.
+PREP_STOPS = (
+    ("security marking", "security_marking"),
+    ("block-id prefix", "id_collision"),
+    ("pixel or page limit", "image_limit"),
+    ("held-out or sealed storage", "sealed_storage"),
+    ("intake manifest", "manifest"),
+    ("no inbox folder", "manifest"),
+    ("a file in the inbox can't be read", "unreadable_file"),
+    ("while reading the tender", "read_error"),
+)
+
+
+def prep_stop(code: int, stderr: str) -> str | None:
+    """None when prep finished; else why it stopped: `refused` (the run guard), a category from `PREP_STOPS`,
+    `other_stop` (a stop line with another reason) or `crash` (no stop line: an exception, a signal, the memory
+    limit)."""
+    if code == 0:
+        return None
+    line = next((x for x in reversed(stderr.splitlines()) if x.startswith("anbud prep: ")), None)
+    if line is None:
+        return "crash"
+    if line.startswith("anbud prep: refused:"):
+        return "refused"
+    return next((category for fragment, category in PREP_STOPS if fragment in line), "other_stop")
+
 
 class Engines:
     """The engines, each run as `anbud ...` in a child process whose data root is one variant root. A child's output
@@ -296,7 +325,7 @@ class Engines:
         self._app_root: Path | None = None
         self._app_sha: str | None = None
 
-    def _anbud(self, vroot: Path, args: list[str], log_name: str) -> tuple[int, str]:
+    def _anbud(self, vroot: Path, args: list[str], log_name: str) -> subprocess.CompletedProcess[str]:
         env = {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
         env["ANBUD_DATA_ROOT"] = str(vroot)
         private_dirs(self.logs)
@@ -304,25 +333,26 @@ class Engines:
         command = [sys.executable, "-c", "import sys; from anbud.cli import main; sys.exit(main())", *args]
         proc = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
         intake._write_private(log, proc.stdout + "\n--- stderr ---\n" + proc.stderr)
-        return proc.returncode, proc.stdout
+        return proc
 
-    def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> bool:
-        code, _ = self._anbud(vroot, ["prep", company_id, tender_id], log_name)
-        return code == 0
+    def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> str | None:
+        """None when prep finished, else the category of its stop (`prep_stop`)."""
+        proc = self._anbud(vroot, ["prep", company_id, tender_id], log_name)
+        return prep_stop(proc.returncode, proc.stderr)
 
     def granskning_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> int | None:
-        code, out = self._anbud(vroot, ["run", company_id, tender_id, "--dry-run"], log_name)
-        match = _PREFIX.search(out)
-        return int(match.group(1)) if code == 0 and match else None
+        proc = self._anbud(vroot, ["run", company_id, tender_id, "--dry-run"], log_name)
+        match = _PREFIX.search(proc.stdout)
+        return int(match.group(1)) if proc.returncode == 0 and match else None
 
     def kalkyl_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> float | None:
-        code, out = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--dry-run"], log_name)
-        match = _KALKYL_HIGH.search(out)
-        return float(match.group(1)) if code == 0 and match else None
+        proc = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--dry-run"], log_name)
+        match = _KALKYL_HIGH.search(proc.stdout)
+        return float(match.group(1)) if proc.returncode == 0 and match else None
 
     def granskning(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
-        code, out = self._anbud(vroot, ["run", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
-        match = _GRANSKNING_SPENT.search(out)
+        proc = self._anbud(vroot, ["run", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
+        code, match = proc.returncode, _GRANSKNING_SPENT.search(proc.stdout)
         return EngineRun(
             "granskning",
             "granskning",
@@ -335,8 +365,8 @@ class Engines:
         )
 
     def kalkyl(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
-        code, out = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
-        match = _KALKYL_COST.search(out)
+        proc = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
+        code, match = proc.returncode, _KALKYL_COST.search(proc.stdout)
         return EngineRun(
             "kalkyl",
             "kalkyl",
@@ -427,9 +457,12 @@ class Report:
     same_input: int = 0
     prepared: int = 0
     prep_failed: int = 0
+    prep_stops: dict[str, int] = field(default_factory=dict)  # by category, one per tender that stopped
     documents: int = 0
     skipped_by_type: dict[str, int] = field(default_factory=dict)
     pages: int = 0
+    # Granskning dry runs: runs, median and max estimated prefix, runs over the context and over the large mark.
+    prefix_tokens: dict[str, int] = field(default_factory=dict)
     deadlines: Deadlines | None = None
     estimate_usd: dict[str, float] = field(default_factory=dict)
     estimate_unknown: int = 0
@@ -471,6 +504,20 @@ def _skipped(tender: Path) -> Counter[str]:
     except (OSError, ValueError):
         return Counter()
     return Counter(str(d.get("kind")) for d in documents if isinstance(d, dict) and d.get("skipped"))
+
+
+def prefix_stats(tokens: list[int], context: int, large: int) -> dict[str, int]:
+    if not tokens:
+        return {}
+    return {
+        "runs": len(tokens),
+        "median": round(statistics.median(tokens)),
+        "max": max(tokens),
+        "over_context": sum(t > context for t in tokens),
+        "over_large": sum(t > large for t in tokens),
+        "context": context,
+        "large": large,
+    }
 
 
 def run_exam(
@@ -537,9 +584,13 @@ def run_exam(
             report.held[k] = report.held.get(k, 0) + n
         report.amendments_to_kalkyl += record["amendments_to_kalkyl"]
         report.same_input += record["same_input"]
-        ok = all(
-            runner.prep(variant_root(company_id, kind, v, root), company_id, t, f"prep-{t}-{v}.log") for v in VARIANTS
-        )
+        stop = None
+        for v in VARIANTS:
+            stop = runner.prep(variant_root(company_id, kind, v, root), company_id, t, f"prep-{t}-{v}.log")
+            if stop is not None:
+                report.prep_stops[stop] = report.prep_stops.get(stop, 0) + 1
+                break
+        ok = stop is None
         report.prepared += ok
         report.prep_failed += not ok
         if ok:
@@ -555,6 +606,7 @@ def run_exam(
     margin = float(cfg["margin"])
     estimate: Counter[str] = Counter()
     plans: dict[str, list[str]] = {}
+    prefixes: list[int] = []
     for t in ready:
         roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
         if "granskning" in engines:
@@ -563,6 +615,7 @@ def run_exam(
                 report.estimate_unknown += 1
                 estimate["granskning"] += stops["granskning"]
             else:
+                prefixes.append(tokens)
                 usd = tokens / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin
                 estimate["granskning"] += min(usd, stops["granskning"])
             report.worst_case_usd += stops["granskning"]
@@ -583,6 +636,7 @@ def run_exam(
             report.baseline_runs += 1
     report.estimate_usd = {k: round(v, 2) for k, v in sorted(estimate.items())}
     report.worst_case_usd = round(report.worst_case_usd, 2)
+    report.prefix_tokens = prefix_stats(prefixes, int(cfg["context_tokens"]), int(cfg["large_prefix_tokens"]))
 
     # The old engine's dry run on each input: the plumbing works, and nothing is sent.
     if not paid:
@@ -691,10 +745,19 @@ def _say(r: Report, say: Callable[[str], None]) -> None:
         f"quarantine: answer keys held in {r.held_tenders} of {r.quarantined} ({_counts(r.held)}); "
         f"{r.amendments_to_kalkyl} amendments given to Kalkyl; {r.same_input} tenders with one input for both"
     )
+    stops = f" ({_counts(r.prep_stops)})" if r.prep_stops else ""
     say(
-        f"prep: {r.prepared} prepared, {r.prep_failed} stopped; {r.documents} documents (skipped by type: "
+        f"prep: {r.prepared} prepared, {r.prep_failed} stopped{stops}; {r.documents} documents (skipped by type: "
         f"{_counts(r.skipped_by_type)}), {r.pages} pages (granskning input)"
     )
+    p = r.prefix_tokens
+    if p:
+        say(
+            "granskning prefix (dry-run estimate, before page cards): "
+            f"median {p['median']:,} tokens, max {p['max']:,}; "
+            f"of {p['runs']} runs {p['over_context']} over the context ({p['context']:,}), "
+            f"{p['over_large']} over {p['large']:,}"
+        )
     if r.deadlines is not None:
         d = r.deadlines
         nearest = f"nearest open deadline in {d.nearest_days} days" if d.nearest_days is not None else "none open"
