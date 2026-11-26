@@ -181,7 +181,7 @@ def run_pipeline(
         _write(store, run_dir / "cards_masking.json", [m.model_dump(mode="json") for m in cards.masked])
     corpus = add_cards(corpus, cards)
 
-    toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob)
+    toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob, catalog=catalog)
     validator = flag_validator(corpus, set(CLAIM_TYPES))
     result = run_granskning(
         client,

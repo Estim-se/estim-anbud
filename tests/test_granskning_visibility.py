@@ -7,11 +7,17 @@ from dataclasses import replace
 from _granskning_synth import basis, catalog, corpus, flag, lens_result
 from openpyxl import Workbook
 
+from anbud import tools
+from anbud.granskning.contracts import ToolCall
 from anbud.granskning.items import Item
+from anbud.granskning.kronor import price
+from anbud.granskning.lenses import load_lenses
 from anbud.granskning.merge import items_from_results
-from anbud.granskning.rank import coverage, price_items, rank
+from anbud.granskning.prefix import brief_text
+from anbud.granskning.rank import coverage, lens_coverage, price_items, rank
 from anbud.granskning.report import build_report, build_workbook, column_keys, render_html
 from anbud.granskning.settings import load_settings
+from anbud.granskning.toolbox import Toolbox
 from anbud.models import Verdict
 
 S = load_settings()
@@ -116,3 +122,49 @@ def test_both_reports_show_the_unpriced_list_and_nothing_not_refuted_is_hidden()
 def test_the_html_count_is_only_what_is_outside_the_lists() -> None:
     page = render_html(_report(max_shown=30))
     assert "1 flaggor som inte motbevisats ryms inte i listorna ovan" in page  # only the covered flag
+
+
+def test_catalog_search_returns_ids_names_units_and_categories_never_prices() -> None:
+    box = Toolbox(corpus(), [], catalog=catalog())
+    out = box.run("catalog_search", {"query": "armatur trapphus"})
+    assert out.error is None and out.result_ids == ["i1"]
+    assert "id=i1 | Armatur trapphus | unit=st | category=6" in out.content
+    assert "1000" not in out.content and "500" not in out.content and "hours" not in out.content
+    fallback = box.run("catalog_search", {"query": "uttag vägguttag"})  # not every word matches: any word does
+    assert fallback.result_ids == ["i2"]
+    assert "stays unpriced" in box.run("catalog_search", {"query": "rymdhiss"}).content
+    assert Toolbox(corpus(), []).run("catalog_search", {"query": "armatur"}).error == "no_catalog"
+    assert box.run("catalog_search", {"query": ""}).error == "invalid_input"
+
+
+def test_every_lens_may_search_the_catalog_and_the_verifier_may_not() -> None:
+    assert all("catalog_search" in lens.tools for lens in load_lenses())
+    assert (
+        tools.refusal("lens", "catalog_search") is None
+        and tools.refusal("lens_generic_scope", "catalog_search") is None
+    )
+    assert tools.refusal("verifier", "catalog_search") is not None
+    assert "catalog_search" in brief_text() and "catalog_id" in brief_text()
+
+
+def test_kronor_prices_a_missing_post_by_catalog_id_first() -> None:
+    by_id = price(basis(item="Belysning i trapphusen", catalog_id="i1", quantity=2), catalog(), {}, S)
+    assert by_id.priced and by_id.point == 2 * (1.0 * 500 + 1000) and "Armatur trapphus" in by_id.label
+    gap = price(basis(kind="quantity_gap", catalog_id="i2", quantity=10), catalog(), {}, S)
+    assert gap.priced and gap.point == 10 * (0.5 * 500 + 100)
+    stale = price(basis(item="Vägguttag", catalog_id="no-such-id", quantity=1), catalog(), {}, S)
+    assert stale.priced and "Vägguttag" in stale.label  # an unknown id falls back to the name
+    nothing = price(basis(item="Rymdhiss", catalog_id="no-such-id"), catalog(), {}, S)
+    assert not nothing.priced and nothing.reason == "posten finns inte i katalogen"
+
+
+def test_a_flag_nothing_in_the_catalog_fits_stays_unpriced_and_is_shown() -> None:
+    f = flag("contract", "Kravet saknar katalogpost.", claim_type="u9", money_basis=basis(item="Rymdhiss"))
+    (item,) = price_items(items_from_results([lens_result("contract", [f])]), catalog(), {}, S)
+    ranked = rank([item], S)
+    assert [i.placement for i in ranked.unpriced] == ["shown_unpriced"]
+
+
+def test_catalog_searches_count_in_coverage() -> None:
+    log = [ToolCall(role="lens", turn=1, tool="catalog_search", input={"query": "armatur"}, result_ids=["i1"])]
+    assert lens_coverage(lens_result("contract", [], tool_log=log), corpus()).catalog_searches == 1

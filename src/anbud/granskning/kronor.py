@@ -115,10 +115,12 @@ def _rate(catalog: Catalog | None) -> float:
 
 
 def _catalog_cost(basis: MoneyBasis, catalog: Catalog | None, post: CalcPost | None) -> tuple[CatalogItem, float]:
-    """The catalog item the basis names (or the calc post's text names) and its unit cost."""
+    """The catalog item the basis names, by its catalog id first, then by name (or the calc post's text), and its unit
+    cost."""
     if catalog is None:
         raise _Unpriced("ingen katalog")
-    item = catalog.lookup(basis.item) or (catalog.lookup(post.text) if post else None)
+    item = (catalog.find(basis.catalog_id) if basis.catalog_id else None) or catalog.lookup(basis.item)
+    item = item or (catalog.lookup(post.text) if post else None)
     if item is None:
         raise _Unpriced("posten finns inte i katalogen")
     cost = catalog.unit_cost(item)

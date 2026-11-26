@@ -148,6 +148,7 @@ class LensCoverage(_Model):
     tiles_viewed: int = 0
     calc_calls: int = 0
     law_lookups: int = 0
+    catalog_searches: int = 0
     refused_calls: int = 0
     failed_calls: int = 0
     not_checked: list[str] = Field(default_factory=list)
@@ -195,7 +196,7 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
     blocks: set[str] = set()
     tiles: set[str] = set()
     searches: list[str] = []
-    counts = {"calc_posts": 0, "law_lookup": 0, "refused": 0, "failed": 0}
+    counts = {"calc_posts": 0, "law_lookup": 0, "catalog_search": 0, "refused": 0, "failed": 0}
     for call in result.tool_log:
         if call.refused is not None:
             counts["refused"] += 1
@@ -253,6 +254,7 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
         tiles_viewed=len(tiles),
         calc_calls=counts["calc_posts"],
         law_lookups=counts["law_lookup"],
+        catalog_searches=counts["catalog_search"],
         refused_calls=counts["refused"],
         failed_calls=counts["failed"],
         not_checked=not_checked,

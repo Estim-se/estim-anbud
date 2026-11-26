@@ -2,7 +2,7 @@
 name: occupied_building
 description: Working in a building people live or work in - stages, tenants, working hours, outages, temporary power, access and revisits - and the hours the calc misses because of it.
 role: lens
-tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, submit_flags]
+tools: [search_blocks, read_blocks, outline, calc_posts, view_tile, catalog_search, submit_flags]
 ---
 
 # Occupied building, stages and tenants
