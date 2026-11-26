@@ -468,7 +468,7 @@ SCOPE_ANSWERS: dict[str, dict[str, Any]] = {
                 catalog_id="takuttag",
             ),
         ],
-        "set_aside": [{"block_ids": ["aaaaaa-000004"], "reason": "common space, handled by per-space rules"}],
+        "set_aside": [{"block_ids": ["aaaaaa-000004"], "kind": "unclear", "reason": "common space, per-space rules"}],
     },
     "bbbbbb-000001": {
         "records": [
@@ -502,6 +502,7 @@ def test_a_run_prices_scope_passages_through_the_recipe(scope_tender: Path) -> N
     assert summary["rooms_from_row_descriptors"] == 2 and summary["recipe"] == DEFAULT_LABEL
     assert summary["posts_from_recipe"] == 5 and summary["posts_missing_quantity"] == 0
     assert summary["posts_assumed_per_object"] == 1
+    assert summary["lines_unresolved"] == 1 and summary["lines_set_aside_by_kind"] == {"unclear": 1}
     out = scope_tender / "kalkyl" / "k"
     result = json.loads((out / "result.json").read_text())
     assert result["recipe"]["label"] == DEFAULT_LABEL

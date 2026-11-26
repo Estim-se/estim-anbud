@@ -4,6 +4,7 @@ descriptors -> object model -> posts (recipe and per-space rules) -> R3 for unma
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -87,6 +88,10 @@ class KalkylResult:
             "lines_not_handled": len(self.uncovered),
             "scope_lines_not_handled": sum(u.line == "scope" for u in self.uncovered),
             "lines_set_aside_by_model": sum(u.set_aside_by_model for u in self.uncovered),
+            "lines_unresolved": sum(u.unresolved for u in self.uncovered),
+            "lines_set_aside_by_kind": dict(
+                sorted(Counter(u.set_aside_kind for u in self.uncovered if u.set_aside_kind).items())
+            ),
             "r3": {k: v for k, v in self.match_stats.items() if k != "error"},
             "complete": self.complete,
         }

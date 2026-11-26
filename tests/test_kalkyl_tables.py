@@ -149,7 +149,7 @@ def _table_handler(table: dict[str, Any], also_rows: bool = False):
             payload = {
                 "records": GOOD["bbbbbb-000001"]["records"] if also_rows else [],
                 "tables": [table],
-                "set_aside": [{"block_ids": ["bbbbbb-000005"], "reason": "summary row"}],
+                "set_aside": [{"block_ids": ["bbbbbb-000005"], "kind": "total_or_repeat", "reason": "summary row"}],
             }
             return message([submit(payload)])
         return good_handler(params)
