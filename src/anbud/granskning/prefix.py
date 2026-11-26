@@ -24,8 +24,11 @@ from anbud.models import Block
 CACHE_1H = {"type": "ephemeral", "ttl": "1h"}
 
 _KIND = {"heading": "H", "paragraph": "P", "table_row": "T", "sheet_row": "R", "tile_text": "I"}
+# Every tag the harness's prompts use as a delimiter: the prefix's, the verifier's, the merge's and the lens task's.
 _TAGS = re.compile(
-    r"<(/?\s*(?:tender_corpus|calculation|doc|documents|sheet|results|blocks|outline|posts|tile)\b)", re.IGNORECASE
+    r"<(/?\s*(?:tender_corpus|calculation|doc|documents|sheet|results|blocks|block|outline|posts|tile|citation|"
+    r"finding|clusters|tender_map|focus_questions|task)\b)",
+    re.IGNORECASE,
 )
 
 BRIEF = """\

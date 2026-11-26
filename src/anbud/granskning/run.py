@@ -20,7 +20,7 @@ from anbud.granskning.corpus import Corpus
 from anbud.granskning.lenses import Lens
 from anbud.granskning.loop import EFFORT, LENS_MAX_TOKENS, Validator, pydantic_validator, run_lens
 from anbud.granskning.mapping import MapResult, run_map
-from anbud.granskning.prefix import estimate_tokens, system_blocks
+from anbud.granskning.prefix import defuse, estimate_tokens, system_blocks
 from anbud.granskning.toolbox import Toolbox
 from anbud.model_client import ModelClient
 from anbud.models import Event, TenderMap
@@ -50,7 +50,7 @@ def _map_summary(tender_map: TenderMap | None) -> str:
     if tender_map is None:
         return "The map step failed, so there is no tender map. Work from the corpus directly."
     summary = tender_map.model_dump(mode="json", exclude={"lenses", "citations"})
-    return canonical(summary).decode()
+    return defuse(canonical(summary).decode())
 
 
 def lens_message(lens: Lens, tender_map: TenderMap | None, caps: LensCaps) -> str:

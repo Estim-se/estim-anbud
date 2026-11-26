@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from anbud.granskning.contracts import LensResult, fingerprint
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.items import Item
+from anbud.granskning.prefix import defuse
 from anbud.granskning.settings import Settings
 from anbud.granskning.validate import _search_key, check_flag
 from anbud.model_client import BudgetExceeded, ModelClient, ModelError, PrefixDrift, ReplayMiss, RunStopped
@@ -115,7 +116,7 @@ def _merge_request(groups: list[list[Item]]) -> str:
     payload = []
     for n, group in enumerate(groups):
         payload.append({"cluster": n + 1, "findings": [i.flag.model_dump(mode="json") for i in group]})
-    return "<clusters>\n" + json.dumps(payload, ensure_ascii=False, indent=1) + "\n</clusters>"
+    return "<clusters>\n" + defuse(json.dumps(payload, ensure_ascii=False, indent=1)) + "\n</clusters>"
 
 
 def _submitted(message: Any) -> list[dict[str, Any]] | None:
