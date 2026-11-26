@@ -27,8 +27,8 @@ from kalkyl_synthetic import (
 
 from anbud import paths
 from anbud.granskning.corpus import Corpus
-from anbud.kalkyl.coverage import NOT_INCLUDED_REASON
-from anbud.kalkyl.lines import not_included_line_ids, says_not_included
+from anbud.kalkyl.coverage import NOT_INCLUDED_REASON, OTHER_TRADE_CHECK
+from anbud.kalkyl.lines import names_other_party, not_included_line_ids, says_not_included
 from anbud.kalkyl.pipeline import NOT_INCLUDED_NOTE
 from anbud.kalkyl.run import run_dev_tender
 from anbud.models import Block
@@ -158,3 +158,43 @@ def test_a_post_citing_a_not_included_line_keeps_its_price_and_gets_a_note(tende
     post = next(p for p in result["posts"] if p["name"] == "Porttelefon")
     assert NOT_INCLUDED_NOTE in post["notes"] and post["status"] == "Prissatt"
     assert "aaaaaa-000016" not in {u["block_id"] for u in result["uncovered"]}  # used by the post
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ("Rörarbeten utförs av VVS-entreprenören.", True),
+        ("Ventilationsaggregat levereras av V-entreprenören", True),
+        ("Byggentreprenören svarar för håltagning", True),
+        ("Spis och kyl monteras av beställaren", True),
+        ("Arbeten i undercentral ingår ej", True),
+        ("Gränsdragning mot sidoentreprenad enligt bilaga", True),
+        ("Målning av väggar och tak", True),  # another trade's work by name
+        ("Ventilationsinstallationer", True),
+        ("Matning till ventilationsaggregat", False),  # another trade's equipment, fed by this contract
+        ("Ventilation", False),  # a system, not who does the work
+        ("Spis, ugn och diskmaskin i varje kök", False),
+        ("Befintlig armatur demonteras", False),
+        ("Entreprenören ansvarar för samordning", False),  # this contract's own contractor
+        ("Elentreprenören utför provning", False),
+    ],
+)
+def test_another_party_is_read_from_generic_trade_and_boundary_words(text: str, names: bool) -> None:
+    assert names_other_party(text) is names
+
+
+def test_an_other_trade_set_aside_needs_its_line_to_name_another_party(tender: Path) -> None:
+    aside = [
+        {"block_ids": ["aaaaaa-000013"], "kind": "other_trade", "reason": "the operator connects it"},  # "ingår ej"
+        {"block_ids": ["aaaaaa-000015"], "kind": "other_trade", "reason": "the builder does it"},  # names no one
+    ]
+    summary = _run(_handler([], aside))
+    result = json.loads((tender / "kalkyl" / "kalkyl-ni" / "result.json").read_text())
+    by_block = {u["block_id"]: u for u in result["uncovered"]}
+    assert by_block["aaaaaa-000013"]["set_aside_kind"] == "other_trade"  # the line names a contract boundary
+    unchecked = by_block["aaaaaa-000015"]
+    assert unchecked["set_aside_kind"] == "unclear" and unchecked["other_trade_unchecked"]
+    assert unchecked["reason"] == OTHER_TRADE_CHECK.format(reason="the builder does it")
+    assert summary["other_trade_unchecked"] == 1
+    wb = openpyxl.load_workbook(tender / "kalkyl" / "kalkyl-ni" / "kalkyl.xlsx")
+    assert "aaaaaa-000015" in {r["Källa (block)"] for r in _rows(wb["Ej omhändertaget"])}

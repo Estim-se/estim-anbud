@@ -124,6 +124,7 @@ def result_json(result: KalkylResult) -> bytes:
         "recipe": {"label": result.recipe.label, "source": result.recipe.source} if result.recipe else None,
         "posts": posts,
         "records": [v.model_dump(mode="json") for v in result.verified],
+        "connections": [v.model_dump(mode="json") for v in result.connections],
         "rejected": [r.model_dump(mode="json") for r in result.rejected],
         "uncovered": [u.model_dump(mode="json") for u in result.uncovered],
         "chunks": [

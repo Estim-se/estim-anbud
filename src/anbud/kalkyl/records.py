@@ -199,6 +199,7 @@ class Uncovered(_Model):
     reason: str
     set_aside_by_model: bool = False
     set_aside_by_code: bool = False  # a line that says by its own words that something isn't included
+    other_trade_unchecked: bool = False  # set aside as another trade's work by the model, with no party named on it
     set_aside_kind: SetAsideKind | None = None
     line: Literal["quantity", "scope", "not_included"] = "quantity"
 

@@ -13,9 +13,10 @@ from typing import Any
 from anbud.granskning.catalog import Catalog
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
+from anbud.kalkyl.connections import connection_records, demolition_line_ids, note_connections
 from anbud.kalkyl.coverage import uncovered_lines
 from anbud.kalkyl.extract import ChunkResult, extract_all
-from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks, not_included_line_ids
+from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks, not_included_line_ids, other_party_line_ids
 from anbud.kalkyl.match import match_posts
 from anbud.kalkyl.object_list import ObjectList, choose, read_lists
 from anbud.kalkyl.price import (
@@ -55,6 +56,7 @@ class KalkylResult:
     rooms_from_rows: int = 0  # apartment rows whose rooms code read from the row's own descriptor
     object_lists: list[ObjectList] = field(default_factory=list)  # sheets that are object lists by the app's rule
     not_included: set[str] = field(default_factory=set)  # lines that say something isn't part of the contract
+    connections: list[VerifiedRecord] = field(default_factory=list)  # code's connections to others' equipment
 
     @property
     def counted_rows(self) -> set[str]:
@@ -134,6 +136,9 @@ class KalkylResult:
             "lines_set_aside_by_model": sum(u.set_aside_by_model for u in self.uncovered),
             "not_included_lines": len(self.not_included),
             "not_included_set_aside_by_code": sum(u.set_aside_by_code for u in self.uncovered),
+            "other_trade_unchecked": sum(u.other_trade_unchecked for u in self.uncovered),
+            "connection_lines": len({b for v in self.connections for b in v.block_ids}),
+            "connection_posts": sum(1 for p in self.posts if any(ln.record in self.connections for ln in p.lines)),
             "posts_citing_not_included": sum(1 for p in self.posts if NOT_INCLUDED_NOTE in p.notes),
             "lines_unresolved": sum(u.unresolved for u in self.uncovered),
             "lines_set_aside_by_kind": dict(
@@ -206,15 +211,17 @@ def run_kalkyl(
         counted=frozenset(_counted(lists)),
     )
     verified, filled = with_room_descriptors(verified_records(results), corpus)
-    objects = count_objects(verified, recipe, lists)
+    connections = connection_records(results, verified, corpus, catalog)
+    objects = count_objects([*verified, *connections], recipe, lists)
     derived = common_spaces(verified, objects) if common_spaces else []
-    posts = build_posts(verified, objects, catalog, recipe, derived)
+    posts = build_posts([*verified, *connections], objects, catalog, recipe, derived)
     halted = any(r.status == "not_run" for r in results)
     if halted:
         stats: dict[str, Any] = {"sent": 0, "matched": 0, "none": 0, "refused": 0, "calls": 0, "error": "halted"}
     else:
         stats = match_posts(client, posts, catalog, kalkyl.roles[MATCH], kalkyl.match_batch)
     price_posts(posts, catalog, repetition)
+    note_connections(posts, connections)
     not_included = not_included_line_ids(corpus, paths)
     note_not_included(posts, not_included)
     return KalkylResult(
@@ -224,7 +231,15 @@ def run_kalkyl(
         rejected=[r for res in results for r in res.rejected],
         objects=objects,
         posts=posts,
-        uncovered=uncovered_lines(chunks, results, verified, _counted(lists), not_included),
+        uncovered=uncovered_lines(
+            chunks,
+            results,
+            verified,
+            _counted(lists),
+            not_included,
+            other_party_line_ids(corpus, paths),
+            demolition_line_ids(corpus),
+        ),
         totals=totals_of(posts),
         match_stats=stats,
         paths=paths,
@@ -233,6 +248,7 @@ def run_kalkyl(
         rooms_from_rows=filled,
         object_lists=lists,
         not_included=not_included,
+        connections=connections,
     )
 
 
