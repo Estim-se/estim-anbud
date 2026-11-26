@@ -27,6 +27,8 @@ from anbud.models import Event, TenderMap
 from anbud.store import canonical
 
 DEFAULT_CONCURRENCY = 3
+# A map that fails with one of these stops the run before the lenses: they would fail the same way.
+FATAL_ERRORS = ("RunStopped", "BudgetExceeded", "spend_cap", "ReplayMiss")
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,7 @@ def run_granskning(
     concurrency: int = DEFAULT_CONCURRENCY,
     effort: str = EFFORT,
     on_progress: Callable[[str], None] | None = None,
+    summary_file: str = "granskning.json",
 ) -> GranskningResult:
     """Map, then every lens in parallel. Returns when every lens has finished, failed or hit its cap."""
     events = _Events(client)
@@ -200,7 +203,7 @@ def run_granskning(
         say(f"lens {lens.id}: {lens_result.status}{error}, {len(lens_result.flags)} flags, {lens_result.turns} turns")
         return lens_result
 
-    if mapped.outcome.status == "error" and mapped.outcome.error in ("RunStopped", "BudgetExceeded", "spend_cap"):
+    if mapped.outcome.status == "error" and mapped.outcome.error in FATAL_ERRORS:
         say(f"stopping before the lenses: {mapped.outcome.error}")
     else:
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
@@ -237,7 +240,7 @@ def run_granskning(
     store = client.store
     if store is not None:
         try:
-            store.write_file(store.run_dir(client.run_id) / "granskning.json", canonical(summary))
+            store.write_file(store.run_dir(client.run_id) / summary_file, canonical(summary))
         except OSError:
             client.persist_failures += 1
     duration = int((time.monotonic() - started) * 1000)

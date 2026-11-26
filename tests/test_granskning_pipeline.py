@@ -15,6 +15,7 @@ from test_runguard import ledger_with
 
 from anbud import cli, model_client
 from anbud.evals import split_heldout as sh
+from anbud.granskning import command
 from anbud.granskning.catalog import Catalog, CatalogItem, calc_hourly_rate, with_calc_rate
 from anbud.granskning.contracts import CalcPost, RunInputs
 from anbud.granskning.items import Kronor
@@ -219,12 +220,28 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
         raise AssertionError("replay must not read the key")
 
     monkeypatch.setattr(model_client, "keychain_key", no_key)
-    before = {name: (run_dir / name).read_text() for name in ("flags.json", "kronor.json", "items.json")}
+    names = ("flags.json", "kronor.json", "items.json", "report/granskning.html")
+    before = {name: (run_dir / name).read_text() for name in names}
+    summary = RunStore("co-001").run_dir(RUN) / "granskning.json"
+    paid_summary = summary.read_text()
     sent = len(sdk.sent)
     assert cli.main(["run", "co-001", "t-0001", "--run-id", RUN, "--replay"]) == 0
     assert "total $0.00" in capsys.readouterr().out
-    assert {name: (run_dir / name).read_text() for name in before} == before
+    replay = run_dir / "replay-1"
+    for name in names[:3]:
+        assert (replay / name).read_text() == before[name]  # the same outputs, in their own folder
+    assert {name: (run_dir / name).read_text() for name in names} == before  # the paid run is untouched
     assert len(sdk.sent) == sent
+
+    # A replay that misses the cache (here: a different lens set changes the map's request) stops at the map,
+    # exits non-zero, and still leaves the paid run alone.
+    narrowed = ["run", "co-001", "t-0001", "--run-id", RUN, "--replay", "--lens", "regulation"]
+    assert cli.main(narrowed) == command.REPLAY_INCOMPLETE
+    captured = capsys.readouterr()
+    assert "replay incomplete: 1 calls" in captured.err and "stopping before the lenses: ReplayMiss" in captured.out
+    assert (run_dir / "replay-2" / "report" / "granskning.html").exists()
+    assert {name: (run_dir / name).read_text() for name in names} == before
+    assert summary.read_text() == paid_summary
 
 
 def test_a_marking_in_a_page_card_stops_the_run(

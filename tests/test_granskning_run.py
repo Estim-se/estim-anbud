@@ -24,6 +24,7 @@ from test_runguard import ledger_with
 from anbud import cli, model_client
 from anbud.config import load_config
 from anbud.evals import split_heldout as sh
+from anbud.granskning import command
 from anbud.granskning.contracts import LensResult
 from anbud.granskning.lenses import LensFileError, load_lenses, parse_lens
 from anbud.granskning.mapping import check_map, run_map
@@ -170,4 +171,5 @@ def test_cli_run_needs_a_prepared_tender_and_never_reads_the_key_for_replay(
     assert cli.main(["run", "co-001", "t-0001"]) == cli.REFUSED  # nothing prepared yet
     write_prep(data_root / "co-001" / "dev" / "t-0001" / "prep")
     assert cli.main(["run", "co-001", "t-0001", "--replay"]) == cli.REFUSED  # replay needs a run id
-    assert cli.main(["run", "co-001", "t-0001", "--replay", "--run-id", "t-0001-x", "--lens", "regulation"]) == 0
+    replay = ["run", "co-001", "t-0001", "--replay", "--run-id", "t-0001-x", "--lens", "regulation"]
+    assert cli.main(replay) == command.REPLAY_INCOMPLETE  # nothing is cached for this run

@@ -16,6 +16,7 @@ from typing import Any
 from anbud import paths
 
 PAID_REFUSED = 3
+REPLAY_INCOMPLETE = 4
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -84,8 +85,10 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     if args.dry_run:
         return dry_run(corpus, calc, lenses, catalog, config.budgets)
     store = RunStore(args.company_id)
+    run_dir = runs_dir / run_id
     if args.replay:
         sdk = None
+        run_dir = replay_dir(run_dir)  # never over the run it replays
     else:
         try:
             sdk = make_sdk_client(config, keychain_key(account=config.workspace))
@@ -105,7 +108,8 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             lenses,
             tender_id=args.tender_id or args.fixture.expanduser().resolve().name,
             prep_dir=prep_dir,
-            run_dir=runs_dir / run_id,
+            run_dir=run_dir,
+            summary_file=f"granskning-{run_dir.name}.json" if args.replay else "granskning.json",
             catalog=catalog,
             settings=settings,
             concurrency=args.concurrency,
@@ -138,6 +142,9 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     if client.persist_failures:
         print(f"anbud run: {client.persist_failures} store writes failed", file=sys.stderr)
         return 1
+    if client.replay_misses:
+        print(f"anbud run: replay incomplete: {client.replay_misses} calls were not in the step cache", file=sys.stderr)
+        return REPLAY_INCOMPLETE
     return 0
 
 
@@ -164,3 +171,12 @@ def dry_run(corpus: Any, calc: list[Any], lenses: list[Any], catalog: Any, budge
         print(f"  catalog: {catalog.name}, {len(catalog.items)} items, hourly rate from the {source}")
     print("  no model calls made")
     return 0
+
+
+def replay_dir(run_dir: Path) -> Path:
+    """`<run>/replay-<n>`, the first n not taken, so a replay never writes over the run it replays or an earlier
+    replay."""
+    n = 1
+    while (run_dir / f"replay-{n}").exists():
+        n += 1
+    return run_dir / f"replay-{n}"

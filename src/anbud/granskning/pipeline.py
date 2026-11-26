@@ -27,7 +27,7 @@ from anbud.granskning.loop import LoopOutcome, SubmitOutcome, run_tool_loop
 from anbud.granskning.merge import STOP_ERRORS
 from anbud.granskning.page_cards import Cards, read_cards
 from anbud.granskning.prefix import system_blocks
-from anbud.granskning.run import GranskningResult, run_granskning
+from anbud.granskning.run import FATAL_ERRORS, GranskningResult, run_granskning
 from anbud.granskning.settings import Settings, load_settings
 from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.granskning.toolbox import Toolbox
@@ -53,9 +53,6 @@ class CardsRead:
     failed: dict[str, str] = field(default_factory=dict)  # tile id -> error kind
 
 
-_FATAL = ("RunStopped", "BudgetExceeded", "spend_cap", "ReplayMiss")
-
-
 def read_all_cards(client: ModelClient, store: RunStore, corpus: Corpus) -> CardsRead:
     """One card per tile, tile by tile, so one failure loses one tile. A stop, the budget, the spend cap or a replay
     miss ends the cards there; the run goes on without the rest, and coverage says which tiles weren't read."""
@@ -67,7 +64,7 @@ def read_all_cards(client: ModelClient, store: RunStore, corpus: Corpus) -> Card
         except (*STOP_ERRORS, OSError, StoreError) as exc:
             kind = exc.kind if isinstance(exc, ModelError) else type(exc).__name__
             out.failed[tile.id] = kind
-            if kind in _FATAL:
+            if kind in FATAL_ERRORS:
                 out.failed.update({t.id: kind for t in tiles[n + 1 :]})
                 break
             continue
@@ -169,6 +166,7 @@ def run_pipeline(
     settings: Settings | None = None,
     concurrency: int = 3,
     on_progress: Callable[[str], None] | None = None,
+    summary_file: str = "granskning.json",
 ) -> PipelineResult:
     settings = settings or load_settings()
     say = on_progress or (lambda _msg: None)
@@ -186,7 +184,15 @@ def run_pipeline(
     toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob)
     validator = flag_validator(corpus, set(CLAIM_TYPES))
     result = run_granskning(
-        client, corpus, calc, lenses, toolbox=toolbox, validator=validator, concurrency=concurrency, on_progress=say
+        client,
+        corpus,
+        calc,
+        lenses,
+        toolbox=toolbox,
+        validator=validator,
+        concurrency=concurrency,
+        on_progress=say,
+        summary_file=summary_file,
     )
 
     if catalog is not None:
