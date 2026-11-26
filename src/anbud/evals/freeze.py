@@ -155,6 +155,12 @@ def verify(path: Path, root: Path | None = None) -> LedgerSummary:
     return _summary(*_read(path, root))
 
 
+def freezes_by_tender(path: Path, root: Path | None = None) -> Counter[str]:
+    """How many frozen runs each tender ("<co>/<t>") has, after the same checks as `verify`."""
+    _, records = _read(path, root)
+    return Counter(r["tender"] for r in records if r.get("kind") in FREEZE_KINDS and isinstance(r.get("tender"), str))
+
+
 @contextmanager
 def _locked(ledger: Path, root: Path | None) -> Iterator[None]:
     """One writer at a time, on a sibling lock file; released when the file closes."""
