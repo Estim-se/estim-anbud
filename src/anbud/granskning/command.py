@@ -143,7 +143,8 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     print(f"  verifier: {len(result.verifier.outcomes)} flags {verdicts}, ${result.verifier.cost_usd:.2f}")
     ranked = result.finished.ranked
     print(
-        f"  flags: {len(result.finished.items)} after merge; {len(ranked.shown)} shown, {len(ranked.generic)} generic"
+        f"  flags: {len(result.finished.items)} after merge; {len(ranked.shown)} shown, "
+        f"{len(ranked.unpriced)} shown unpriced, {len(ranked.generic)} generic"
     )
     if result.catalog is not None:
         print(f"  catalog: {result.catalog.name}, hourly rate {result.catalog.hourly_rate:g}")

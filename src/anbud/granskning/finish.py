@@ -77,6 +77,7 @@ def finish(
         catalog=catalog,
         materiality_sek=settings.materiality_sek,
         max_shown=settings.max_shown,
+        max_unpriced_shown=settings.max_unpriced_shown,
         cost_usd=cost_usd,
     )
     paths = write_reports(report, out_dir) if out_dir is not None else {}

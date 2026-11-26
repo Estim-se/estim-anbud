@@ -34,6 +34,8 @@ other_trade = 0.5
 [rank]
 max_shown = 15
 max_generic = 10
+# Flags that aren't refuted but that kronor can't price get their own list, so priced flags never push them out.
+max_unpriced_shown = 10
 # Accepted / shown per lens, per company. 1.0 until 40 labels exist for a lens.
 default_action_rate = 1.0
 

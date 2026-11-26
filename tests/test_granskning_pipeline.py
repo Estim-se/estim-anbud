@@ -224,7 +224,7 @@ def test_anbud_run_end_to_end_then_replay_at_zero(
 
     # The terminal shows ids, statuses, counts and costs only.
     assert "Etappvite" not in out and "närvaro" not in out.lower() and "Central A1" not in out
-    assert "verifier: 4 flags" in out and "2 shown, 1 generic" in out
+    assert "verifier: 4 flags" in out and "2 shown, 0 shown unpriced, 1 generic" in out
 
     # The run's manifest and summary record the code it ran with, and the prefix as measured and as estimated.
     manifest = json.loads((RunStore("co-001").run_dir(RUN) / "run.json").read_text())

@@ -43,11 +43,12 @@ VERIFICATION = {
 }
 PLACEMENTS = {
     "shown": "Visas",
+    "shown_unpriced": "Visas, utan prisuppgift",
     "generic": "Generisk",
     "minor": "Mindre (under väsentlighetsgränsen)",
     "refuted": "Motbevisad av verifieringen",
     "covered": "Täcks redan av kalkylen",
-    "capped": "Utanför taket för antal flaggor",
+    "capped": "Utanför taket för sin lista",
     "zero": "Noll i poäng",
 }
 STATUSES = {
@@ -71,7 +72,9 @@ class Report(_Model):
     default_catalog: bool = False
     materiality_sek: float = 20000.0
     max_shown: int = 15
+    max_unpriced_shown: int = 10
     shown: list[Item] = Field(default_factory=list)
+    unpriced: list[Item] = Field(default_factory=list, description="Krav utan prisuppgift: not refuted, not priced")
     generic: list[Item] = Field(default_factory=list)
     logged: list[Item] = Field(default_factory=list)
     coverage: TenderCoverage
@@ -101,12 +104,13 @@ def build_report(
     catalog: Catalog | None,
     materiality_sek: float,
     max_shown: int = 15,
+    max_unpriced_shown: int = 10,
     cost_usd: float | None = None,
     created_at: datetime | None = None,
 ) -> Report:
     names = document_names(corpus)
     sources = {}
-    for item in ranked.shown + ranked.generic + ranked.logged:
+    for item in ranked.shown + ranked.unpriced + ranked.generic + ranked.logged:
         for c in item.flag.citations:
             block = corpus.get(c.block_id)
             sources[c.block_id] = _where(block, names) if block else c.block_id
@@ -119,7 +123,9 @@ def build_report(
         default_catalog=bool(catalog and catalog.default),
         materiality_sek=materiality_sek,
         max_shown=max_shown,
+        max_unpriced_shown=max_unpriced_shown,
         shown=ranked.shown,
+        unpriced=ranked.unpriced,
         generic=ranked.generic,
         logged=ranked.logged,
         coverage=coverage,
@@ -142,6 +148,16 @@ def kronor_text(item: Item) -> str:
     if k is None or not k.priced:
         return "Ej prissatt" + (f" ({k.reason})" if k and k.reason else "")
     return f"{sek(k.low)} – {sek(k.high)}" if k.low != k.high else sek(k.point)
+
+
+def not_refuted(report: Report) -> list[Item]:
+    """Every flag the verifier didn't refute, lists first, in report order: nothing is hidden from the XLSX."""
+    items = report.shown + report.unpriced + report.generic + report.logged
+    return [i for i in items if i.placement != "refuted"]
+
+
+def outside_lists(report: Report) -> list[Item]:
+    return [i for i in report.logged if i.placement != "refuted"]
 
 
 def verdict_text(item: Item) -> str:
@@ -234,6 +250,19 @@ def render_html(report: Report) -> str:
     )
     parts.append(f"<h2>Flaggor ({len(report.shown)})</h2>")
     parts += [_flag_html(n, item, report) for n, item in enumerate(report.shown, 1)] or ["<p>Inga flaggor visas.</p>"]
+    if report.unpriced:
+        parts.append(f"<h2>Krav utan prisuppgift ({len(report.unpriced)})</h2>")
+        parts.append(
+            f'<p class="muted">Fynd som inte motbevisats men som inte kunde prissättas. Högst '
+            f"{report.max_unpriced_shown} visas, ordnade efter verifieringens utfall och sedan allvar.</p>"
+        )
+        parts += [_flag_html(n, item, report) for n, item in enumerate(report.unpriced, 1)]
+    hidden = outside_lists(report)
+    if hidden:
+        parts.append(
+            f'<p class="meta">{len(hidden)} flaggor som inte motbevisats ryms inte i listorna ovan. Alla finns på '
+            "fliken Alla flaggor i XLSX-filen, med var de hamnade och varför.</p>"
+        )
     if report.generic:
         parts.append(f"<h2>Generiska fynd ({len(report.generic)})</h2>")
         parts.append('<p class="muted">Normal omfattning som handlingarna inte nämner. Redovisas separat.</p>')
@@ -388,7 +417,14 @@ def build_workbook(
     wb.remove(wb.active)
     cols = [*columns, *extra_columns]
     keys: list[tuple[str, list[str]]] = []
-    for title, items in (("Flaggor", report.shown), ("Generiska", report.generic), ("Loggade", report.logged)):
+    sheets = (
+        ("Flaggor", report.shown),
+        ("Krav utan prisuppgift", report.unpriced),
+        ("Generiska", report.generic),
+        ("Loggade", report.logged),
+        ("Alla flaggor", not_refuted(report)),
+    )
+    for title, items in sheets:
         _flag_sheet(wb, title, items, report, cols)
         keys.append((title, [c.key for c in cols]))
     ws = wb.create_sheet("Täckning")

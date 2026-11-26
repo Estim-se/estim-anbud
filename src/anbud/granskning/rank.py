@@ -2,8 +2,12 @@
 
 - Score: kronor high (an unpriced flag counts as `unpriced_sek`) x verdict weight x the lens action rate, times the
   covered-by-calc and other-trade adjustments when the verifier says so.
-- At most `max_shown` flags are shown; generic-lens flags are a separate list of at most `max_generic`. Everything
-  else is kept, with where it went and why, for the log and the XLSX.
+- At most `max_shown` priced flags are shown; generic-lens flags are a separate list of at most `max_generic`.
+- Flags kronor can't price, and that the verifier didn't refute, are a list of their own ("Krav utan prisuppgift", at
+  most `max_unpriced_shown`), so a flat unpriced weight never lets priced flags push them out. They are ordered by the
+  verifier's outcome (confirmed, partly, unverified), then by severity: contractual exposure, the electrical scope,
+  how many lenses agree, and the lenses' action rate. No kronor weight enters that order.
+- Everything else is kept, with where it went and why, for the log and the XLSX.
 - Coverage per lens comes only from the lens's tool log, with the corpus used to map ids to documents. It lists what
   was read and what wasn't, and never says "all clear".
 """
@@ -46,11 +50,14 @@ def price_items(
     return out
 
 
-def score(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
+def action_rate(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
     rates = action_rates or {}
-    rate = max((rates.get(lens, settings.default_action_rate) for lens in item.lenses), default=1.0)
-    value = ranking_kronor(item.kronor, settings) * settings.weight(item.verdict.verdict if item.verdict else None)
-    value *= rate
+    return max((rates.get(lens, settings.default_action_rate) for lens in item.lenses), default=1.0)
+
+
+def factor(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
+    """Everything in the score but the kronor: verdict weight x lens action rate x the verifier's adjustments."""
+    value = settings.weight(item.verdict.verdict if item.verdict else None) * action_rate(item, settings, action_rates)
     if item.verdict and item.verdict.covered_by_calc:
         value *= settings.covered_by_calc
     if item.verdict and not item.verdict.electrical_scope:
@@ -58,18 +65,47 @@ def score(item: Item, settings: Settings, action_rates: dict[str, float] | None 
     return value
 
 
+def score(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
+    return ranking_kronor(item.kronor, settings) * factor(item, settings, action_rates)
+
+
 @dataclass
 class Ranked:
     shown: list[Item] = field(default_factory=list)
     generic: list[Item] = field(default_factory=list)
     logged: list[Item] = field(default_factory=list)
+    unpriced: list[Item] = field(default_factory=list)
+
+
+_OUTCOME_ORDER = {"confirmed": 0, "partly": 1}  # anything else (no verdict) is unverified, after both
+
+
+def is_unpriced(item: Item) -> bool:
+    return item.kronor is None or not item.kronor.priced
+
+
+def unpriced_order(item: Item, rate: float = 1.0) -> tuple[int, bool, bool, int, float, str]:
+    """Verifier outcome, then severity. Flags carry no severity field, so severity is what the flag and the verifier
+    say: contractual exposure first, then in the electrical scope, then more lenses agreeing, then the lens's rate."""
+    outcome = _OUTCOME_ORDER.get(item.verdict.verdict if item.verdict else "", 2)
+    other_trade = bool(item.verdict and not item.verdict.electrical_scope)
+    return outcome, not item.flag.contractual_exposure, other_trade, -len(item.lenses), -rate, item.fingerprint
 
 
 def rank(items: list[Item], settings: Settings, action_rates: dict[str, float] | None = None) -> Ranked:
     scored = [i.model_copy(update={"score": score(i, settings, action_rates)}) for i in items]
     scored.sort(key=lambda i: (-i.score, i.fingerprint))
     ranked = Ranked()
+    candidate = {i.fingerprint for i in scored if _unpriced_candidate(i, factor(i, settings, action_rates))}
+    unpriced = [i for i in scored if i.fingerprint in candidate]
+    unpriced.sort(key=lambda i: unpriced_order(i, action_rate(i, settings, action_rates)))
+    for n, item in enumerate(unpriced):
+        placement = "shown_unpriced" if n < settings.max_unpriced_shown else "capped"
+        placed = item.model_copy(update={"placement": placement})
+        (ranked.unpriced if placement == "shown_unpriced" else ranked.logged).append(placed)
     for item in scored:
+        if item.fingerprint in candidate:
+            continue
         if item.verdict and item.verdict.verdict == "refuted":
             placement = "refuted"
         elif item.verdict and item.verdict.covered_by_calc and item.score <= 0:
@@ -85,6 +121,14 @@ def rank(items: list[Item], settings: Settings, action_rates: dict[str, float] |
         placed = item.model_copy(update={"placement": placement})
         {"shown": ranked.shown, "generic": ranked.generic}.get(placement, ranked.logged).append(placed)
     return ranked
+
+
+def _unpriced_candidate(item: Item, weight: float) -> bool:
+    """Unpriced, not refuted, not weighted to zero (covered by the calc), and not a generic-lens flag (those have
+    their own list). The kronor stand-in plays no part."""
+    if not is_unpriced(item) or item.generic or weight <= 0:
+        return False
+    return not (item.verdict and item.verdict.verdict == "refuted")
 
 
 class _Model(BaseModel):

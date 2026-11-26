@@ -21,6 +21,7 @@ class Settings:
     other_trade: float = 0.5
     max_shown: int = 15
     max_generic: int = 10
+    max_unpriced_shown: int = 10
     default_action_rate: float = 1.0
     verifier_top_n: int = 25
     verifier_sampled: int = 3
@@ -50,6 +51,7 @@ def load_settings(directory: Path = CONFIG_DIR) -> Settings:
         other_trade=float(g["adjustments"]["other_trade"]),
         max_shown=int(g["rank"]["max_shown"]),
         max_generic=int(g["rank"]["max_generic"]),
+        max_unpriced_shown=int(g["rank"].get("max_unpriced_shown", 10)),
         default_action_rate=float(g["rank"]["default_action_rate"]),
         verifier_top_n=int(verifier.get("top_n", 25)),
         verifier_sampled=int(verifier.get("sampled_below_cut", 3)),
