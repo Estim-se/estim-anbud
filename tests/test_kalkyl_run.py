@@ -277,16 +277,47 @@ def test_a_budget_stop_leaves_the_rest_unread_and_the_calc_incomplete(tender: Pa
     assert "OFULLSTÄNDIG" in wb["Kalkyl"]["A2"].value
 
 
-def test_a_replay_reproduces_the_calc_from_the_step_cache_at_no_cost(tender: Path) -> None:
+def _writable(*folders: Path) -> list[Path]:
+    return [p for folder in folders for p in (folder, *folder.rglob("*")) if p.lstat().st_mode & 0o222]
+
+
+def _rebuild(run_id: str = "kalkyl-rebuild", base_run: str = "kalkyl-test") -> dict[str, Any]:
+    return run_dev_tender("co-001", "t-0001", sdk=None, catalog_name="synthetic", run_id=run_id, base_run=base_run)
+
+
+def test_a_finished_run_and_its_rebuild_leave_no_writable_entry_in_either_folder(tender: Path) -> None:
+    runs = data_root_of(tender) / "co-001" / "runs"
     paid = _run(fake_sdk())
+    out, record = tender / "kalkyl" / "kalkyl-test", runs / "kalkyl-test"
+    assert paid["frozen"] and paid["freeze_failures"] == 0
+    assert (out / "summary.json").is_file() and (record / "events.jsonl").is_file()
+    assert not _writable(out, record)
+    assert json.loads((out / "summary.json").read_text())["frozen"] is True
+    rebuilt = _rebuild()
+    assert rebuilt["frozen"] and rebuilt["cost_usd"] == 0 and rebuilt["freeze_failures"] == 0
+    assert not _writable(tender / "kalkyl" / "kalkyl-rebuild", runs / "kalkyl-rebuild")
+
+
+def test_a_frozen_run_is_never_resumed_or_replayed_in_place(tender: Path) -> None:
+    from anbud.kalkyl.run import KalkylError
+
+    _run(fake_sdk())
+    with pytest.raises(KalkylError, match="frozen; replay it with --base-run"):
+        _run(None)
+    with pytest.raises(KalkylError, match="frozen; start a new --run-id"):
+        _run(fake_sdk())
+
+
+def test_an_unfinished_run_stays_writable_so_its_run_id_resumes_it(tender: Path) -> None:
+    from anbud.kalkyl.settings import KalkylConfig
+
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    stopped = _run(fake_sdk(), kalkyl=tiny)
+    assert not stopped["frozen"] and "freeze_failures" not in stopped
     out = tender / "kalkyl" / "kalkyl-test"
-    first = (out / "posts.json").read_bytes()
-    events = data_root_of(tender) / "co-001" / "runs" / "kalkyl-test" / "events.jsonl"
-    calls = events.read_text().count('"model_call"')
-    summary = _run(None)
-    assert summary["complete"] and summary["cost_usd"] == paid["cost_usd"]  # the run's spend, unchanged
-    assert events.read_text().count('"model_call"') == calls and '"cache_hit"' in events.read_text()
-    assert (out / "posts.json").read_bytes() == first
+    assert (out / "posts.json").stat().st_mode & 0o200
+    resumed = _run(fake_sdk())
+    assert resumed["complete"] and resumed["frozen"] and not _writable(out)
 
 
 def test_unverified_quotes_are_never_priced(tender: Path) -> None:
@@ -417,6 +448,22 @@ def test_a_rebuild_needs_a_stored_base_run_and_its_own_run_id(tender: Path) -> N
     _run(fake_sdk())
     with pytest.raises(KalkylError, match="own run id"):
         _run(None, base_run="kalkyl-test")
+
+
+def test_the_cli_exits_1_when_a_finished_run_cant_be_made_read_only(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ledger(sh.DEV)
+    from anbud import model_client
+    from anbud.kalkyl import frozen
+
+    run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), catalog_name="synthetic", run_id="kalkyl-base")
+
+    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "")
+    monkeypatch.setattr(frozen, "_chmod", lambda path, mode: ["PermissionError"])
+    args = ["kalkyl", "co-001", "t-0001", "--catalog", "synthetic", "--replay", "--base-run", "kalkyl-base"]
+    assert cli.main([*args, "--run-id", "kalkyl-r1"]) == 1
+    assert "could not be made read-only" in capsys.readouterr().err
 
 
 def test_the_cli_rebuild_replay_needs_no_key_and_exits_4_on_a_miss(
