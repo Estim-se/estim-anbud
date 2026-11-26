@@ -466,6 +466,11 @@ def _freeze(args: argparse.Namespace) -> int:
             last = summary.last_sha256[:12] if summary.last_sha256 else "none"
             print(f"ledger: {summary.lines} lines, last {last}; {len(summary.tenders)} tenders frozen; kinds: {kinds}")
             return 0
+        if args.action == "plan":
+            plan = freeze.register_plan(args.company_id, args.file.expanduser())
+            state = "registered" if plan["new"] else "already registered"
+            print(f"{state}: ledger line {plan['line_number']}, sha256 {plan['sha256'][:12]}")
+            return 0
         if args.action == "relocate":
             moved = freeze.relocate_run(
                 args.company_id,
@@ -674,6 +679,9 @@ def main(argv: list[str] | None = None) -> int:
     fr_run.add_argument("--outputs", type=Path, help="the run's outputs folder, inside the company folder")
     fr_verify = fr_sub.add_parser("verify", help="check the ledger's chain; counts only")
     fr_verify.add_argument("company_id")
+    fr_plan = fr_sub.add_parser("plan", help="pre-register a scoring plan in predictions/<co>/ before a paid exam")
+    fr_plan.add_argument("company_id")
+    fr_plan.add_argument("file", type=Path)
     fr_move = fr_sub.add_parser("relocate", help="record that a frozen run's folders moved; every hash must match")
     fr_move.add_argument("company_id")
     fr_move.add_argument("run_id")

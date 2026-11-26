@@ -40,6 +40,7 @@ from anbud.store import StoreError, canonical, check_run_id, private_dirs
 LEDGER = "ledger.jsonl"
 LOCK = "ledger.lock"
 FREEZE_KINDS = ("freeze", "manual_freeze_v0")
+PLAN_KIND = "preregistration"  # a scoring plan, frozen before any paid exam
 HASHED_REPO_DIRS = ("config", "schemas", "lenses")
 PREP_FILES = ("blocks.jsonl", "documents.json", "summary.json")
 # The names the harness itself gives files and folders in a run; anything else may be a customer's name.
@@ -511,6 +512,57 @@ def relocate_run(
         line = canonical(record)
         _append(ledger, line + b"\n")
     return {**record, "line_number": len(lines) + 1, "line_sha256": _sha(line)}
+
+
+def register_plan(
+    company_id: str, plan_file: Path, *, now: datetime | None = None, root: Path | None = None
+) -> dict[str, Any]:
+    """Pre-register a scoring plan: one chained `preregistration` line in `predictions/<co>/ledger.jsonl` with the
+    file's name and sha256. The plan must be a plain file directly in `predictions/<co>/`, named in lower case. The
+    same bytes registered again are a no-op; changed bytes are a new version with a line of their own. Returns the
+    record with its `line_number` and `new`."""
+    _company(company_id)
+    folder = paths.predictions_dir(company_id, root)
+    if plan_file.is_symlink() or not plan_file.is_file():
+        raise FreezeError("the scoring plan isn't a regular file")
+    resolved = plan_file.resolve()
+    if resolved.parent != folder.resolve() or folder.is_symlink():
+        raise FreezeError("the scoring plan must be a file directly in predictions/<co>/")
+    if not _HARNESS_NAME.fullmatch(resolved.name):
+        raise FreezeError("name the scoring plan in lower-case letters, digits, dots and dashes")
+    sha = _file_sha(resolved)
+    ledger = ledger_file(company_id, False, root)
+    with _locked(ledger, root):
+        lines, records = _read(ledger, root)
+        plans = [(n, r) for n, r in enumerate(records, start=1) if r.get("kind") == PLAN_KIND]
+        if plans and plans[-1][1].get("sha256") == sha and plans[-1][1].get("file") == resolved.name:
+            return {**plans[-1][1], "line_number": plans[-1][0], "new": False}
+        record: dict[str, Any] = {
+            "v": 1,
+            "kind": PLAN_KIND,
+            "company": company_id,
+            "file": resolved.name,
+            "sha256": sha,
+            "registered_at": (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds"),
+        }
+        if lines:
+            record["prev"] = _sha(lines[-1])
+        _append(ledger, canonical(record) + b"\n")
+    return {**record, "line_number": len(lines) + 1, "new": True}
+
+
+def current_plan(company_id: str, root: Path | None = None) -> dict[str, Any] | None:
+    """The latest registered scoring plan, with its `line_number`, or None when none is registered. Raises when its
+    file no longer holds the registered bytes: a changed plan is registered again before it counts."""
+    _, records = _read(ledger_file(_company(company_id), False, root), root)
+    plans = [(n, r) for n, r in enumerate(records, start=1) if r.get("kind") == PLAN_KIND]
+    if not plans:
+        return None
+    number, record = plans[-1]
+    path = paths.predictions_dir(company_id, root) / str(record.get("file"))
+    if path.is_symlink() or not path.is_file() or _file_sha(path) != record.get("sha256"):
+        raise FreezeError(f"the scoring plan registered at ledger line {number} changed or is gone; register it again")
+    return {**record, "line_number": number}
 
 
 def _read_only(files: dict[str, Path]) -> list[str]:

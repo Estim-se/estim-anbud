@@ -39,6 +39,7 @@ def tender_zip(deadline: str) -> bytes:
         zf.writestr("Frågor och svar/FoS 1.txt", "Fråga: om Fiktivbolaget. Svar: ja.")
         zf.writestr("Kompletteringar/Ändring 1.txt", "Ändring: 40 uttag i stället för 30.")
         zf.writestr("Tilldelningsbeslut.txt", "Tilldelning till Fiktivbolaget.")
+        zf.writestr("Ritningar/E-10.dwg", b"AC1027" + bytes(64))  # prep skips drawings and counts them
     return buf.getvalue()
 
 
@@ -114,6 +115,7 @@ def test_a_dry_exam_quarantines_prepares_estimates_and_prints_aggregates_only(
 
     # Prep, the estimate and the dry runs.
     assert report.prepared == 3 and report.prep_failed == 0 and report.pages > 0
+    assert report.skipped_by_type == {"dwg": 2} and "skipped by type: dwg 2" in printed
     assert set(report.estimate_usd) == {"granskning", "kalkyl", "baseline"} and report.estimate_unknown == 0
     assert 0 < report.estimate_total <= report.worst_case_usd
     assert report.baseline_runs == 5 and report.dry_runs_ok == {"baseline": 5}
@@ -184,8 +186,43 @@ class FakeEngines(exam.Engines):
         return self._run("baseline", variant, vroot, company_id, tender_id, run_id)
 
 
+def register(data_root: Path, text: str = "Scoring plan v1.\n") -> dict:
+    plan = data_root / "predictions" / "co-002" / "scoring-plan-v1.md"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(text)
+    return freeze.register_plan("co-002", plan)
+
+
+def test_a_scoring_plan_is_registered_once_per_version_and_must_stay_unchanged(data_root: Path) -> None:
+    assert freeze.current_plan("co-002") is None
+    first = register(data_root)
+    assert first["new"] and first["line_number"] == 1
+    assert register(data_root)["new"] is False  # the same bytes: a no-op
+    assert freeze.current_plan("co-002")["sha256"] == first["sha256"]
+    (data_root / "predictions" / "co-002" / "scoring-plan-v1.md").write_text("Edited.\n")
+    with pytest.raises(freeze.FreezeError, match="changed or is gone"):
+        freeze.current_plan("co-002")
+    second = register(data_root, "Scoring plan v1, edited.\n")
+    assert second["new"] and second["line_number"] == 2 and freeze.current_plan("co-002")["line_number"] == 2
+    assert freeze.verify(freeze.ledger_file("co-002")).kinds == {"preregistration": 2}
+    elsewhere = data_root / "plan.md"
+    elsewhere.write_text("x")
+    with pytest.raises(freeze.FreezeError, match="directly in predictions"):
+        freeze.register_plan("co-002", elsewhere)
+    named = data_root / "predictions" / "co-002" / "Plan Fiktivbolaget.md"
+    named.write_text("x")
+    with pytest.raises(freeze.FreezeError, match="lower-case"):
+        freeze.register_plan("co-002", named)
+
+
 def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget(data_root: Path) -> None:
     sealed_store(data_root)
+    with pytest.raises(exam.ExamError, match="scoring plan"):
+        exam.run_exam(
+            "co-002", "prospective", paid=True, budget_usd=40.0, runner=FakeEngines({}), now=NOW, say=lambda _: None
+        )
+    assert not (data_root / "sealed").exists()  # refused before anything was unpacked
+    plan = register(data_root)
     with pytest.raises(exam.ExamError, match="budget"):
         exam.run_exam(
             "co-002", "prospective", paid=True, budget_usd=1.0, runner=FakeEngines({}), now=NOW, say=lambda _: None
@@ -212,9 +249,11 @@ def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget
     assert len(records) == report.frozen and all(r["kind"] == "freeze" for r in records)
     for r in records:
         assert r["exam"]["variant"] in exam.VARIANTS and r["exam"]["kind"] == "prospective"
+        assert r["exam"]["plan"] == {"file": "scoring-plan-v1.md", "sha256": plan["sha256"], "line": 1}
         assert r["exam"]["variant"] == "kalkyl" or r["exam"]["engine"] != "kalkyl"
         assert r["input_manifest_sha256"]  # hashed from the input the run read, not a dev folder
     after = {r["tender"]: r["exam"]["after_deadline"] for r in records}
     assert after.get("co-002/t-0003") is True and after.get("co-002/t-0002", False) is False
-    assert not freeze.ledger_file("co-002").exists()  # nothing in the dev ledger
+    plans = freeze.verify(freeze.ledger_file("co-002")).kinds
+    assert plans == {"preregistration": 1}  # the plan only: no run is frozen in the plain ledger
     assert "frozen runs came after their tender's deadline" in "\n".join(lines)
