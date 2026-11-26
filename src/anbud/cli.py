@@ -70,9 +70,16 @@ def _prep(args: argparse.Namespace) -> int:
 
 def _intake(args: argparse.Namespace) -> int:
     from anbud.evals.split_heldout import SplitError
-    from anbud.intake import IntakeError, intake
+    from anbud.intake import IntakeError, intake, survey, training_cutoff
 
     try:
+        if args.dry_run:
+            result, still_open = survey(args.incoming.expanduser())
+            print(f"anbud intake (dry run, nothing written or split): {result.notices.tenders} zips")
+            for line in intake_report(result, training_cutoff())[2:]:
+                print(line)
+            print(f"  deadlines still open: {still_open}")
+            return 0
         result = intake(
             args.company_id, args.incoming.expanduser(), new_ledger=args.new_ledger, company_name=args.company_name
         )
@@ -80,7 +87,7 @@ def _intake(args: argparse.Namespace) -> int:
         message = str(exc) if isinstance(exc, IntakeError | SplitError) else type(exc).__name__
         print(f"anbud intake: stopped: {message}", file=sys.stderr)
         return REFUSED
-    for line in intake_report(result):
+    for line in intake_report(result, training_cutoff() if result.notices.tenders else None):
         print(line)
     if result.failed:
         print(f"anbud intake: {len(result.failed)} not placed: {'; '.join(result.failed)}", file=sys.stderr)
@@ -89,15 +96,28 @@ def _intake(args: argparse.Namespace) -> int:
     return 0
 
 
-def intake_report(result: Any) -> list[str]:
-    """Counts only."""
-    u = result.unpack
-    return [
+def intake_report(result: Any, cutoff: Any = None) -> list[str]:
+    """Counts only. The notice lines appear for a blind intake of zips."""
+    u, n = result.unpack, result.notices
+    lines = [
         f"anbud intake: {result.dev} dev, {result.heldout} held-out, {result.prospective} prospective, "
         f"{result.burned} burned, {result.already_in} already taken in",
         f"  zips: {u.archives_unpacked} unpacked, {u.archives_kept} kept as delivered; {u.entries} entries, "
         f"{u.entries_skipped} skipped (links, escaping paths, hidden or system files)",
     ]
+    if n.tenders:
+        found = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in n.found.items())
+        lines += [
+            f"  notices: {n.tenders} read, {n.without_page} without a notice page; found {found}",
+            f"  split keys: {n.no_entity_key} without a buyer key, {n.no_key} without any key (split alone)",
+            f"  training cutoff {cutoff}: {n.before_cutoff} published before, {n.after_cutoff} after, "
+            f"{n.unknown_date} unknown; {n.framework} framework agreements",
+        ]
+        held = ", ".join(f"{k} {v}" for k, v in sorted(result.held.items())) or "none"
+        lines.append(
+            f"  held as answer keys: {sum(result.held.values())} files in {result.tenders_with_held} tenders ({held})"
+        )
+    return lines
 
 
 def _stop(args: argparse.Namespace) -> int:
@@ -167,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
     intake.add_argument("incoming", type=Path, help="~/estim-anbud-data/incoming/<company>/ with metadata.csv")
     intake.add_argument("--new-ledger", action="store_true", help="the company's first intake")
     intake.add_argument("--company-name", help="the company's name in the local registry, on its first intake")
+    intake.add_argument(
+        "--dry-run", action="store_true", help="zips only: what the notices give, counted; nothing written or split"
+    )
     stop = sub.add_parser("stop", help="stop a run before its next model call, or every run with --all")
     stop.add_argument("company_id", nargs="?")
     stop.add_argument("run_id", nargs="?")

@@ -461,3 +461,14 @@ def test_registry_round_trips_control_characters_and_keeps_other_tables() -> Non
     assert tomllib.loads(dump_registry(registry)) == registry
     with pytest.raises(IntakeError):
         dump_registry({"companies": {"co-001": 1}})
+
+
+def test_no_test_can_reach_the_real_data_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANBUD_DATA_ROOT", raising=False)
+    with pytest.raises(paths.RealDataInTest):
+        paths.data_root()
+    monkeypatch.setenv("ANBUD_DATA_ROOT", str(Path.home() / "estim-anbud-data" / "co-002"))
+    with pytest.raises(paths.RealDataInTest):
+        paths.data_root()
+    with pytest.raises(paths.RealDataInTest):
+        intake("co-002", Path("/nonexistent"))
