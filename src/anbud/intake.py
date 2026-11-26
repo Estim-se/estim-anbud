@@ -52,12 +52,12 @@ import unicodedata
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 from anbud import notice as notices
 from anbud import paths
-from anbud.answer_terms import classify, classify_path, fold
+from anbud.answer_terms import classify_path, fold
 from anbud.evals import split_heldout as sh
 from anbud.prep.sources import is_ignored
 from anbud.store import canonical, private_dirs
@@ -67,6 +67,12 @@ MAX_UNZIPPED = 2 * 1024**3  # per tender, across every nested zip
 MAX_ENTRIES = 20_000  # per tender, across every nested zip
 MAX_DEPTH = 5  # zips inside zips
 MAX_NAME_BYTES = 200  # one path component, so a long name in a zip can't fail the write
+# A deadline that passed this recently may have been moved by an amendment or an answer intake can't read: with such
+# files in the delivery, the tender is sealed as prospective rather than opened.
+DEADLINE_MOVE_DAYS = 60
+# Archives left in a dev inbox (one that couldn't be unpacked, or a kind intake doesn't unpack) are held with the
+# answers: their answer keys can't be checked.
+ARCHIVE_SUFFIXES = frozenset(".zip .zipx .rar .7z .gz .tgz .tar .bz2 .xz .cab .arj .lzh .lha .z .001".split())
 
 
 class IntakeError(RuntimeError):
@@ -290,16 +296,6 @@ class _Keep(Exception):
     """This archive stays in the inbox as delivered."""
 
 
-def _entry_name(info: zipfile.ZipInfo) -> str:
-    """Zips written without the UTF-8 flag are read as cp437. If the bytes are really UTF-8 (a Mac without the
-    flag), read them as UTF-8; otherwise cp437, which spells å, ä and ö like the Swedish Windows code page does."""
-    name = info.filename
-    if not info.flag_bits & 0x800:
-        with contextlib.suppress(UnicodeEncodeError, UnicodeDecodeError):
-            name = name.encode("cp437").decode("utf-8")
-    return nfc(name)
-
-
 def _safe_unzip(archive: Path, target: Path, stats: UnpackStats) -> list[Path]:
     """Unpack into `target` (which must not exist) and return the files written. Raises _Keep, after removing what
     it wrote, when the archive can't be unpacked whole."""
@@ -314,7 +310,7 @@ def _safe_unzip(archive: Path, target: Path, stats: UnpackStats) -> list[Path]:
             private_dirs(target)
             skipped = 0
             for info in infos:
-                name = PurePosixPath(_entry_name(info).replace("\\", "/"))
+                name = PurePosixPath(notices.entry_name(info).replace("\\", "/"))
                 parts = tuple(p for p in name.parts if p not in ("", "."))
                 link = (info.external_attr >> 16) & 0o170000 == 0o120000
                 if not parts or name.is_absolute() or ".." in parts or ":" in parts[0] or link or is_ignored(parts):
@@ -329,9 +325,9 @@ def _safe_unzip(archive: Path, target: Path, stats: UnpackStats) -> list[Path]:
             stats.entries += len(infos)
             stats.bytes += sum(i.file_size for i in infos)
             stats.entries_skipped += skipped
-    except (_Keep, zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, RuntimeError, EOFError, OSError):
+    except (_Keep, *notices.ZIP_ERRORS):
         # RuntimeError: encrypted entries; NotImplementedError: Deflate64 and other methods zipfile can't read;
-        # OSError: a damaged stream (zlib) or a name the disk refuses. The message may name a file, so it is dropped.
+        # zlib.error: a damaged stream; OSError: a name the disk refuses. The message may name a file: dropped.
         if target.exists():
             shutil.rmtree(target)
         raise _Keep from None
@@ -382,6 +378,7 @@ class Delivery:
     tender_id: str = ""
     notice: notices.Notice | None = None  # zips only
     entity: bool = False  # the notice gave an entity key (org number or buyer)
+    sealed_because: str | None = None  # zips only: "open", "no deadline" or "deadline may have moved"
 
     @property
     def is_zip(self) -> bool:
@@ -401,9 +398,17 @@ class NoticeStats:
     after_cutoff: int = 0
     unknown_date: int = 0
     framework: int = 0
+    open: int = 0  # the deadline is still ahead: prospective
+    no_deadline: int = 0  # no deadline read: prospective, never dev
+    may_have_moved: int = 0  # passed lately, with amendments or answers intake can't read: prospective
 
-    def add(self, notice: notices.Notice, keys: tuple[str, ...], entity: bool, cutoff: date) -> None:
+    def add(
+        self, notice: notices.Notice, keys: tuple[str, ...], entity: bool, cutoff: date, sealed_because: str | None
+    ) -> None:
         self.tenders += 1
+        self.open += sealed_because == "open"
+        self.no_deadline += sealed_because == "no deadline"
+        self.may_have_moved += sealed_because == "deadline may have moved"
         self.without_page += notice.pages == 0
         for name, ok in notice.found().items():
             self.found[name] = self.found.get(name, 0) + ok
@@ -430,6 +435,7 @@ class Result:
     notices: NoticeStats = field(default_factory=NoticeStats)
     held: dict[str, int] = field(default_factory=dict)  # files held back as answer keys, by kind (dev tenders)
     tenders_with_held: int = 0
+    tenders_mostly_held: int = 0  # more than half of a dev tender's files held: worth a look once it is frozen
     rows_without_folder: int = 0  # metadata.csv rows that name neither a folder here nor a registered tender
 
     def counts(self) -> dict[str, int]:
@@ -457,25 +463,37 @@ def _recover(company_id: str, base: Path, root: Path | None) -> None:
     are looked at."""
     dev = paths.company_dir(company_id, root) / "dev"
     heldout = base / "heldout" / company_id
-    for staging in sorted([*_glob(dev, ".staging-t-*"), *_glob(heldout, ".staging-t-*")]):
-        tender_id = staging.name.removeprefix(".staging-")
-        originals = staging / "originals"
-        delivered = sorted(originals.iterdir()) if originals.is_dir() else []
-        if delivered:
-            record = staging / "source.path"
-            back = Path(record.read_text(encoding="utf-8")) if record.is_file() else None
-            if len(delivered) != 1 or back is None or back.exists() or not back.parent.is_dir():
-                raise IntakeError(f"{tender_id} has an interrupted placement that needs a person; nothing was moved")
-            os.rename(delivered[0], back)  # to the incoming folder it came from, whichever this run was given
-        shutil.rmtree(staging)
     answers = base / "answers" / company_id
-    for staging in _glob(answers, ".staging-t-*"):
+    stagings = [*_glob(dev, ".staging-t-*"), *_glob(heldout, ".staging-t-*"), *_glob(answers, ".staging-t-*")]
+    for staging in sorted(stagings):
+        _restore(staging, staging.name.removeprefix(".staging-"))
         shutil.rmtree(staging)
-    for held in _glob(answers, "t-*/intake"):  # held answer keys of a tender that never got placed
-        tender_id = held.parent.name
-        if paths.TENDER_ID.fullmatch(tender_id) and not _placed(base, company_id, tender_id, root):
-            shutil.rmtree(held)
-            (held.parent / "intake.sha256").unlink(missing_ok=True)
+    for folder in _glob(answers, "t-*"):  # what intake put in answers/ for a tender that never got placed
+        tender_id = folder.name
+        if not paths.TENDER_ID.fullmatch(tender_id) or _placed(base, company_id, tender_id, root):
+            continue
+        _restore(folder, tender_id)
+        for name in ("intake", "originals"):
+            if (folder / name).is_dir() and not (folder / name).is_symlink():
+                shutil.rmtree(folder / name)
+        for name in ("intake.sha256", "source.path"):
+            (folder / name).unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            folder.rmdir()  # only if nothing else is there
+
+
+def _restore(folder: Path, tender_id: str) -> None:
+    """Put a delivery an interrupted placement left in `folder/originals/` back where `folder/source.path` says it
+    came from: the incoming folder this or an earlier run was given."""
+    originals = folder / "originals"
+    delivered = sorted(originals.iterdir()) if originals.is_dir() and not originals.is_symlink() else []
+    if not delivered:
+        return
+    record = folder / "source.path"
+    back = Path(record.read_text(encoding="utf-8")) if record.is_file() else None
+    if len(delivered) != 1 or back is None or back.exists() or not back.parent.is_dir():
+        raise IntakeError(f"{tender_id} has an interrupted placement that needs a person; nothing was moved")
+    os.rename(delivered[0], back)
 
 
 def _glob(folder: Path, pattern: str) -> list[Path]:
@@ -556,6 +574,7 @@ def _intake_record(delivery: Delivery, held: dict[str, int] | None, stats: Unpac
         notice = delivery.notice.record()
         notice.pop("listed")  # the answer-key documents the notice names stay with the answers
         notice.pop("answer_pages")
+        notice.pop("section_pages")
         record["notice"] = notice
         record["found"] = delivery.notice.found()
     if held is not None:
@@ -567,93 +586,97 @@ def _intake_record(delivery: Delivery, held: dict[str, int] | None, stats: Unpac
 
 def _hold_answers(inbox: Path, dest: Path, notice: notices.Notice) -> tuple[dict[str, int], list[str]]:
     """Move the answer-key files out of a dev tender's inbox into `dest`, stored by hash. Returns counts by kind and
-    the manifest lines (`<sha256>  <kind>  <path in the delivery>`), which stay with the answers."""
+    the manifest lines (`<sha256>  <kind>  <path in the delivery>`), which stay with the answers.
+
+    Held: files whose name or folder says so, files the notice lists under an answer-key heading, pages titled so
+    (unless they carry the notice's labels), and archives intake couldn't unpack, since what is inside them can't be
+    checked. A notice page with answer-key sections is held whole and a copy without those sections takes its place.
+    """
     counts: dict[str, int] = {}
     lines: list[str] = []
     for path, parts in list(_walk(inbox)):
-        kind = classify_path(parts)
+        suffix = path.suffix.casefold()
+        kind: str | None = classify_path(parts)
+        replacement: str | None = None
         if kind is None and notices.listed_stem(parts[-1]) in notice.listed:
             kind = "listed"  # the notice lists it under a questions, amendments or award heading
-        if kind is None and path.suffix.casefold() in notices.NOTICE_SUFFIXES:
-            page = (
-                notices.read_page(path.read_bytes(), path.name)
-                if path.stat().st_size <= notices.MAX_NOTICE_BYTES
-                else None
-            )
+        if kind is None and suffix in ARCHIVE_SUFFIXES:
+            kind = "archive"
+        if kind is None and suffix in notices.NOTICE_SUFFIXES and path.stat().st_size <= notices.MAX_NOTICE_BYTES:
+            page = notices.read_page(path.read_bytes(), path.name)
             if page is not None:
-                title = " ".join("".join(page[0].title).split())
-                heading = page[0].first_heading or ""
-                kind = classify(title) or classify(heading) or None
+                kind = notices.page_kind(parts, page)
+                if kind is None and page[0].answer_lines:
+                    kind, replacement = "section", notices.without_answer_sections(page[0])
         if kind is None:
             continue
         sha = _sha256_file(path)
         private_dirs(dest)
-        stored = dest / f"{sha}{path.suffix.casefold()[:16]}"
+        stored = dest / f"{sha}{suffix[:16]}"
         if stored.exists():
             path.unlink()
         else:
             os.rename(path, stored)
+        if replacement is not None:
+            _write_private(path, replacement)
         counts[kind] = counts.get(kind, 0) + 1
         lines.append(f"{sha}  {kind}  {'/'.join(parts)}")
     return counts, lines
 
 
 def _place_dev_zip(delivery: Delivery, company_id: str, base: Path, root: Path | None, result: Result) -> None:
+    """A public tender split to dev: unpacked into a staging folder, its answer keys held, then committed in three
+    renames. The delivery leaves the incoming folder for `answers/<co>/<t>/originals/` (it holds the answer keys, so
+    it never sits in the dev folder), the answers appear, and the tender appears last, so it never exists while an
+    answer key is anywhere in it. Any error puts the delivery back; a crash leaves it recorded for `_recover`."""
     tender_id = delivery.tender_id
     target = paths.dev_tender_dir(company_id, tender_id, root)
     staging = _staging(company_id, tender_id, root)
     answers = paths.answers_dir(company_id, tender_id, root)
     answers_staging = answers.with_name(f".staging-{tender_id}")
-    held_final = answers / "intake"
-    if target.exists() or staging.exists() or held_final.exists() or answers_staging.exists():
+    if target.exists() or staging.exists() or answers.exists() or answers_staging.exists():
         raise IntakeError(f"{tender_id} already has a dev or answers folder; nothing was moved for it")
-    moved = staging / "originals" / f"{delivery.fingerprint}.zip"
+    original_staged = answers_staging / "originals" / f"{delivery.fingerprint}.zip"
+    original_final = answers / "originals" / f"{delivery.fingerprint}.zip"
     stats = UnpackStats()
-    committed_answers = False
+    where: Path | None = None  # where the delivery is, once it has left the incoming folder
     try:
         private_dirs(staging)
         inbox = staging / "inbox"
         try:
             _safe_unzip(delivery.path, inbox, stats)
             stats.archives_unpacked += 1
+            unpack_all(inbox, stats)
         except _Keep:
-            stats.archives_kept += 1  # kept whole: prep lists it as an archive it can't read
+            stats.archives_kept += 1  # the delivery can't be unpacked: the inbox stays empty, the zip goes to answers
             private_dirs(inbox)
-            shutil.copyfile(delivery.path, inbox / "delivery.zip")
-        unpack_all(inbox, stats)
         assert delivery.notice is not None
+        delivered = sum(1 for _ in _walk(inbox))
         held, lines = _hold_answers(inbox, answers_staging / "intake", delivery.notice)
         _write_private(staging / "inbox.sha256", _manifest(inbox))
         _write_private(staging / "intake.json", _intake_record(delivery, held, stats))
+        private_dirs(original_staged.parent)
         if lines:
             _write_private(answers_staging / "intake.sha256", "\n".join(lines) + "\n")
-        private_dirs(moved.parent)
-        _write_private(staging / "source.path", str(delivery.path))
-        if lines:  # the held files go to answers/ first, so the tender never appears with them missing elsewhere
-            private_dirs(answers)
-            os.rename(answers_staging / "intake", held_final)
-            os.rename(answers_staging / "intake.sha256", answers / "intake.sha256")
-            answers_staging.rmdir()
-            committed_answers = True
-        os.rename(delivery.path, moved)
-        try:
-            os.rename(staging, target)
-        except BaseException:
-            os.rename(moved, delivery.path)
-            raise
+        _write_private(answers_staging / "source.path", str(delivery.path))  # where _recover puts it back
+        private_dirs(answers.parent)
+        os.rename(delivery.path, original_staged)
+        where = original_staged
+        os.rename(answers_staging, answers)
+        where = original_final
+        os.rename(staging, target)
     except BaseException:
-        if moved.exists() or moved.is_symlink():
-            raise  # the delivery is still inside: the next run's _recover puts it back
-        if committed_answers:
-            shutil.rmtree(held_final, ignore_errors=True)
-            (answers / "intake.sha256").unlink(missing_ok=True)
-        for folder in (staging, answers_staging):
-            if folder.exists():
-                shutil.rmtree(folder)
+        if where is not None:
+            os.rename(where, delivery.path)  # if this fails too, the delivery stays recorded for the next _recover
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(answers_staging, ignore_errors=True)
+        if where == original_final:
+            shutil.rmtree(answers, ignore_errors=True)
         raise
     result.add_unpack(stats)
     if held:
         result.tenders_with_held += 1
+        result.tenders_mostly_held += sum(held.values()) * 2 > delivered
         for kind, n in held.items():
             result.held[kind] = result.held.get(kind, 0) + n
 
@@ -712,12 +735,47 @@ def _quiet_keys(client: str = "", family: str = "") -> tuple[str, ...]:
         return ()  # a placeholder-like value: no key from it, counted as missing
 
 
-def _is_open(deadline: datetime | None, now: datetime) -> bool:
-    if deadline is None:
-        return False
+def _is_open(deadline: datetime, now: datetime) -> bool:
     if (deadline.hour, deadline.minute) == (0, 0):  # a date alone: open all that day
         return deadline.date() >= now.date()
     return deadline >= now
+
+
+def _sealed_because(notice: notices.Notice, names: list[tuple[str, ...]], now: datetime) -> str | None:
+    """Why a zip must be prospective, or None. Fails closed: a tender is opened only when its deadline was read and
+    has passed, and nothing in the delivery could have moved it since."""
+    if notice.deadline is None:
+        return "no deadline"
+    if _is_open(notice.deadline, now):
+        return "open"
+    if now - notice.deadline < timedelta(days=DEADLINE_MOVE_DAYS):
+        kinds = {_member_kind(parts, notice) for parts in names}
+        if "award" not in kinds and kinds & {"amendment", "qa", "listed", "page", "section", "archive"}:
+            return "deadline may have moved"  # an amendment or answer intake can't read may have extended it
+    return None
+
+
+def _member_kind(parts: tuple[str, ...], notice: notices.Notice) -> str | None:
+    """How a member of a delivered zip would be held in a dev inbox, by name and by what the notice says of it."""
+    joined = "/".join(parts)
+    kind = classify_path(parts)
+    if kind is None and notices.listed_stem(parts[-1]) in notice.listed:
+        kind = "listed"
+    if kind is None and joined in notice.answer_pages:
+        kind = "page"
+    if kind is None and joined in notice.section_pages:
+        kind = "section"
+    if kind is None and PurePosixPath(parts[-1]).suffix.casefold() in ARCHIVE_SUFFIXES:
+        kind = "archive"
+    return kind
+
+
+def _zip_names(path: Path) -> list[tuple[str, ...]]:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return list(_member_names(zf, (), 1))
+    except notices.ZIP_ERRORS:
+        return []
 
 
 def _zip_deliveries(incoming: Path, now: datetime) -> list[Delivery]:
@@ -727,64 +785,64 @@ def _zip_deliveries(incoming: Path, now: datetime) -> list[Delivery]:
         raise IntakeError(
             f"{len(others)} item(s) in the incoming folder are not zip files; a blind intake takes one zip per tender"
         )
+    found = [(path, notices.from_zip(path)) for path in sorted(entries)]
+    numbers = {n.org_number for _, n in found}
+    if len(found) >= 3 and len(numbers) == 1 and None not in numbers:
+        for _, n in found:
+            n.org_number = None  # on every notice of a batch: the platform's number, not a buyer's
     deliveries = []
-    for path in sorted(entries):
-        notice = notices.from_zip(path)
+    for path, notice in found:
         keys, entity = notice_keys(notice)
-        prospective = _is_open(notice.deadline, now)
-        deliveries.append(Delivery(nfc(path.name), path, _sha256_file(path), keys, prospective, notice=notice))
-        deliveries[-1].entity = entity
+        because = _sealed_because(notice, _zip_names(path), now)
+        delivery = Delivery(nfc(path.name), path, _sha256_file(path), keys, because is not None, notice=notice)
+        delivery.entity, delivery.sealed_because = entity, because
+        deliveries.append(delivery)
     return deliveries
 
 
 def _member_names(zf: zipfile.ZipFile, prefix: tuple[str, ...], depth: int) -> Iterator[tuple[str, ...]]:
+    """Member paths as intake unpacks them, nested zips opened as folders. A zip that can't be opened is a member."""
     for info in zf.infolist():
-        if info.is_dir():
+        if info.is_dir() or info.filename.endswith("\\"):
             continue
-        parts = (*prefix, *(p for p in _entry_name(info).replace("\\", "/").split("/") if p not in ("", ".")))
-        if is_ignored(parts):
+        parts = notices.member_parts(info, prefix)
+        if len(parts) == len(prefix) or is_ignored(parts):
             continue
-        if PurePosixPath(info.filename).suffix.casefold() == ".zip" and depth < MAX_DEPTH:
+        if PurePosixPath(parts[-1]).suffix.casefold() == ".zip" and depth < MAX_DEPTH:
             try:
                 if info.file_size <= notices.MAX_INNER_ZIP_BYTES and not info.flag_bits & 0x1:
                     with zipfile.ZipFile(io.BytesIO(zf.read(info))) as inner:
-                        yield from _member_names(inner, parts[:-1] + (PurePosixPath(parts[-1]).stem,), depth + 1)
+                        yield from _member_names(inner, notices.nested_prefix(parts), depth + 1)
                         continue
-            except (zipfile.BadZipFile, NotImplementedError, RuntimeError, EOFError, OSError, ValueError):
+            except notices.ZIP_ERRORS:
                 pass
         yield parts
 
 
-def survey(incoming: Path, now: datetime | None = None) -> tuple[Result, int]:
+def survey(incoming: Path, now: datetime | None = None, root: Path | None = None) -> tuple[Result, int]:
     """`anbud intake --dry-run` for zips: what the notices give, and how many files would be held as answer keys,
     over every zip. Nothing is written and nothing is split, so no tender's status is known or shown. Also returns
     how many deadlines are still open."""
     incoming = incoming.expanduser()
     if incoming.is_symlink() or not incoming.is_dir() or (incoming / "metadata.csv").exists():
         raise IntakeError("a dry run takes an incoming folder of zips, with no metadata.csv")
+    if paths.is_sealed_path(incoming, root):
+        raise IntakeError("the incoming folder is inside held-out or sealed storage")
     result = Result()
     cutoff = training_cutoff()
     deliveries = _zip_deliveries(incoming, now or datetime.now())
     for d in deliveries:
         assert d.notice is not None
-        result.notices.add(d.notice, d.keys, d.entity, cutoff)
+        result.notices.add(d.notice, d.keys, d.entity, cutoff, d.sealed_because)
         held: dict[str, int] = {}
-        try:
-            with zipfile.ZipFile(d.path) as zf:
-                names = list(_member_names(zf, (), 1))
-        except (zipfile.BadZipFile, NotImplementedError, RuntimeError, EOFError, OSError, ValueError):
-            names = []
-        for parts in names:
-            kind = classify_path(parts) or ("listed" if notices.listed_stem(parts[-1]) in d.notice.listed else None)
-            if kind is None and "/".join(parts) in d.notice.answer_pages:
-                kind = "page"
-            if kind:
+        for parts in _zip_names(d.path):
+            if kind := _member_kind(parts, d.notice):
                 held[kind] = held.get(kind, 0) + 1
         if held:
             result.tenders_with_held += 1
             for kind, n in held.items():
                 result.held[kind] = result.held.get(kind, 0) + n
-    return result, sum(d.prospective for d in deliveries)
+    return result, result.notices.open
 
 
 def training_cutoff() -> date:
@@ -838,7 +896,7 @@ def intake(
                     # Prospective is decided at the first split; a deadline that has passed since changes nothing.
                     if d.tender_id in state.status:
                         d.prospective = state.is_prospective(d.tender_id)
-                    result.notices.add(d.notice, d.keys, d.entity, cutoff)
+                    result.notices.add(d.notice, d.keys, d.entity, cutoff, d.sealed_because)
             fresh = [d for d in todo if not d.tender_id]
             for delivery, tender_id in zip(fresh, _next_ids(set(tenders) | set(state.status), len(fresh)), strict=True):
                 delivery.tender_id = tender_id

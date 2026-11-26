@@ -74,11 +74,10 @@ def _intake(args: argparse.Namespace) -> int:
 
     try:
         if args.dry_run:
-            result, still_open = survey(args.incoming.expanduser())
+            result, _ = survey(args.incoming.expanduser())
             print(f"anbud intake (dry run, nothing written or split): {result.notices.tenders} zips")
             for line in intake_report(result, training_cutoff())[2:]:
                 print(line)
-            print(f"  deadlines still open: {still_open}")
             return 0
         result = intake(
             args.company_id, args.incoming.expanduser(), new_ledger=args.new_ledger, company_name=args.company_name
@@ -117,11 +116,15 @@ def intake_report(result: Any, cutoff: Any = None) -> list[str]:
             f"  split keys: {n.no_entity_key} without a buyer key, {n.no_key} without any key (split alone)",
             f"  training cutoff {cutoff}: {n.before_cutoff} published before, {n.after_cutoff} after, "
             f"{n.unknown_date} unknown; {n.framework} framework agreements",
+            f"  prospective by deadline: {n.open} still open, {n.no_deadline} with no deadline read, "
+            f"{n.may_have_moved} passed lately with amendments or answers that may have moved it",
         ]
         held = ", ".join(f"{k} {v}" for k, v in sorted(result.held.items())) or "none"
         lines.append(
             f"  held as answer keys: {sum(result.held.values())} files in {result.tenders_with_held} tenders ({held})"
         )
+        if result.tenders_mostly_held:
+            lines.append(f"  {result.tenders_mostly_held} dev tenders had more than half their files held")
     return lines
 
 

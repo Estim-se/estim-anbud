@@ -42,12 +42,13 @@ def zip_bytes(entries: dict[str, bytes | str]) -> bytes:
 
 
 # Six invented tenders. Buyers differ, so the seeded hash spreads them; "Påhittade" buys twice, so those two are one
-# group. One deadline is still open (prospective); one zip has no notice page at all.
+# group. One deadline is still open and one zip has no notice page at all: both are prospective. The other deadlines
+# passed long enough ago that the amendments in each zip can't have moved them.
 TENDERS = {
     "Fiktivbolaget kontor.zip": ("Fiktivbolaget AB", "202100-0001", "Dnr 2026/0101", "2026-05-02", "2026-06-10"),
-    "Påhittade skola.zip": ("Påhittade Fastigheter", "212000-0002", "UH-2026-0202", "2026-09-03", "2026-10-20"),
-    "Påhittade bad.zip": ("Påhittade Fastigheter", "212000-0002", "UH-2026-0303", "2026-10-01", "2026-11-02"),
-    "Örjan sjukhus.zip": ("Örjan Exempelsson region", "232100-0004", "RS 2026-0404", "3 oktober 2026", "1 nov 2026"),
+    "Påhittade skola.zip": ("Påhittade Fastigheter", "212000-0002", "UH-2026-0202", "2026-07-15", "2026-08-20"),
+    "Påhittade bad.zip": ("Påhittade Fastigheter", "212000-0002", "UH-2026-0303", "2026-08-01", "2026-09-02"),
+    "Örjan sjukhus.zip": ("Örjan Exempelsson region", "232100-0004", "RS 2026-0404", "3 juli 2026", "1 sep 2026"),
     "Kommande depå.zip": ("Ampere kommun", "212000-0005", "KS-2026-0505", "2026-11-10", "2027-01-15 12:00"),
     "Utan annons.zip": None,
 }
@@ -82,7 +83,7 @@ def expected() -> dict[str, str]:
     for i, (name, meta) in enumerate(sorted(TENDERS.items()), 1):
         n = notice.from_pages([(("Annons.html",), notice_page(*meta))]) if meta else notice.Notice()
         keys, _ = notice_keys(n)
-        rows.append(sh.TenderRow(f"t-{i:04d}", keys, prospective=name.startswith("Kommande")))
+        rows.append(sh.TenderRow(f"t-{i:04d}", keys, prospective=name.startswith("Kommande") or meta is None))
     state = sh.LedgerState()
     for event in sh.plan_split(state, rows):
         if event["event"] == "assign":
@@ -129,17 +130,20 @@ def test_blind_intake_splits_by_the_notice_and_prints_counts_only(
             assert "Förfrågningsunderlag/AF.txt" in files
             assert "Ritningar/Inre/E-11.txt" in files  # nested zips unpacked
             assert not any("Frågor" in f or "Kompletteringar" in f or f == "fragor.html" for f in files)
-            assert ("Dokument 7.txt" in files) == (TENDERS[name] is None)  # held only where a notice lists it
+            assert "Dokument 7.txt" not in files  # the notice lists it under its Q&A heading
+            assert "Annons.html" in files  # a copy without its Q&A section
             assert not any("__MACOSX" in f for f in files)
-            assert (tender / "originals" / f"{delivered[name]}.zip").exists()
+            # Nothing in the dev folder holds an answer: not the original zip, not the notice's Q&A section.
+            everything = [p for p in tender.rglob("*") if p.is_file()]
+            assert not any(p.suffix == ".zip" for p in everything)
+            assert not any(b"Fr\xc3\xa5ga 1" in p.read_bytes() for p in everything)
+            assert (paths.answers_dir("co-002", tid) / "originals" / f"{delivered[name]}.zip").exists()
             record = json.loads((tender / "intake.json").read_text())
             assert record["tender"] == tid and "listed" not in record["notice"]
             held = paths.answers_dir("co-002", tid) / "intake"
             lines = (held.parent / "intake.sha256").read_text().splitlines()
             kinds = sorted(line.split("  ")[1] for line in lines)
-            assert kinds == (
-                ["amendment", "qa", "qa"] if TENDERS[name] is None else ["amendment", "listed", "qa", "qa"]
-            )
+            assert kinds == ["amendment", "listed", "qa", "qa", "section"]
             for line in lines:
                 digest = line.split("  ")[0]
                 assert any(p.name.startswith(digest) for p in held.iterdir())
@@ -242,8 +246,10 @@ def test_dry_run_counts_and_writes_nothing(data_root: Path, capsys: pytest.Captu
     assert_no_fake_names(printed.out, printed.err)
     assert "dev" not in printed.out and "held-out" not in printed.out  # no status before the real split
     assert "6 zips" in printed.out and "found buyer 5" in printed.out
-    # Three per zip by name (Q&A folder, amendments folder, fragor.html) and, where there is a notice, the one it lists.
-    assert "held as answer keys: 23 files in 6 tenders (amendment 6, listed 5, qa 12)" in printed.out
+    # Three per zip by name (Q&A folder, amendments folder, fragor.html) and, where there is a notice, the one it lists
+    # and the notice page itself, which has a Q&A section.
+    assert "held as answer keys: 28 files in 6 tenders (amendment 6, listed 5, qa 12, section 5)" in printed.out
+    assert "1 still open, 1 with no deadline read, 0 passed lately" in printed.out
     assert sorted(p.relative_to(data_root) for p in data_root.rglob("*")) == before
 
 
