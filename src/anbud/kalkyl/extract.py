@@ -17,13 +17,15 @@ from dataclasses import dataclass, field
 from html import escape
 from typing import Any, Literal
 
+from anbud.granskning.catalog import Catalog
 from anbud.granskning.corpus import Corpus
-from anbud.kalkyl.catalog import Catalog
-from anbud.kalkyl.client import EXTRACT, KalkylClient, RoleSettings
+from anbud.kalkyl.catalog import ids as catalog_ids_of
+from anbud.kalkyl.catalog import prompt_lines
 from anbud.kalkyl.lines import Chunk
 from anbud.kalkyl.records import Level, QuantityRecord, Rejected, SetAside
+from anbud.kalkyl.settings import EXTRACT, RoleSettings
 from anbud.kalkyl.verify import check_record, level_of, parse_record, parse_set_aside, without_unknown_catalog_id
-from anbud.model_client import BudgetExceeded, ModelError, ReplayMiss, RunStopped
+from anbud.model_client import BudgetExceeded, ModelClient, ModelError, ReplayMiss, RunStopped
 
 Status = Literal["submitted", "truncated", "no_submit", "error", "not_run"]
 
@@ -78,7 +80,7 @@ def outline_text(corpus: Corpus) -> str:
 
 def system_blocks(catalog: Catalog, corpus: Corpus) -> list[dict[str, Any]]:
     """Identical for every R2 call in a run. One cache breakpoint at the end."""
-    head = f"{BRIEF}\n\nCatalog (id | name | unit | category):\n{catalog.prompt_lines()}"
+    head = f"{BRIEF}\n\nCatalog (id | name | unit | category):\n{prompt_lines(catalog)}"
     outline = f"<tender_outline>\n{escape(outline_text(corpus), quote=False)}\n</tender_outline>"
     return [
         {"type": "text", "text": head},
@@ -185,7 +187,7 @@ def _tool_results(uses: list[Any], answer: dict[str, str]) -> list[dict[str, Any
 
 
 def extract_chunk(
-    client: KalkylClient,
+    client: ModelClient,
     chunk: Chunk,
     corpus: Corpus,
     catalog_ids: set[str],
@@ -251,7 +253,7 @@ def extract_chunk(
 
 
 def extract_all(
-    client: KalkylClient,
+    client: ModelClient,
     chunks: list[Chunk],
     corpus: Corpus,
     catalog: Catalog,
@@ -263,7 +265,7 @@ def extract_all(
     """Every chunk once: the first alone (it writes the cache), the rest in parallel. A budget stop or a stop marker
     ends the run's remaining chunks as not run; their quantity lines stay visible as not handled."""
     system = system_blocks(catalog, corpus)
-    ids = set(catalog.ids)
+    ids = set(catalog_ids_of(catalog))
     halted: list[str] = []
 
     def one(chunk: Chunk) -> ChunkResult:

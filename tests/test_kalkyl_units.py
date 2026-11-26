@@ -10,7 +10,7 @@ import pytest
 from kalkyl_synthetic import CATALOG, PRICE_STRINGS, cite, obj, req, write_catalog, write_prep
 
 from anbud.granskning.corpus import Corpus
-from anbud.kalkyl.catalog import CatalogError, load_catalog
+from anbud.kalkyl.catalog import CatalogError, load, prompt_lines
 from anbud.kalkyl.coverage import uncovered_lines
 from anbud.kalkyl.extract import ChunkResult
 from anbud.kalkyl.lines import Chunk, heading_paths, is_quantity_line, make_chunks, numbers_in
@@ -35,7 +35,7 @@ def corpus(tmp_path: Path) -> Corpus:
 @pytest.fixture
 def catalog(tmp_path: Path):
     write_catalog(tmp_path)
-    return load_catalog("synthetic", tmp_path)
+    return load("synthetic", tmp_path)
 
 
 def _block(kind: str, text: str) -> Block:
@@ -155,19 +155,19 @@ def test_a_block_without_text_never_accepts_a_quote(tmp_path: Path) -> None:
 
 
 def test_the_catalog_prompt_view_carries_no_prices(catalog) -> None:
-    view = catalog.prompt_lines()
+    view = prompt_lines(catalog)
     assert "uttag-dubbelt | Vägguttag dubbelt | st | Uttag" in view
     assert not any(p in view for p in PRICE_STRINGS)
 
 
 def test_a_bad_or_missing_catalog_is_refused(tmp_path: Path) -> None:
     with pytest.raises(CatalogError):
-        load_catalog("missing", tmp_path)
+        load("missing", tmp_path)
     with pytest.raises(CatalogError):
-        load_catalog("../escape", tmp_path)
+        load("../escape", tmp_path)
     write_catalog(tmp_path, "dup", {**CATALOG, "items": CATALOG["items"] + CATALOG["items"][:1]})
     with pytest.raises(CatalogError):
-        load_catalog("dup", tmp_path)
+        load("dup", tmp_path)
 
 
 def _verified(records: list[dict], level: str = "exact") -> list[VerifiedRecord]:

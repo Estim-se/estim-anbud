@@ -15,6 +15,7 @@ from typing import Any
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
 
 from anbud.models import Block
+from anbud.prep.model import Tile
 
 DOC_A = "aaaaaaaaaaaa"
 DOC_B = "bbbbbbbbbbbb"
@@ -106,7 +107,27 @@ CATALOG = {
         },
     ],
 }
+CARD_TEXT = "Planritning plan 2\n\nUttag 3 st i förråd"
 PRICE_STRINGS = ["85.5", "85,5", "420", "12000", "2500", "650"]
+
+
+def add_tile(prep_dir: Path, store: Any, png: bytes = b"synthetic tile image") -> Tile:
+    """One tile on document A's page 3, its image in the company's blob store."""
+    tile = Tile(
+        id="aaaaaa-p3-t1",
+        doc_id=DOC_A,
+        page=3,
+        index=1,
+        reason="scan",
+        dpi=200,
+        x0=0,
+        y0=0,
+        x1=10,
+        y1=10,
+        blob=store.put_blob(png),
+    )
+    (prep_dir / "tiles.json").write_text(json.dumps([tile.model_dump()]))
+    return tile
 
 
 def write_prep(prep_dir: Path, blocks: list[Block] | None = None, outline: list[dict] | None = None) -> Path:
@@ -301,7 +322,9 @@ class ScriptedMessages:
 
 
 def good_handler(params: dict[str, Any]) -> Message:
-    """R2 answers from GOOD; R3 answers none for everything."""
+    """R1 writes a small card; R2 answers from GOOD; R3 answers none for everything."""
+    if "tools" not in params:
+        return message([text(CARD_TEXT)], stop_reason="end_turn")
     tool = params["tools"][0]["name"]
     if tool == "submit_matches":
         ids = re.findall(r'<post id="([^"]+)"', params["messages"][0]["content"])

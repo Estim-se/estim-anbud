@@ -17,7 +17,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
-from anbud.kalkyl.catalog import Catalog
+from anbud.granskning.catalog import Catalog
 from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Post
 
 if TYPE_CHECKING:

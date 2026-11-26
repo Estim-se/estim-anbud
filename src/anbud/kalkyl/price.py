@@ -16,9 +16,9 @@ with a visible note. Locations add up.
 **Catalog mapping.** A post's catalog item must exist and its unit must be in the same family as the post's (counts,
 length, area, volume, hours). A post without a usable item is "Saknar pris", never priced on the nearest item.
 
-**Kronor.** Decimal: material = quantity × unit price; hours = quantity × hours per unit; labour = hours × hourly
-rate; each rounded to öre (hours to hundredths). Options are priced outside the total; excluded and other-trade posts
-are listed, never priced.
+**Kronor.** Decimal, from the shared catalog's figures: material = quantity × unit price; hours = quantity × hours
+per unit; labour = hours × hourly rate; each rounded to öre (hours to hundredths). Options are priced outside the
+total; excluded and other-trade posts are listed, never priced.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 
+from anbud.granskning.catalog import Catalog, CatalogItem
 from anbud.granskning.contracts import CalcPost
-from anbud.kalkyl.catalog import Catalog, CatalogItem
 from anbud.kalkyl.records import VerifiedRecord
 
 OBJECT_LABELS = {
@@ -237,7 +237,7 @@ def _usable(catalog: Catalog, catalog_id: str | None, unit: str) -> str | None:
     """Why R2's proposed item can't be used for this unit, or None if it can (or none was proposed)."""
     if catalog_id is None:
         return None
-    item = catalog.item(catalog_id)
+    item = catalog.find(catalog_id) if catalog_id else None
     if item is None:
         return "okänd katalogpost"
     if unit_family(item.unit) != unit_family(unit):
@@ -295,10 +295,17 @@ def _round(value: Decimal) -> Decimal:
     return value.quantize(ORE, rounding=ROUND_HALF_UP)
 
 
+def _dec(value: float | None) -> Decimal:
+    """A catalog figure (a float in the shared format) as the Decimal it was written as; a missing one is 0."""
+    return Decimal(str(value)) if value is not None else Decimal(0)
+
+
 def price_posts(posts: list[Post], catalog: Catalog) -> None:
+    """Priced as `granskning.catalog.Catalog.unit_cost` defines a unit (hours x rate + material), in Decimal. A missing
+    unit price counts as 0 when hours are given, and the other way round; hours without a rate can't be priced."""
     for post in posts:
-        item: CatalogItem | None = catalog.item(post.catalog_id)
-        post.category = item.category if item else ""
+        item: CatalogItem | None = catalog.find(post.catalog_id) if post.catalog_id else None
+        post.category = (item.category or "") if item else ""
         post.catalog_name = item.name if item else ""
         if post.scope == "excluded":
             post.status = "Ingår ej"
@@ -312,10 +319,19 @@ def price_posts(posts: list[Post], catalog: Catalog) -> None:
         if item is None:
             post.status = "Saknar pris"
             continue
-        post.unit_price, post.hours_per_unit = item.unit_price, item.hours
-        post.material = _round(post.quantity * item.unit_price)
-        post.hours = _round(post.quantity * item.hours)
-        post.labour = _round(post.hours * catalog.hourly_rate)
+        if item.unit_price is None and item.hours is None:
+            post.status = "Saknar pris"
+            post.notes.append("katalogposten saknar pris och tid")
+            continue
+        if item.hours and catalog.hourly_rate <= 0:
+            post.status = "Saknar pris"
+            post.notes.append("katalogen saknar timpris")
+            continue
+        unit_price, hours = _dec(item.unit_price), _dec(item.hours)
+        post.unit_price, post.hours_per_unit = unit_price, hours
+        post.material = _round(post.quantity * unit_price)
+        post.hours = _round(post.quantity * hours)
+        post.labour = _round(post.hours * _dec(catalog.hourly_rate))
         post.total = post.material + post.labour
         post.status = "Prissatt"
 

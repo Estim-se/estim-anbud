@@ -33,12 +33,14 @@ from anbud.config import load_config
 from anbud.evals import split_heldout as sh
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
-from anbud.kalkyl.catalog import load_catalog
-from anbud.kalkyl.client import EXTRACT, MATCH, KalkylClient, extract_tools, load_kalkyl_config, match_tools
+from anbud.kalkyl.catalog import ids
+from anbud.kalkyl.catalog import load as load_catalog
 from anbud.kalkyl.extract import extract_chunk, system_blocks
 from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.run import run_dev_tender
-from anbud.model_client import Budget, PrefixDrift
+from anbud.kalkyl.settings import EXTRACT, MATCH, load_kalkyl_config
+from anbud.model_client import Budget, ModelClient, PrefixDrift
+from anbud.tools import own_tools
 
 REQUEST = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 
@@ -51,12 +53,8 @@ def tender(data_root: Path) -> Path:
     return tender
 
 
-def _client(sdk: Any, catalog, hard_stop: float = 3.0) -> KalkylClient:
-    kalkyl = load_kalkyl_config()
-    tools = {EXTRACT: extract_tools(catalog.ids), MATCH: match_tools(catalog.ids)}
-    return KalkylClient(
-        load_config(), sdk, Budget(hard_stop), kalkyl=kalkyl, role_tools=tools, run_id="r-1", company_id="co-001"
-    )
+def _client(sdk: Any, catalog=None, hard_stop: float = 3.0) -> ModelClient:
+    return ModelClient(load_config(), sdk, Budget(hard_stop), run_id="r-1", company_id="co-001")
 
 
 def _run(sdk: Any, **kw: Any) -> dict[str, Any]:
@@ -84,18 +82,21 @@ def test_the_client_sends_kalkyl_tools_on_sonnet_and_keeps_the_prefix(data_root:
             max_tokens=100,
             effort="medium",
         )
-    with pytest.raises(ValueError):
-        client.call(role=EXTRACT, step="s", system=system, messages=messages, max_tokens=10**6, effort="medium")
-    with pytest.raises(KeyError):
-        client.call(role="lens", step="s", system=system, messages=messages, max_tokens=100, effort="medium")
+    client.call(
+        role=MATCH,
+        step="m",
+        system=[{"type": "text", "text": "Match."}],
+        messages=messages,
+        max_tokens=100,
+        effort="medium",
+    )  # its own prefix, apart from R2's on the same model
+    assert [t["name"] for t in sdk.messages.sent[-1]["tools"]] == ["submit_matches"]
 
 
-def test_tools_constrain_catalog_ids_and_carry_no_prices(data_root: Path) -> None:
-    write_catalog(data_root)
-    catalog = load_catalog("synthetic")
-    blob = json.dumps(extract_tools(catalog.ids) + match_tools(catalog.ids))
-    assert '"enum": ["uttag-dubbelt"' in blob and '"none"]' in blob
-    assert not any(p in blob for p in PRICE_STRINGS)
+def test_kalkyl_tools_are_static_and_carry_no_catalog() -> None:
+    blob = json.dumps(own_tools(EXTRACT) + own_tools(MATCH))
+    assert not any(p in blob for p in PRICE_STRINGS) and "uttag-dubbelt" not in blob
+    assert own_tools(EXTRACT) == own_tools(EXTRACT)
 
 
 def _setup(data_root: Path):
@@ -113,7 +114,7 @@ def _extract(sdk: Any, catalog, corpus, chunk):
     message_text = chunk_message(chunk, corpus, heading_paths(corpus))
     client = _client(sdk, catalog)
     return extract_chunk(
-        client, chunk, corpus, set(catalog.ids), system_blocks(catalog, corpus), message_text, settings
+        client, chunk, corpus, set(ids(catalog)), system_blocks(catalog, corpus), message_text, settings
     )
 
 
@@ -253,10 +254,9 @@ def test_r3_maps_an_unmapped_post_only_to_a_fitting_item(tender: Path) -> None:
 
 
 def test_a_budget_stop_leaves_the_rest_unread_and_the_calc_incomplete(tender: Path) -> None:
-    from anbud.kalkyl import client as kclient
+    from anbud.kalkyl.settings import KalkylConfig
 
-    kalkyl = kclient.load_kalkyl_config()
-    tiny = kclient.KalkylConfig(**{**vars(kalkyl), "hard_stop": 0.0001})
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
     summary = _run(fake_sdk(), kalkyl=tiny)
     assert not summary["complete"] and summary["chunk_status"] == {"not_run": 2}
     assert summary["lines_not_handled"] == summary["quantity_lines"]

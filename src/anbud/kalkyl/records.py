@@ -61,7 +61,9 @@ class QuantityRecord(_Model):
         default=False, description="True only if the quote says this comes on top of another stated quantity"
     )
     catalog_id: str | None = Field(
-        default=None, max_length=80, description="The catalog item that fits, from the catalog list; leave out if none"
+        default=None,
+        max_length=80,
+        description="The id of the catalog item that fits, from the catalog in the system prompt; leave out if none",
     )
     contains: list[Contained] = Field(
         default_factory=list,
@@ -85,6 +87,16 @@ class SubmitQuantitiesInput(_Model):
         default_factory=list,
         description="Quantity lines (q=1) that are not requirements or objects of this contract, with the reason",
     )
+
+
+class Match(_Model):
+    post_id: str = Field(min_length=1, max_length=40)
+    catalog_id: str = Field(min_length=1, max_length=80, description="A catalog id from the list, or none")
+    reason: str = Field(default="", max_length=300)
+
+
+class SubmitMatchesInput(_Model):
+    matches: list[Match] = Field(description="One entry per post in the request")
 
 
 class VerifiedRecord(_Model):

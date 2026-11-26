@@ -7,16 +7,17 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from anbud.granskning.catalog import Catalog
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
-from anbud.kalkyl.catalog import Catalog
-from anbud.kalkyl.client import EXTRACT, MATCH, KalkylClient, KalkylConfig
 from anbud.kalkyl.coverage import uncovered_lines
 from anbud.kalkyl.extract import ChunkResult, extract_all
 from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks
 from anbud.kalkyl.match import match_posts
 from anbud.kalkyl.price import ObjectCount, Post, Totals, build_posts, count_objects, price_posts, totals_of
 from anbud.kalkyl.records import Rejected, Uncovered, VerifiedRecord
+from anbud.kalkyl.settings import EXTRACT, MATCH, KalkylConfig
+from anbud.model_client import ModelClient
 
 
 @dataclass
@@ -77,7 +78,7 @@ def verified_records(chunk_results: list[ChunkResult]) -> list[VerifiedRecord]:
 def run_kalkyl(
     corpus: Corpus,
     catalog: Catalog,
-    client: KalkylClient,
+    client: ModelClient,
     kalkyl: KalkylConfig,
     on_chunk: Callable[[ChunkResult], None] | None = None,
 ) -> KalkylResult:

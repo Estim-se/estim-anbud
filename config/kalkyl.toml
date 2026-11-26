@@ -1,8 +1,5 @@
-# Kalkyl in shadow (#73 R2 and R3). Budgets in USD. Never raise a cap or budget without the founder's approval.
-# Model aliases resolve to ids through config/providers.toml [models].
-
-[run]
-hard_stop = 3.00 # about $1-2.5 expected at the dev tender's size; plan section 7 caps Kalkyl at $3 per tender
+# Kalkyl in shadow (#73 R2 and R3). Never raise a cap without the founder's approval.
+# Models: providers.toml [roles] kalkyl_extract and kalkyl_match. The run's hard stop: budgets.toml [kalkyl].
 
 [catalog]
 default = "estim-default" # ~/estim-anbud-data/catalogs/<name>.json
@@ -12,14 +9,12 @@ max_chars = 12000
 max_quantity_lines = 30
 
 [extract] # R2: one call per chunk, in parallel after the first has written the cache
-model = "sonnet"
 effort = "medium"
 max_tokens = 12000
 max_turns = 2 # the submission, then one repair turn or one nudge
 concurrency = 4
 
 [match] # R3: posts R2 left without a usable catalog item, a constrained choice among catalog ids
-model = "sonnet"
 effort = "medium"
 max_tokens = 8000
 batch_size = 60

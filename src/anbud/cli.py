@@ -75,6 +75,7 @@ def _kalkyl(args: argparse.Namespace) -> int:
     from anbud.kalkyl.catalog import CatalogError
     from anbud.kalkyl.run import KalkylError, plan, run_dev_tender
     from anbud.model_client import KeyMissing, keychain_key, make_sdk_client
+    from anbud.prep.tender import IntakeStop
     from anbud.store import StoreError
 
     try:
@@ -100,7 +101,7 @@ def _kalkyl(args: argparse.Namespace) -> int:
             summary = run_dev_tender(
                 args.company_id, args.tender_id, sdk=sdk, catalog_name=args.catalog, run_id=args.run_id
             )
-    except (KalkylError, CatalogError, StoreError, KeyMissing) as exc:
+    except (KalkylError, CatalogError, StoreError, KeyMissing, IntakeStop) as exc:
         print(f"anbud kalkyl: stopped: {exc}", file=sys.stderr)
         return REFUSED
     for key, value in summary.items():

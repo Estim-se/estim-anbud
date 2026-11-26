@@ -6,6 +6,8 @@
   repair turn.
 - Every role in `ROLES` with tools sends the byte-identical list, so the cached prefix is shared. A role is limited by
   `refusal()` in the loop, never by sending a smaller list: a smaller list would rewrite the prefix on every call.
+- The one exception: a role that declares its own list (`own_tools`) sends that list and nothing else. Only Kalkyl's
+  Sonnet roles do; they never share a prefix with Granskning. Every Opus role sends the shared list (tested).
 - Order matters for the cache: tools are sent in the order of `_TOOLS`. Changing a description, a field or the order is
   a prompt change, and `schemas/tools.json` shows it in the diff.
 """
@@ -20,6 +22,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anbud.kalkyl.records import SubmitMatchesInput, SubmitQuantitiesInput
 from anbud.models import Flag, TenderMap, Verdict
 from anbud.schema import to_plain, to_strict
 
@@ -125,10 +128,31 @@ INPUT_MODELS = {t.name: t.model for t in _TOOLS}
 _READ = frozenset({"search_blocks", "read_blocks", "outline", "calc_posts"})
 
 
+# Kalkyl's own tools: not part of the shared list, sent only by the roles that declare them.
+_KALKYL_EXTRACT = (
+    ToolSpec(
+        "submit_quantities",
+        "Submit this chunk's quantity records and set-aside lines. Call it once, at the end. Code checks every "
+        "citation and quote; records that fail come back with the reason, once.",
+        SubmitQuantitiesInput,
+        strict=False,
+    ),
+)
+_KALKYL_MATCH = (
+    ToolSpec(
+        "submit_matches",
+        "Submit one catalog id per post, or none when no item fits. Call it once.",
+        SubmitMatchesInput,
+        strict=False,
+    ),
+)
+
+
 @dataclass(frozen=True)
 class Role:
     tools: frozenset[str]  # the tools the loop lets this role call; empty means the role is sent no tools
-    shared_prefix: bool  # sends the run's byte-identical system blocks (checked per model by ModelClient)
+    shared_prefix: bool  # sends byte-identical system blocks: per model for the shared list, per role for own_tools
+    own_tools: tuple[ToolSpec, ...] = ()  # sent instead of the shared list; `tools` must name exactly these
 
 
 ROLES: dict[str, Role] = {
@@ -138,13 +162,14 @@ ROLES: dict[str, Role] = {
     "verifier": Role(frozenset({"read_blocks", "search_blocks", "calc_posts", "submit_verdict"}), shared_prefix=True),
     "merge": Role(frozenset({"submit_flags"}), shared_prefix=False),
     "page_cards": Role(frozenset(), shared_prefix=False),  # reads tiles from its prompt; output format comes with prep
+    "kalkyl_extract": Role(frozenset({"submit_quantities"}), shared_prefix=True, own_tools=_KALKYL_EXTRACT),
+    "kalkyl_match": Role(frozenset({"submit_matches"}), shared_prefix=True, own_tools=_KALKYL_MATCH),
 }
 
 
-@cache
-def _shared_tools_json() -> str:
+def _tool_json(specs: tuple[ToolSpec, ...]) -> str:
     tools = []
-    for spec in _TOOLS:
+    for spec in specs:
         schema = spec.model.model_json_schema()
         tool: dict[str, Any] = {
             "name": spec.name,
@@ -155,6 +180,21 @@ def _shared_tools_json() -> str:
             tool["strict"] = True
         tools.append(tool)
     return json.dumps(tools, ensure_ascii=False)
+
+
+@cache
+def _shared_tools_json() -> str:
+    return _tool_json(_TOOLS)
+
+
+@cache
+def _own_tools_json(role: str) -> str:
+    return _tool_json(ROLES[role].own_tools)
+
+
+def own_tools(role: str) -> list[dict[str, Any]]:
+    """A fresh copy of the role's own list, for roles that declare one."""
+    return json.loads(_own_tools_json(role))
 
 
 def shared_tools() -> list[dict[str, Any]]:
@@ -175,7 +215,8 @@ def snapshot_text() -> str:
 def refusal(role: str, tool: str) -> str | None:
     """The error text for the tool_result when `role` may not call `tool`, or None if it may. A refused call still
     counts as a turn."""
-    if tool not in INPUT_MODELS:
+    own = {spec.name for spec in ROLES[role].own_tools}
+    if tool not in INPUT_MODELS and tool not in own:
         return f"unknown tool: {tool}"
     if tool not in ROLES[role].tools:
         return f"{tool} is not available to this role"
