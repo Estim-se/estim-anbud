@@ -77,6 +77,56 @@ def _stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _labels_tender_dir(name: str, args: argparse.Namespace) -> Path | None:
+    """The data folder of a dev tender or a synthetic fixture, or None after printing why not."""
+    from anbud import paths
+
+    try:
+        kind = check_run_allowed(args.company_id, args.tender_id, args.fixture)
+    except RunRefused as exc:
+        print(f"anbud {name}: refused: {exc}", file=sys.stderr)
+        return None
+    if kind == "fixture":
+        return paths.fixture_data_dir(args.company_id, args.fixture)
+    return paths.dev_tender_dir(args.company_id, args.tender_id)
+
+
+# `anbud export-review`: a blind XLSX for a human labeller (plan §8.2).
+def _export_review(args: argparse.Namespace) -> int:
+    from anbud.granskning.labels import LabelError, export_review
+    from anbud.store import StoreError
+
+    tender = _labels_tender_dir("export-review", args)
+    if tender is None:
+        return REFUSED
+    try:
+        summary = export_review(args.company_id, tender, args.flags, args.export_id)
+    except (LabelError, StoreError, OSError, ValueError) as exc:
+        print(f"anbud export-review: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    for key, value in summary.items():
+        print(f"{key}: {value}")
+    return 0
+
+
+# `anbud import-labels`: the filled XLSX back, as labels keyed by fingerprint in the tender's data folder.
+def _import_labels(args: argparse.Namespace) -> int:
+    from anbud.granskning.labels import LabelError, import_labels
+    from anbud.store import StoreError
+
+    tender = _labels_tender_dir("import-labels", args)
+    if tender is None:
+        return REFUSED
+    try:
+        summary = import_labels(args.company_id, tender, args.xlsx, args.labeller)
+    except (LabelError, StoreError, OSError, ValueError) as exc:
+        print(f"anbud import-labels: stopped: {exc}", file=sys.stderr)
+        return REFUSED
+    for key, value in summary.items():
+        print(f"{key}: {value}")
+    return 0
+
+
 def _not_built(name: str) -> int:
     print(f"anbud {name}: not built yet", file=sys.stderr)
     return NOT_BUILT
@@ -124,6 +174,18 @@ def main(argv: list[str] | None = None) -> int:
     stop.add_argument("run_id", nargs="?")
     stop.add_argument("--all", action="store_true", help="every run, in every company")
     stop.add_argument("--clear", action="store_true", help="remove the marker, so the run can resume")
+    export = sub.add_parser("export-review", help="a blind XLSX of a run's flags, with decoys, for a human labeller")
+    export.add_argument("company_id")
+    export.add_argument("tender_id", nargs="?")
+    export.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
+    export.add_argument("--flags", type=Path, required=True, help="JSONL of review flags from the run's report")
+    export.add_argument("--export-id", help="8 hex characters; random if left out")
+    labels = sub.add_parser("import-labels", help="read a filled review XLSX back as labels")
+    labels.add_argument("company_id")
+    labels.add_argument("tender_id", nargs="?")
+    labels.add_argument("--fixture", type=Path, help="a fixture directory under fixtures/synthetic/")
+    labels.add_argument("--xlsx", type=Path, required=True, help="the filled review workbook")
+    labels.add_argument("--labeller", required=True, help="a neutral labeller id, like lab-1")
 
     args = parser.parse_args(argv)
     if args.command == "run":
@@ -134,6 +196,10 @@ def main(argv: list[str] | None = None) -> int:
         return _stop(args)
     if args.command == "prep":
         return _prep(args)
+    if args.command == "export-review":
+        return _export_review(args)
+    if args.command == "import-labels":
+        return _import_labels(args)
     return _not_built(args.command)
 
 
