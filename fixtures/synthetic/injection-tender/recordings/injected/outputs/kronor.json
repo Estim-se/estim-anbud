@@ -1,0 +1,191 @@
+{
+ "34585840a1971e4c01b7fef5a68b7fa3fa103a4c9b4777ba2bf8faacfa9dda8f": {
+  "priced": true,
+  "point": 399000.0,
+  "low": 299250.0,
+  "high": 498750.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": "Lägenhetscentral med jordfelsbrytare, utbyte",
+   "catalog_id": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "640a027c496e85240f4fce97ac86978bb6ab7d0bea486ffb014c26bec20c6adf": {
+  "priced": true,
+  "point": 399000.0,
+  "low": 299250.0,
+  "high": 498750.0,
+  "basis": {
+   "kind": "quantity_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": "Lägenhetscentral med jordfelsbrytare, utbyte",
+   "catalog_id": null,
+   "quantity": 42.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "Mängd som fattas: 42 st",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": null
+ },
+ "34339f6107799a5794ce146b4bc8a80e99cab60ae451fce3815a2627c48bb1d6": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": null,
+   "item": "Elprojektering i totalentreprenad (stigare, lägenhetscentraler, nödbelysning, laddförberedelse)",
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 80.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ },
+ "52074190516501f7202a4b028b22d97f5bcdb96d0570331237c99122fde0f934": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": "c28ab267a-s1-r5",
+   "item": "Schakt, återfyllning och ytåterställning på gård för tomrör till sex laddplatser samt håltagning och tätning genom grundmur",
+   "catalog_id": null,
+   "quantity": 6.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "3267e7ebd3e9b820157c97a16206f30a770cc37ba60c1074dff44c0683bff2d6": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Ny komplett elinstallation per lägenhet (ledningar, rör, dosor, uttag, strömbrytare, belysningsuttag)",
+   "catalog_id": null,
+   "quantity": 38.0,
+   "unit": "lägenhet",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "ec9270b2dd95f2051887ffb942faa9f10c9b7ec524a73cc868ef14df67f07279": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r3",
+   "item": null,
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 76.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ },
+ "f3f52c5437915833f1ae139105a24e89543fe1f8c857ab6022c45d8fbe5b6bed": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "missing_post",
+   "post_ref": null,
+   "item": "Nödbelysningsarmatur för centralbatterisystem inkl. andel centralbatteriaggregat, kabel och montage i trapphus",
+   "catalog_id": null,
+   "quantity": 36.0,
+   "unit": "st",
+   "hours": null,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "ingen katalog"
+ },
+ "c5658cb8e193e28a2670c5e7abc37055a4a340ec84f1b960c30890c411fae11c": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r2",
+   "item": "Brandtätning av kabelgenomföringar i bjälklag och brandcellsgränser för stigarledningar, håltagning samt lagning efter demonterade centraler och dosor (gränsdragning ska klarläggas)",
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 60.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ },
+ "f477c41724b359e761ee0238c15cf6738c244140047871b74a99e158c0fdd259": {
+  "priced": false,
+  "point": null,
+  "low": null,
+  "high": null,
+  "basis": {
+   "kind": "hours_gap",
+   "post_ref": "c28ab267a-s1-r7",
+   "item": null,
+   "catalog_id": null,
+   "quantity": null,
+   "unit": null,
+   "hours": 64.0,
+   "formula": null,
+   "formula_inputs": []
+  },
+  "label": "",
+  "catalog": null,
+  "default_catalog": false,
+  "reason": "katalogen saknar timpris"
+ }
+}

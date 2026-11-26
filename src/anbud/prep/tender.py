@@ -288,8 +288,17 @@ def summarise(docs: list[DocPrep], loaded: Loaded, cache_hits: int) -> dict[str,
     }
 
 
+# A fixture holds its calc in `calc/`, where `anbud run --fixture` reads it as calc posts; it is no tender document.
+FIXTURE_EXCLUDE = ("calc",)
+
+
 def prepare(
-    company_id: str, inbox: Path, out_dir: Path, manifest: Path | None = None, root: Path | None = None
+    company_id: str,
+    inbox: Path,
+    out_dir: Path,
+    manifest: Path | None = None,
+    root: Path | None = None,
+    exclude: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     store = RunStore(company_id, root)
     if any(paths.is_sealed_path(p, root) for p in (inbox, out_dir) if p is not None) or (
@@ -301,7 +310,7 @@ def prepare(
     remove_tree(store, new)
     remove_tree(store, old)
     try:
-        loaded = load_folder(inbox, manifest)
+        loaded = load_folder(inbox, manifest, exclude)
         version = code_version()
         results = [prepare_file(src, store, version) for src in loaded.sources]
         docs = [doc for doc, _ in results]

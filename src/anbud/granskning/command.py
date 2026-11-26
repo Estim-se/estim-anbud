@@ -52,7 +52,7 @@ def _dirs(args: argparse.Namespace, kind: str) -> tuple[Path, Path, Path]:
         return arm_dir / "prep", arm_dir, tender / "runs"
     if kind == "fixture":
         fixture = args.fixture.expanduser().resolve()
-        base = paths.company_dir(args.company_id) / "fixtures" / fixture.name
+        base = paths.fixture_data_dir(args.company_id, fixture)
         return base / "prep", fixture / "calc", base / "runs"
     tender = paths.dev_tender_dir(args.company_id, args.tender_id)
     return tender / "prep", tender / "calc", tender / "runs"
