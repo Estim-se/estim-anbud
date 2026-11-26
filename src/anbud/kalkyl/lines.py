@@ -5,6 +5,10 @@
   tokens are generic units of measure and count, not vocabulary of any tender.
 - **A scope line** names what is installed per object or room with no number next to it (`scope_lines`). It is not a
   quantity line; the model handles it the same way, and coverage lists it the same way.
+- **A not-included line** says that something isn't part of the contract ("ingår ej", "ingår inte", "ej i
+  entreprenaden"), in its own text or in one of the two headings above it. The words are generic contract language,
+  not any tender's. "Utgår" isn't one: "befintlig armatur utgår" asks for removal work. Coverage accounts for every
+  such line, marked or not (`not_included_line_ids`).
 - **Heading paths** come from the outline: every block inherits the titles above it in its own document.
 - **Chunks** are cut at headings inside one document and sized by what they will make the model write (quantity lines)
   and read (characters), per #73. A chunk that starts in the middle of a sheet also shows that sheet's first row as
@@ -27,6 +31,10 @@ _CELL_NUMBER = re.compile(rf"^[-+]?(?:{_NUMBER})\s?(?:{_UNITS})?$")
 _NUMBER_UNIT = re.compile(rf"(?<![\w.,])(?:{_NUMBER})\s?(?:{_UNITS})(?![\w²³])")
 # A number not glued to a letter, digit or decimal sign before it: a type code like L12 or a unit like m2 adds none.
 _WRITTEN_NUMBER = re.compile(rf"(?<![\w.,])(?:{_NUMBER})")
+# Saying that something is not part of the contract. Lower-cased text.
+_NOT_INCLUDED = re.compile(
+    r"\bing[åa]r\s+(?:ej|inte|icke)\b|\b(?:ej|inte|icke)\s+(?:i|ingående\s+i)\s+(?:denna\s+|den\s+)?entreprenad(?:en)?\b"
+)
 _ROW_KINDS = ("table_row", "sheet_row")
 _LINE_KINDS = ("paragraph", "tile_text")
 
@@ -89,6 +97,24 @@ class Chunk:
 
 def _is_boundary(block: Block, outline_starts: set[str]) -> bool:
     return block.kind == "heading" or block.id in outline_starts
+
+
+def says_not_included(text: str) -> bool:
+    return bool(_NOT_INCLUDED.search(text.lower()))
+
+
+def not_included_line_ids(corpus: Corpus, paths: dict[str, tuple[str, ...]] | None = None) -> set[str]:
+    """Every line that says something isn't part of the contract, in its own text or in one of the two headings above
+    it. A heading itself is not a line; the lines under it are."""
+    paths = paths if paths is not None else heading_paths(corpus)
+    out = set()
+    for block_id in corpus.order:
+        block = corpus.blocks[block_id]
+        if block.kind == "heading" or not block.text.strip():
+            continue
+        if says_not_included(block.text) or any(says_not_included(h) for h in paths.get(block_id, ())[-2:]):
+            out.add(block_id)
+    return out
 
 
 def scope_line_ids(corpus: Corpus, paths: dict[str, tuple[str, ...]] | None = None) -> set[str]:

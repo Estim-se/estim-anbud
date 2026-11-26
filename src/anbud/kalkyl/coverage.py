@@ -1,10 +1,14 @@
-"""Line-level coverage (#73 step 4): every quantity line and every scope line is used by a verified record, or listed
-with a reason.
+"""Line-level coverage (#73 step 4): every quantity line, scope line and not-included line is used by a verified
+record, or listed with a reason.
 
 Reasons, in order: set aside by the model (with its kind and reason; of the kinds only `unclear` stays unresolved),
 not read (the chunk's call failed, ran out of budget or was stopped), not read to the end (the answer hit
 `max_tokens`), no answer, cited only by a rejected record, or nothing handled it. Nothing is silently dropped. A row
 the object list read by code counts (`object_list`) is used by the object model, cited by a record or not.
+
+A not-included line (`lines.not_included_line_ids`) that no record uses and the model didn't set aside is set aside by
+code: its own words say it isn't part of the contract, so it is listed under "Bortvalt med skäl" with its citation and
+a request to check it, never left out and never priced.
 """
 
 from __future__ import annotations
@@ -13,6 +17,10 @@ from anbud.kalkyl.extract import ChunkResult
 from anbud.kalkyl.lines import Chunk
 from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered, VerifiedRecord
 
+NOT_INCLUDED_REASON = (
+    "Bortvalt av kod (Utanför denna entreprenad): raden säger att något inte ingår. "
+    "Kontrollera att inget på raden ska prissättas"
+)
 _NOT_READ = {
     "budget": "Ej läst: körningens budget tog slut",
     "stopped": "Ej läst: körningen stoppades",
@@ -25,13 +33,17 @@ def uncovered_lines(
     results: list[ChunkResult],
     verified: list[VerifiedRecord],
     counted: set[str] | None = None,
+    not_included: set[str] | None = None,
 ) -> list[Uncovered]:
     used = {b for v in verified for b in v.block_ids} | (counted or set())
+    not_included = not_included or set()
     out: list[Uncovered] = []
     for chunk, res in zip(chunks, results, strict=True):
         aside = {b: s for s in res.set_aside for b in s.block_ids}
         rejected = {b: r.reason for r in res.rejected for b in r.block_ids}
         lines = [(b, "quantity") for b in chunk.quantity_ids] + [(b, "scope") for b in chunk.scope_ids]
+        marked = {b for b, _ in lines}
+        lines += [(b, "not_included") for b in chunk.block_ids if b in not_included and b not in marked]
         for block_id, line in lines:
             if block_id in used:
                 continue
@@ -41,6 +53,17 @@ def uncovered_lines(
                 out.append(
                     Uncovered(
                         block_id=block_id, reason=reason, set_aside_by_model=True, set_aside_kind=item.kind, line=line
+                    )
+                )
+                continue
+            if block_id in not_included:
+                out.append(
+                    Uncovered(
+                        block_id=block_id,
+                        reason=NOT_INCLUDED_REASON,
+                        set_aside_by_code=True,
+                        set_aside_kind="not_this_contract",
+                        line="not_included" if line == "not_included" else line,
                     )
                 )
                 continue

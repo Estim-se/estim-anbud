@@ -313,7 +313,10 @@ def _check_location(folder: Path, company_id: str, sealed: bool, root: Path | No
     in_sealed = paths.is_sealed_path(resolved, root)
     if in_sealed and not sealed:
         raise FreezeError(f"the {what} are in held-out or sealed storage; a dev freeze never reads there")
-    inside = resolved.is_relative_to(paths.company_dir(company_id, root).resolve())
+    baselines = paths.predictions_dir(company_id, root).resolve() / "baseline"
+    inside = resolved.is_relative_to(paths.company_dir(company_id, root).resolve()) or resolved.is_relative_to(
+        baselines
+    )
     if not inside and not (sealed and in_sealed):
         raise FreezeError(f"the {what} are outside the company's folder")
     return resolved
@@ -353,6 +356,22 @@ def _inputs(company_id: str, tender_id: str | None, root: Path | None) -> tuple[
     return manifest_sha, prep
 
 
+def _own(
+    company_id: str, tender_id: str | None, run_id: str, outputs: Path, record_dir: Path, root: Path | None
+) -> tuple[bool, bool]:
+    """Whether the outputs and the run record are in the harness's own folders for this run (paths built from ids
+    only), so the ledger may name them in clear: a Granskning run's, or an old-engine baseline run's."""
+    own_outputs = own_record = False
+    if tender_id is not None:
+        baseline = paths.baseline_dir(company_id, tender_id, root) / run_id
+        own_outputs = _is(outputs, paths.dev_tender_dir(company_id, tender_id, root) / "runs" / run_id) or _is(
+            outputs, baseline / "outputs"
+        )
+        own_record = _is(record_dir, baseline / "record")
+    own_record = own_record or _is(record_dir, paths.company_dir(company_id, root) / "runs" / run_id)
+    return own_outputs, own_record
+
+
 def _same_freeze(old: dict[str, Any], new: dict[str, Any]) -> bool:
     keys = (set(old) | set(new)) - _VOLATILE
     return all(old.get(k) == new.get(k) for k in keys)
@@ -385,10 +404,7 @@ def freeze_run(
     if not output_files:
         raise FreezeError("the outputs folder has no files")
     record_files = _tree(record_dir, "run record")
-    own_outputs = tender_id is not None and _is(
-        outputs, paths.dev_tender_dir(company_id, tender_id, root) / "runs" / run_id
-    )
-    own_record = _is(record_dir, paths.company_dir(company_id, root) / "runs" / run_id)
+    own_outputs, own_record = _own(company_id, tender_id, run_id, outputs, record_dir, root)
 
     config = repo_hashes()
     manifest_sha, prep = _inputs(company_id, tender_id, root)
@@ -425,6 +441,65 @@ def freeze_run(
     # The line is written, so the run is frozen whatever happens next; a failure here is reported, never raised.
     failed = _read_only(output_files)
     return {**record, "line_number": len(lines) + 1, "line_sha256": _sha(line), NOT_READ_ONLY: failed}
+
+
+def relocate_run(
+    company_id: str,
+    run_id: str,
+    *,
+    outputs_dir: Path,
+    run_record_dir: Path,
+    sealed: bool = False,
+    now: datetime | None = None,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Record that a frozen run's folders moved. Every file at the new place must hash as it did when frozen (same
+    files, same contents); then one `relocate` line names the new place. Nothing is moved here: the caller moves
+    the folders first. Returns the record with its `line_number`."""
+    _company(company_id)
+    try:
+        check_run_id(run_id)
+    except StoreError as exc:
+        raise FreezeError(str(exc)) from None
+    outputs = _check_location(outputs_dir, company_id, sealed, root, "outputs")
+    record_dir = _check_location(run_record_dir, company_id, sealed, root, "run record")
+    output_files = _tree(outputs, "outputs")
+    record_files = _tree(record_dir, "run record")
+    ledger = ledger_file(company_id, sealed, root)
+    with _locked(ledger, root):
+        lines, records = _read(ledger, root)
+        found = [
+            (n, r) for n, r in enumerate(records, start=1) if r.get("kind") == "freeze" and r.get("run_id") == run_id
+        ]
+        if not found:
+            raise FreezeError("no frozen run has this id")
+        number, frozen = found[-1]
+        tender = frozen.get("tender")
+        tender_id = tender.split("/", 1)[1] if isinstance(tender, str) and "/" in tender else None
+        checks = ((output_files, "outputs_sha256", "outputs"), (record_files, "run_record_sha256", "run record"))
+        for files, field, what in checks:
+            # A run outside the harness's own folders was frozen with hashed names: accept either naming.
+            if frozen.get(field) not in (_hash_tree(files, own=False), _hash_tree(files, own=True)):
+                raise FreezeError(f"the {what} at the new place don't match the freeze at ledger line {number}")
+        own_outputs, own_record = _own(company_id, tender_id, run_id, outputs, record_dir, root)
+        record: dict[str, Any] = {
+            "v": 1,
+            "kind": "relocate",
+            "tender": tender,
+            "run_id": run_id,
+            "frozen_line": number,
+            "relocated_at": (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds"),
+            "outputs_dir": _relative(outputs, root) if own_outputs else _named(_relative(outputs, root), own=False),
+            "run_record_dir": _relative(record_dir, root)
+            if own_record
+            else _named(_relative(record_dir, root), own=False),
+            "outputs_sha256": _hash_tree(output_files, own_outputs),
+            "run_record_sha256": _hash_tree(record_files, own_record),
+            "prev": _sha(lines[-1]),
+        }
+        line = canonical(record)
+        _append(ledger, line + b"\n")
+    return {**record, "line_number": len(lines) + 1, "line_sha256": _sha(line)}
 
 
 def _read_only(files: dict[str, Path]) -> list[str]:

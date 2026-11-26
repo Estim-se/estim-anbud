@@ -193,15 +193,16 @@ class Rejected(_Model):
 
 
 class Uncovered(_Model):
-    """A quantity or scope line no verified record used, with why: 'Ej omhändertaget'."""
+    """A quantity, scope or not-included line no verified record used, with why: 'Ej omhändertaget'."""
 
     block_id: str
     reason: str
     set_aside_by_model: bool = False
+    set_aside_by_code: bool = False  # a line that says by its own words that something isn't included
     set_aside_kind: SetAsideKind | None = None
-    line: Literal["quantity", "scope"] = "quantity"
+    line: Literal["quantity", "scope", "not_included"] = "quantity"
 
     @property
     def unresolved(self) -> bool:
         """Still "Ej omhändertaget": not set aside with a reason, or set aside as unclear."""
-        return not self.set_aside_by_model or self.set_aside_kind == "unclear"
+        return not (self.set_aside_by_model or self.set_aside_by_code) or self.set_aside_kind == "unclear"
