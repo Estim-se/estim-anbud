@@ -58,7 +58,7 @@ def test_fixtures_only_from_fixtures_synthetic(tmp_path: Path) -> None:
 def test_cli_run_exit_codes(data_root: Path) -> None:
     ledger_with(data_root, t_0001=sh.DEV, t_0002=sh.HELDOUT)
     assert cli.main(["run", "co-001", "t-0002"]) == cli.REFUSED
-    assert cli.main(["run", "co-001", "t-0001"]) == cli.NOT_BUILT
+    assert cli.main(["run", "co-001", "t-0001"]) == cli.REFUSED  # allowed, but nothing is prepared yet
 
 
 def test_held_out_eval_is_refused_in_an_agent_session(monkeypatch: pytest.MonkeyPatch) -> None:
