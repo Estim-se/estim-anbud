@@ -36,7 +36,8 @@ def test_a_prefix_at_a_tiers_bound_picks_the_lower_tier(tokens: int, tier: str, 
 
 
 @pytest.mark.parametrize(
-    ("high", "tier", "usd"), [(1.0, "S", 3), (2.0, "S", 3), (2.01, "M", 8), (16 / 3, "M", 8), (10.0, "L", 15)]
+    ("high", "tier", "usd"),
+    [(1.0, "S", 3), (2.0, "S", 3), (2.01, "M", 8), (16 / 3, "M", 8), (10.0, "L", 25), (50 / 3, "L", 25)],
 )
 def test_a_kalkyl_estimate_at_a_tiers_bound_picks_the_lower_tier(high: float, tier: str, usd: float) -> None:
     stop = kalkyl_stop(kalkyl_tiers(BUDGETS), high, 1.5)  # $2.00 x 1.5 = $3.00, the S tier's stop exactly
@@ -52,7 +53,8 @@ def test_a_size_above_the_top_tier_gets_the_top_tier_and_says_so() -> None:
         "from": "estimate",
         "above_top_tier": True,
     }
-    assert kalkyl_stop(kalkyl_tiers(BUDGETS), 11.0, 1.5).above_top
+    assert kalkyl_stop(kalkyl_tiers(BUDGETS), 17.0, 1.5).above_top  # $25.50 needed, over the $25 top tier
+    assert not kalkyl_stop(kalkyl_tiers(BUDGETS), 11.0, 1.5).above_top  # $16.50 fits the $25 top tier
 
 
 def test_the_budget_moves_its_stop_but_never_above_its_ceiling() -> None:
@@ -62,10 +64,10 @@ def test_the_budget_moves_its_stop_but_never_above_its_ceiling() -> None:
 
 
 def test_the_exam_counts_each_tenders_own_stop_and_the_top_one_when_its_size_is_unknown() -> None:
-    assert hard_stops()["granskning"] == 45.0 and hard_stops()["kalkyl"] == 15.0
+    assert hard_stops()["granskning"] == 45.0 and hard_stops()["kalkyl"] == 25.0
     assert tender_stop("granskning", 150_000) == 20.0 and tender_stop("granskning", 900_000) == 45.0
     assert tender_stop("kalkyl", 2.0) == 3.0 and tender_stop("kalkyl", 4.0) == 8.0
-    assert tender_stop("granskning", None) == 45.0 and tender_stop("kalkyl", None) == 15.0
+    assert tender_stop("granskning", None) == 45.0 and tender_stop("kalkyl", None) == 25.0
 
 
 # --- Granskning: the measured prefix picks the tier, under the ceiling its estimate gave ---------------------------
@@ -194,4 +196,4 @@ def test_kalkyl_picks_its_tier_from_its_dry_run_before_any_call_and_shows_it(dat
 
 def test_the_tier_tables_parse_in_order() -> None:
     assert [t.name for t in granskning_tiers(BUDGETS)] == ["S", "M", "L"]
-    assert [t.bound for t in kalkyl_tiers(BUDGETS)] == [3.0, 8.0, 15.0]
+    assert [t.bound for t in kalkyl_tiers(BUDGETS)] == [3.0, 8.0, 25.0]

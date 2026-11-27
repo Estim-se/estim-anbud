@@ -58,8 +58,10 @@ def test_the_hard_stops_are_size_tiered_within_the_plans_20_to_60_dollars() -> N
         ("M", 300_000, 30.0),
         ("L", 450_000, 45.0),
     ]
-    assert [(t.name, t.usd) for t in kalkyl] == [("S", 3.0), ("M", 8.0), ("L", 15.0)]
-    assert granskning[0].usd >= 20 and top(granskning) + top(kalkyl) <= 60  # per tender, never above the plan's top
+    assert [(t.name, t.usd) for t in kalkyl] == [("S", 3.0), ("M", 8.0), ("L", 25.0)]
+    # Per tender: the plan's $60 top, plus Kalkyl's top tier raised to $25 with the founder's approval (27 Nov 2026).
+    assert granskning[0].usd >= 20 and top(granskning) + top(kalkyl) <= 70
+    assert "calc to $25" in (paths.repo_root() / "config" / "budgets.toml").read_text(encoding="utf-8")
     assert granskning[-1].bound == budgets["prefix"]["budget_tokens"]  # a planned prefix never passes the top tier
     lens = {t["max_prefix_tokens"]: t["max_usd"] for t in budgets["lens_tiers"]}
     assert all(lens[int(t.bound)] == t.usd / 10 for t in granskning[1:])  # matching lens tiers at 300k and 450k

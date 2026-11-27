@@ -9,7 +9,9 @@ target_median = 15.00
 # Granskning's tier comes from its shared prefix: the prefix plan's estimate before the first call, then the prefix
 # the map's first call measures. Kalkyl's comes from its own $0 dry-run estimate (the high end) times `margin`, before
 # any paid call. A size at a tier's bound picks that tier; a size above the top tier gets the top tier. The largest
-# pair is $45 + $15 = $60 per tender, the plan's top. The monthly workspace cap is separate.
+# pair was $45 + $15 = $60 per tender, the plan's top. Kalkyl's top tier is now $25, so the largest pair is
+# $45 + $25 = $70: the founder approved it in chat on 27 Nov 2026, "$500 cap + calc to $25", after the exam's $0 pass
+# showed every exam tender above Kalkyl's $15 tier. The monthly workspace cap is separate.
 [[granskning_stops]]
 tier = "S"
 max_prefix_tokens = 150000
@@ -38,7 +40,7 @@ hard_stop = 8.00
 
 [[kalkyl_stops]]
 tier = "L"
-hard_stop = 15.00
+hard_stop = 25.00 # founder-approved 27 Nov 2026 (see the comment above)
 
 [baseline]
 hard_stop = 10.00 # per old-engine baseline run; about $6 expected per dev tender (plan: Cross-engine baseline)
