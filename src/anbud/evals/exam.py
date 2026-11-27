@@ -28,6 +28,10 @@ Per tender of the split status asked for:
 
 For prospective tenders it prints the nearest deadline of the open ones, in days, and warns about every tender whose
 deadline has passed: a run after the deadline isn't a prospective prediction any more.
+
+No figure is printed for a group of fewer than two tenders (`MIN_GROUP`). Sizes, the selection, the prefix plan and the
+estimate are kept per tender in its sealed exam record and printed as one total over every prepared tender of both
+splits (`combine`), never per split; a split of fewer than two tenders prints counts of tenders only.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ VARIANT_LABELS = {
     "kalkyl": "with the amendments; without Q&A and award",
 }
 CHILD_ENV_DROP = ("ANBUD_EVAL_LANE", "ANBUD_DATA_ROOT")
+MIN_GROUP = 2  # no figure for a group of fewer tenders
 KEPT_STOPS = ("security_marking",)  # prep stops a later pass doesn't retry; the tender isn't read again
 
 
@@ -314,7 +319,6 @@ _GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
 PREP_STOPS = (
     ("security marking", "security_marking"),
     ("block-id prefix", "id_collision"),
-    ("pixel or page limit", "image_limit"),
     ("held-out or sealed storage", "sealed_storage"),
     ("intake manifest", "manifest"),
     ("no inbox folder", "manifest"),
@@ -402,6 +406,12 @@ class Engines:
             paths.company_dir(company_id, vroot) / "runs" / run_id,
         )
 
+    def selection_plan(self, vroot: Path, company_id: str, tender_id: str) -> dict[str, Any] | None:
+        """The selection and prefix plan a Granskning run on the granskning input would use (`selection_sizes`)."""
+        tender = paths.dev_tender_dir(company_id, tender_id, vroot)
+        budgets = tomllib.loads((CONFIG_DIR / "budgets.toml").read_text())
+        return selection_sizes(tender / "prep", tender / "calc", budgets)
+
     def _app_export(self) -> Path:
         if self._app_root is None:
             self._app_sha = baseline.resolve_app(self.app, self.app_ref)
@@ -467,6 +477,37 @@ class Engines:
         )
 
 
+def selection_sizes(prep_dir: Path, calc_dir: Path, budgets: dict[str, Any]) -> dict[str, Any] | None:
+    """Counts from `anbud.selection` and the prefix budget (`anbud.granskning.budget`), with the same calls a
+    Granskning run makes: documents and pages, the pages left out as other trades', unknown documents, and the
+    planned prefix. None when the prep output can't be read."""
+    from anbud.granskning.budget import PrefixBudget, plan_prefix
+    from anbud.granskning.calc import load_calc
+    from anbud.selection import SelectionError, load_selected
+
+    try:
+        corpus, selection = load_selected(prep_dir)
+        calc = load_calc(calc_dir)
+        budget = PrefixBudget.from_config(budgets)
+        plan = plan_prefix(corpus, calc, budget) if budget is not None else None
+    except (OSError, ValueError, KeyError, SelectionError):
+        return None
+    out: dict[str, Any] = {
+        "documents": len(selection.classes),
+        "unknown_documents": sum(c.discipline == "unknown" for c in selection.classes.values()),
+        "pages": sum(selection.pages.values()),
+        "pages_excluded": selection.pages_excluded,
+    }
+    if plan is not None:
+        out |= {
+            "budget_tokens": plan.budget,
+            "p1_fits": plan.p1_fits,
+            "planned_tokens": plan.total,
+            "search_only": len(plan.search_only),
+        }
+    return out
+
+
 # --- The exam -----------------------------------------------------------------------------------------------------
 
 
@@ -503,6 +544,7 @@ class Report:
     runs_after_deadline: int = 0
     spent_usd: float = 0.0
     frozen: int = 0
+    combined: dict[str, Any] = field(default_factory=dict)  # one total over both splits (`combine`)
 
     @property
     def estimate_total(self) -> float:
@@ -636,40 +678,77 @@ def run_exam(
             report.pages += sum((summary.get("pages_by_kind") or {}).values())
 
     # 3. The estimate, from the engines' own dry runs and prep sizes.
+    # Granskning's basis is the planned prefix when the prefix budget applies: what a paid run would send. A tender
+    # whose fixed part and priority 1 don't fit would stop before any call, but is counted at its hard stop, as the
+    # paid loop counts a run that reports no cost.
     margin = float(cfg["margin"])
     estimate: Counter[str] = Counter()
     plans: dict[str, list[str]] = {}
     prefixes: list[int] = []
+    sizes: dict[str, dict[str, Any]] = {}
     for t in ready:
         roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
+        tender = paths.dev_tender_dir(company_id, t, roots["granskning"])
+        summary = _summary(tender)
+        selection = runner.selection_plan(roots["granskning"], company_id, t)
+        size: dict[str, Any] = {
+            "at": stamp,
+            "documents": int(summary.get("documents") or 0),
+            "pages": sum((summary.get("pages_by_kind") or {}).values()),
+            "skipped_by_type": dict(sorted(_skipped(tender).items())),
+            "prefix_tokens": None,
+            "selection": selection,
+            "estimate_usd": {},
+            "estimate_unknown": 0,
+            "worst_usd": 0.0,
+            "baseline_runs": 0,
+        }
         if "granskning" in engines:
             tokens = runner.granskning_estimate(roots["granskning"], company_id, t, f"estimate-{t}-granskning.log")
-            if tokens is None:
-                report.estimate_unknown += 1
-                estimate["granskning"] += stops["granskning"]
-            else:
+            size["prefix_tokens"] = tokens
+            planned = selection.get("planned_tokens") if selection and selection.get("p1_fits") else None
+            basis = planned if planned is not None else tokens
+            if tokens is not None:
                 prefixes.append(tokens)
-                usd = tokens / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin
-                estimate["granskning"] += min(usd, stops["granskning"])
-            report.worst_case_usd += stops["granskning"]
+            if basis is None or (selection and selection.get("p1_fits") is False):
+                size["estimate_unknown"] += basis is None
+                usd = stops["granskning"]
+            else:
+                usd = min(basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin, stops["granskning"])
+            size["estimate_usd"]["granskning"] = usd
+            size["worst_usd"] += stops["granskning"]
         if "kalkyl" in engines:
             high = runner.kalkyl_estimate(roots["kalkyl"], company_id, t, f"estimate-{t}-kalkyl.log")
-            if high is None:
-                report.estimate_unknown += 1
-                estimate["kalkyl"] += stops["kalkyl"]
-            else:
-                estimate["kalkyl"] += min(high * margin, stops["kalkyl"])
-            report.worst_case_usd += stops["kalkyl"]
+            size["estimate_unknown"] += high is None
+            size["estimate_usd"]["kalkyl"] = stops["kalkyl"] if high is None else min(high * margin, stops["kalkyl"])
+            size["worst_usd"] += stops["kalkyl"]
         variants = ["granskning"] if records[t]["same_input"] else list(VARIANTS)
         plans[t] = variants if "baseline" in engines else []
         for v in plans[t]:
             pages = sum((_summary(paths.dev_tender_dir(company_id, t, roots[v])).get("pages_by_kind") or {}).values())
-            estimate["baseline"] += min(pages * float(cfg["baseline_usd_per_page"]) * margin, stops["baseline"])
-            report.worst_case_usd += stops["baseline"]
-            report.baseline_runs += 1
+            usd = min(pages * float(cfg["baseline_usd_per_page"]) * margin, stops["baseline"])
+            size["estimate_usd"]["baseline"] = size["estimate_usd"].get("baseline", 0.0) + usd
+            size["worst_usd"] += stops["baseline"]
+            size["baseline_runs"] += 1
+        estimate.update(size["estimate_usd"])
+        report.estimate_unknown += size["estimate_unknown"]
+        report.worst_case_usd += size["worst_usd"]
+        report.baseline_runs += size["baseline_runs"]
+        sizes[t] = size
     report.estimate_usd = {k: round(v, 2) for k, v in sorted(estimate.items())}
     report.worst_case_usd = round(report.worst_case_usd, 2)
     report.prefix_tokens = prefix_stats(prefixes, int(cfg["context_tokens"]), int(cfg["large_prefix_tokens"]))
+    for t in tenders:  # each tender's record holds the sizes of its last pass, and none once prep stops
+        record = dict(records[t])
+        if t in sizes:
+            record["sizes"] = sizes[t]
+        elif "sizes" not in record:
+            continue
+        else:
+            del record["sizes"]
+        records[t] = record
+        intake._write_private(_record_path(company_id, kind, t, root), json.dumps(record, indent=1, sort_keys=True))
+    report.combined = combine(company_id, status, root)
 
     # The old engine's dry run on each input: the plumbing works, and nothing is sent.
     if not paid:
@@ -694,7 +773,8 @@ def run_exam(
     # 4. Paid runs, within the budget.
     assert budget_usd is not None
     if report.estimate_total > budget_usd:
-        raise ExamError(f"the estimate (${report.estimate_total:.2f}) is above the budget (${budget_usd:.2f})")
+        figure = f" (${report.estimate_total:.2f})" if report.tenders >= MIN_GROUP else ""
+        raise ExamError(f"the estimate{figure} is above the budget (${budget_usd:.2f})")
     runs: list[EngineRun] = []
     for t in ready:
         roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
@@ -753,6 +833,80 @@ def run_exam(
     return report
 
 
+def _median(values: list[int]) -> int:
+    return round(statistics.median(values))
+
+
+def combine(company_id: str, status: dict[str, str], root: Path | None = None) -> dict[str, Any]:
+    """Sizes, the selection, the prefix plan and the estimate as one total over every tender of both splits whose
+    last exam pass prepared it, from the sealed tender records. Never per tender or per split; `tenders` and
+    `by_split` are counts of tenders."""
+    found: list[dict[str, Any]] = []
+    by_split: Counter[str] = Counter()
+    for kind, split in KINDS.items():
+        for t in sorted(x for x, s in status.items() if s == split):
+            path = _record_path(company_id, kind, t, root)
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+            one = record.get("sizes") if isinstance(record, dict) else None
+            if isinstance(one, dict):
+                found.append(one)
+                by_split[kind] += 1
+    out: dict[str, Any] = {"tenders": len(found), "by_split": dict(sorted(by_split.items()))}
+    if not found:
+        return out
+    cfg = exam_config()
+    skipped: Counter[str] = Counter()
+    estimate: Counter[str] = Counter()
+    for one in found:
+        skipped.update(one.get("skipped_by_type") or {})
+        estimate.update(one.get("estimate_usd") or {})
+    out |= {
+        "documents": sum(int(one.get("documents") or 0) for one in found),
+        "pages": sum(int(one.get("pages") or 0) for one in found),
+        "skipped_by_type": dict(sorted(skipped.items())),
+        "prefix": prefix_stats(
+            [int(one["prefix_tokens"]) for one in found if one.get("prefix_tokens") is not None],
+            int(cfg["context_tokens"]),
+            int(cfg["large_prefix_tokens"]),
+        ),
+        "estimate_usd": {k: round(v, 2) for k, v in sorted(estimate.items())},
+        "estimate_unknown": sum(int(one.get("estimate_unknown") or 0) for one in found),
+        "worst_usd": round(sum(float(one.get("worst_usd") or 0) for one in found), 2),
+        "baseline_runs": sum(int(one.get("baseline_runs") or 0) for one in found),
+    }
+    selections = [one["selection"] for one in found if isinstance(one.get("selection"), dict)]
+    if selections:
+        pages = sum(int(x["pages"]) for x in selections)
+        documents = sum(int(x["documents"]) for x in selections)
+        selected = [int(x["pages"]) - int(x["pages_excluded"]) for x in selections]
+        planned = [x for x in selections if "p1_fits" in x]
+        fitting = [int(x["planned_tokens"]) for x in planned if x["p1_fits"]]
+        out["selection"] = {
+            "tenders": len(selections),
+            "pages_excluded_pct": round(100 * sum(int(x["pages_excluded"]) for x in selections) / pages, 1)
+            if pages
+            else 0.0,
+            "unknown_documents_pct": round(100 * sum(int(x["unknown_documents"]) for x in selections) / documents, 1)
+            if documents
+            else 0.0,
+            "selected_pages_median": _median(selected),
+            "selected_pages_max": max(selected),
+            "planned": len(planned),
+            "budget_tokens": max((int(x["budget_tokens"]) for x in planned), default=0),
+            "would_stop": sum(not x["p1_fits"] for x in planned),
+            "fitting": len(fitting),
+            "planned_tokens_median": _median(fitting) if fitting else None,
+            "planned_tokens_max": max(fitting) if fitting else None,
+            "search_only_documents": sum(int(x.get("search_only") or 0) for x in planned),
+        }
+    return out
+
+
 def _write_exam(
     exam: Path, stamp: str, report: Report, records: dict[str, dict[str, Any]], runs: list[EngineRun]
 ) -> None:
@@ -772,51 +926,94 @@ def _counts(values: dict[str, int]) -> str:
 
 
 def _say(r: Report, say: Callable[[str], None]) -> None:
-    """Aggregates only."""
-    say(f"anbud eval {r.kind}: {r.tenders} tenders")
-    say(
-        f"quarantine: answer keys held in {r.held_tenders} of {r.quarantined} ({_counts(r.held)}); "
-        f"{r.amendments_to_kalkyl} amendments given to Kalkyl; {r.same_input} tenders with one input for both"
-    )
+    """Aggregates only, and no figure for a group of fewer than `MIN_GROUP` tenders."""
+    small = r.tenders < MIN_GROUP
+    say(f"anbud eval {r.kind}: {r.tenders} tenders" + ("; fewer than 2, so counts of tenders only" if small else ""))
+    if not small:
+        say(
+            f"quarantine: answer keys held in {r.held_tenders} of {r.quarantined} ({_counts(r.held)}); "
+            f"{r.amendments_to_kalkyl} amendments given to Kalkyl; {r.same_input} tenders with one input for both"
+        )
     kept = f"; {r.prep_stops_kept} kept from an earlier pass, not read again" if r.prep_stops_kept else ""
     stops = f" ({_counts(r.prep_stops)}{kept})" if r.prep_stops else ""
-    say(
-        f"prep: {r.prepared} prepared, {r.prep_failed} stopped{stops}; {r.documents} documents (skipped by type: "
-        f"{_counts(r.skipped_by_type)}), {r.pages} pages (granskning input)"
-    )
-    p = r.prefix_tokens
-    if p:
-        say(
-            "granskning prefix (dry-run estimate, before page cards): "
-            f"median {p['median']:,} tokens, max {p['max']:,}; "
-            f"of {p['runs']} runs {p['over_context']} over the context ({p['context']:,}), "
-            f"{p['over_large']} over {p['large']:,}"
-        )
+    say(f"prep: {r.prepared} prepared, {r.prep_failed} stopped{stops}")
     if r.deadlines is not None:
         d = r.deadlines
-        nearest = f"nearest open deadline in {d.nearest_days} days" if d.nearest_days is not None else "none open"
-        say(f"deadlines: {d.open} open, {nearest}; {d.passed} passed; {d.unknown} unknown")
+        if small:
+            say(f"deadlines: {d.open} open; {d.passed} passed; {d.unknown} unknown")
+        else:
+            nearest = f"nearest open deadline in {d.nearest_days} days" if d.nearest_days is not None else "none open"
+            say(f"deadlines: {d.open} open, {nearest}; {d.passed} passed; {d.unknown} unknown")
         if d.passed:
             say(f"warning: {d.passed} tenders are past their deadline; a run now comes after it")
-    parts = ", ".join(f"{k} ${v:.2f}" for k, v in r.estimate_usd.items()) or "nothing to run"
-    unknown = (
-        f"; {r.estimate_unknown} engine estimates unknown, counted at their hard stop" if r.estimate_unknown else ""
-    )
-    say(
-        f"estimate: ${r.estimate_total:.2f} ({parts}; {r.baseline_runs} old-engine runs){unknown}; "
-        f"worst case ${r.worst_case_usd:.2f} (every hard stop)"
-    )
     for engine in sorted(r.dry_runs):
-        say(f"dry runs: {engine} {r.dry_runs_ok.get(engine, 0)} of {r.dry_runs[engine]} reached the first model call")
+        ok, total = r.dry_runs_ok.get(engine, 0), r.dry_runs[engine]
+        if small:
+            say(f"dry runs: {engine} {'all' if ok == total else 'not all'} reached the first model call")
+        else:
+            say(f"dry runs: {engine} {ok} of {total} reached the first model call")
     if r.plan is not None:
         say(f"scoring plan: ledger line {r.plan['line']}, sha256 {r.plan['sha256'][:12]}")
     if r.paid:
-        say(
-            f"runs: ok {_counts(r.runs_ok)}; failed {_counts(r.runs_failed)}; {r.runs_skipped_budget} not started "
-            f"(budget); spent ${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger"
-        )
+        if small:
+            say("runs: counts and spend stay in the sealed exam record (fewer than 2 tenders)")
+        else:
+            say(
+                f"runs: ok {_counts(r.runs_ok)}; failed {_counts(r.runs_failed)}; {r.runs_skipped_budget} not "
+                f"started (budget); spent ${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger"
+            )
         if r.runs_after_deadline:
             say(f"warning: {r.runs_after_deadline} frozen runs came after their tender's deadline")
+    _say_combined(r.combined, say)
+
+
+def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
+    """The total over both splits, or a note when fewer than `MIN_GROUP` tenders have sizes."""
+    if c.get("tenders", 0) < MIN_GROUP:
+        say("both splits: fewer than 2 prepared tenders, so no sizes or estimates")
+        return
+    splits = ", ".join(f"{k} {v}" for k, v in c["by_split"].items())
+    say(
+        f"both splits, one total over {c['tenders']} prepared tenders ({splits}): {c['documents']} documents "
+        f"(skipped by type: {_counts(c['skipped_by_type'])}), {c['pages']} pages (granskning input)"
+    )
+    p = c.get("prefix") or {}
+    if p:
+        say(
+            "granskning prefix after the selection, before the prefix budget (dry-run estimate, before page cards): "
+            f"median {p['median']:,} tokens, max {p['max']:,}; of {p['runs']} runs {p['over_context']} over the "
+            f"context ({p['context']:,}), {p['over_large']} over {p['large']:,}"
+        )
+    sel = c.get("selection")
+    if sel:
+        say(
+            f"selection: {sel['pages_excluded_pct']:.1f}% of pages left out as other trades', "
+            f"{sel['unknown_documents_pct']:.1f}% of documents unknown; selected pages median "
+            f"{sel['selected_pages_median']:,}, max {sel['selected_pages_max']:,}"
+        )
+        if sel["planned"]:
+            fit = (
+                f"planned prefix median {sel['planned_tokens_median']:,} tokens, max {sel['planned_tokens_max']:,} "
+                f"over the {sel['fitting']} that fit"
+                if sel["fitting"]
+                else "none fits"
+            )
+            say(
+                f"prefix budget {sel['budget_tokens']:,} tokens: {sel['would_stop']} of {sel['planned']} tenders would "
+                f"stop (fixed part and priority 1 over the budget); {fit}; {sel['search_only_documents']} documents "
+                "search-only"
+            )
+    parts = ", ".join(f"{k} ${v:.2f}" for k, v in c["estimate_usd"].items()) or "nothing to run"
+    total = round(sum(c["estimate_usd"].values()), 2)
+    unknown = (
+        f"; {c['estimate_unknown']} engine estimates unknown, counted at their hard stop"
+        if c["estimate_unknown"]
+        else ""
+    )
+    say(
+        f"estimate: ${total:.2f} ({parts}; {c['baseline_runs']} old-engine runs){unknown}; "
+        f"worst case ${c['worst_usd']:.2f} (every hard stop)"
+    )
 
 
 def estimate_digest(report: Report) -> str:

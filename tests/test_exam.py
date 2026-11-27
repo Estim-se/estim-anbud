@@ -9,6 +9,7 @@ import io
 import json
 import os
 import shutil
+import tomllib
 import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -20,6 +21,7 @@ from test_baseline import ENGINE, LIB, fake_app, git
 from test_intake_blind import notice_page
 
 from anbud import cli, intake, paths
+from anbud.config import CONFIG_DIR
 from anbud.evals import exam, freeze
 from anbud.evals import split_heldout as sh
 
@@ -127,7 +129,13 @@ def test_a_dry_exam_quarantines_prepares_estimates_and_prints_aggregates_only(
     assert "dry runs: baseline 5 of 5 reached the first model call" in printed
     assert report.prefix_tokens["runs"] == 3 and 0 < report.prefix_tokens["median"] <= report.prefix_tokens["max"]
     assert report.prefix_tokens["over_context"] == report.prefix_tokens["over_large"] == 0
-    assert "granskning prefix (dry-run estimate, before page cards): median " in printed
+    assert "granskning prefix after the selection, before the prefix budget (dry-run estimate" in printed
+
+    # One total over both splits; only this split has been examined, with three prepared tenders.
+    assert report.combined["tenders"] == 3 and report.combined["by_split"] == {"prospective": 3}
+    assert report.combined["selection"]["tenders"] == 3 and report.combined["selection"]["would_stop"] == 0
+    assert "both splits, one total over 3 prepared tenders (prospective 3): " in printed
+    assert "prefix budget 450,000 tokens: 0 of 3 tenders would stop" in printed
 
     # Deadlines: one open in 12 days, one passed (warned), one unknown.
     assert "deadlines: 1 open, nearest open deadline in 12 days; 1 passed; 1 unknown" in printed
@@ -159,11 +167,16 @@ class FakeEngines(exam.Engines):
         costs: dict[str, float | None],
         stops: dict[str, str] | None = None,
         tokens: dict[str, int] | None = None,
+        selections: dict[str, dict] | None = None,
     ) -> None:
         self.costs = costs
         self.stops = stops or {}
         self.tokens = tokens or {}
+        self.selections = selections or {}
         self.calls: list[tuple[str, str]] = []
+
+    def selection_plan(self, vroot: Path, company_id: str, tender_id: str) -> dict | None:
+        return self.selections.get(tender_id)
 
     def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> str | None:
         if tender_id in self.stops:
@@ -296,12 +309,12 @@ def test_prep_stops_are_counted_by_category_and_prefix_sizes_summarised(data_roo
     report = exam.run_exam("co-002", "prospective", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
     printed = "\n".join(lines)
     assert report.prepared == 2 and report.prep_failed == 1 and report.prep_stops == {"security_marking": 1}
-    assert "prep: 2 prepared, 1 stopped (security_marking 1); " in printed
+    assert "prep: 2 prepared, 1 stopped (security_marking 1)" in lines
     assert report.prefix_tokens["median"] == 725_000 and report.prefix_tokens["max"] == 1_200_000
     assert report.prefix_tokens["over_context"] == 1 and report.prefix_tokens["over_large"] == 2
     assert (
-        "granskning prefix (dry-run estimate, before page cards): median 725,000 tokens, max 1,200,000; "
-        "of 2 runs 1 over the context (1,000,000), 2 over 200,000"
+        "granskning prefix after the selection, before the prefix budget (dry-run estimate, before page cards): "
+        "median 725,000 tokens, max 1,200,000; of 2 runs 1 over the context (1,000,000), 2 over 200,000"
     ) in printed
     stopped = paths.dev_tender_dir("co-002", "t-0003", exam.variant_root("co-002", "prospective", "kalkyl"))
     assert not (stopped / "prep").exists()  # a tender whose first input stopped isn't prepared a second time
@@ -318,7 +331,6 @@ def test_prep_stops_are_counted_by_category_and_prefix_sizes_summarised(data_roo
             "security_marking",
         ),
         (3, "anbud prep: stopped: two files share a block-id prefix; block ids would collide\n", "id_collision"),
-        (3, "anbud prep: stopped: an image is larger than the pixel or page limit\n", "image_limit"),
         (
             3,
             "anbud prep: stopped: the inbox, manifest or output folder is in held-out or sealed storage",
@@ -441,3 +453,88 @@ def test_any_other_prep_stop_is_retried_on_the_next_pass(data_root: Path) -> Non
         assert report.prep_stops == {"manifest": 1} and report.prep_stops_kept == 0
     record = json.loads((exam.exam_dir("co-002", "prospective") / "tenders" / "t-0003.json").read_text())
     assert "prep_stop" not in record
+
+
+def test_no_figure_for_a_group_of_fewer_than_two_tenders(data_root: Path) -> None:
+    """The held-out split here is one tender: its passes print counts of tenders only, and sizes and estimates appear
+    only as one total over both splits once at least two tenders are prepared."""
+    sealed_store(data_root)
+    runner = FakeEngines({"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0})
+
+    def exam_pass(kind: str, now: datetime) -> list[str]:
+        lines: list[str] = []
+        exam.run_exam("co-002", kind, runner=runner, now=now, local_now=LOCAL_NOW, say=lines.append)
+        return lines
+
+    alone = [
+        "anbud eval heldout: 1 tenders; fewer than 2, so counts of tenders only",
+        "prep: 1 prepared, 0 stopped",
+        "dry runs: baseline all reached the first model call",
+    ]
+    assert exam_pass("heldout", NOW) == [*alone, "both splits: fewer than 2 prepared tenders, so no sizes or estimates"]
+
+    prospective = exam_pass("prospective", NOW)
+    assert "prep: 3 prepared, 0 stopped" in prospective  # three tenders: the split's own lines carry figures
+    combined = [line for line in prospective if line.startswith(("both splits", "granskning prefix", "estimate"))]
+    assert combined[0] == (
+        "both splits, one total over 4 prepared tenders (heldout 1, prospective 3): 8 documents "
+        "(skipped by type: none), 200 pages (granskning input)"
+    )
+    # Per tender: Granskning 10,000 tokens ($0.975), Kalkyl $1.50, the old engine 50 pages per input ($1.65); four
+    # tenders, seven old-engine inputs (the folder delivery has one).
+    assert combined[-1] == (
+        "estimate: $21.45 (baseline $11.55, granskning $3.90, kalkyl $6.00; 7 old-engine runs); "
+        "worst case $162.00 (every hard stop)"
+    )
+
+    again = exam_pass("heldout", datetime(2026, 12, 1, 10, 0, tzinfo=UTC))
+    assert again[:3] == alone and again[3:] == combined  # the same total, from each split's last pass
+    assert not any("$" in line or "pages" in line or "held in" in line for line in again[:3])
+
+
+def test_the_selection_and_the_prefix_budget_are_one_total_over_the_tenders(data_root: Path) -> None:
+    sealed_store(data_root)
+    sizes = {
+        "t-0002": (10, 1, 400, 300, True, 100_000, 2),
+        "t-0003": (10, 3, 600, 100, False, 900_000, 0),
+        "t-0004": (20, 0, 1000, 600, True, 150_000, 5),
+    }
+    keys = ("documents", "unknown_documents", "pages", "pages_excluded", "p1_fits", "planned_tokens", "search_only")
+    selections = {t: {**dict(zip(keys, v, strict=True)), "budget_tokens": 450_000} for t, v in sizes.items()}
+    runner = FakeEngines({"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0}, selections=selections)
+    lines: list[str] = []
+    report = exam.run_exam("co-002", "prospective", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
+    assert (
+        "selection: 50.0% of pages left out as other trades', 10.0% of documents unknown; selected pages median 400, "
+        "max 500"
+    ) in lines
+    assert (
+        "prefix budget 450,000 tokens: 1 of 3 tenders would stop (fixed part and priority 1 over the budget); "
+        "planned prefix median 125,000 tokens, max 150,000 over the 2 that fit; 7 documents search-only"
+    ) in lines
+    # Granskning's basis is the planned prefix: 100,000 and 150,000 tokens; the tender that would stop counts at $20.
+    assert report.combined["estimate_usd"]["granskning"] == pytest.approx(9.75 + 14.625 + 20.0, abs=0.01)
+
+
+def test_selection_sizes_come_from_the_engines_own_selection_and_prefix_plan(data_root: Path, tmp_path: Path) -> None:
+    from large_tender import TOTAL_PAGES, write_large_prep
+    from mixed_trades import write_mixed_prep
+
+    vroot = data_root / "variant"
+    write_mixed_prep(paths.dev_tender_dir("co-002", "t-0002", vroot) / "prep")
+    mixed = exam.Engines(data_root / "logs", tmp_path, "HEAD", None).selection_plan(vroot, "co-002", "t-0002")
+    assert mixed is not None
+    # Six documents of 83 pages: plumbing, structure and the architect's plan (the tender has electrical documents)
+    # are left out, and one document nothing identifies is read as unknown.
+    assert (mixed["documents"], mixed["pages"], mixed["pages_excluded"], mixed["unknown_documents"]) == (6, 83, 77, 1)
+    assert mixed["p1_fits"] and mixed["search_only"] == 0 and 0 < mixed["planned_tokens"] < mixed["budget_tokens"]
+
+    large_prep = write_large_prep(tmp_path / "large" / "prep")
+    budgets = tomllib.loads((CONFIG_DIR / "budgets.toml").read_text())
+    large = exam.selection_sizes(large_prep, tmp_path / "large" / "calc", budgets)
+    assert large is not None and large["pages"] == TOTAL_PAGES and large["pages_excluded"] > 0
+    assert large["p1_fits"] and large["search_only"] > 0 and large["planned_tokens"] <= large["budget_tokens"]
+    tight = exam.selection_sizes(large_prep, tmp_path / "large" / "calc", {"prefix": {"budget_tokens": 10_000}})
+    assert tight is not None and tight["p1_fits"] is False
+
+    assert exam.selection_sizes(tmp_path / "no-prep", tmp_path / "calc", budgets) is None
