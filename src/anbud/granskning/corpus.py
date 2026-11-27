@@ -26,6 +26,7 @@ class Corpus:
     documents: list[dict] = field(default_factory=list)
     all_order: list[str] = field(default_factory=list)
     excluded: dict[str, str] = field(default_factory=dict)  # doc_id -> trade, for documents outside `order`
+    search_only: dict[str, str] = field(default_factory=dict)  # doc_id -> why the prefix holds only its outline
 
     def __post_init__(self) -> None:
         if not self.all_order:

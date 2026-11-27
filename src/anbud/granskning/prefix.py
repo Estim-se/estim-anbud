@@ -122,7 +122,34 @@ EXCLUDED_NOTE = (
 )
 
 
-def _doc_header(doc: dict[str, Any], tile_ids: list[str], excluded: str | None = None) -> str:
+SEARCH_ONLY_NOTE = (
+    "A document marked search_only= didn't fit the prefix in full: only its outline (headings with block ids and "
+    "pages) is in this corpus. search_blocks and read_blocks reach all of its text."
+)
+
+
+def outline_lines(corpus: Corpus, doc_id: str) -> list[str]:
+    """A document's outline as prefix lines: its outline entries, or its heading blocks when prep found no outline."""
+    lines = []
+    for entry in corpus.outline:
+        if entry.doc_id != doc_id:
+            continue
+        where = f"p{entry.page}" if entry.page is not None else (defuse(entry.sheet) if entry.sheet else "-")
+        title = " ".join((f"{entry.number} {entry.title}" if entry.number else entry.title).split())
+        lines.append(f"{entry.block_id or '-'} {where} H: {defuse(title)}")
+    if lines:
+        return lines
+    return [block_line(corpus.blocks[b]) for b in corpus.all_order if _is_heading_of(corpus, b, doc_id)]
+
+
+def _is_heading_of(corpus: Corpus, block_id: str, doc_id: str) -> bool:
+    block = corpus.blocks[block_id]
+    return block.doc_id == doc_id and block.kind == "heading"
+
+
+def _doc_header(
+    doc: dict[str, Any], tile_ids: list[str], excluded: str | None = None, search_only: str | None = None
+) -> str:
     parts = [doc["doc_id"], str(doc.get("kind", "")), f'"{doc_name(doc)}"']
     pages = doc.get("pages") or []
     sheets = doc.get("sheets") or []
@@ -137,6 +164,8 @@ def _doc_header(doc: dict[str, Any], tile_ids: list[str], excluded: str | None =
         parts.append(f"skipped={doc['skipped']}")
     if excluded is not None:
         parts.append(f'excluded="{defuse(excluded)}"')
+    if search_only is not None:
+        parts.append(f'search_only="{defuse(search_only)}"')
     return " ".join(parts)
 
 
@@ -168,11 +197,20 @@ def corpus_text(corpus: Corpus) -> str:
     order = _doc_order(corpus)
     for doc_id in order:
         doc = docs.get(doc_id, {"doc_id": doc_id})
-        lines.append(_doc_header(doc, tiles.get(doc_id, []), corpus.excluded.get(doc_id)))
+        marks = corpus.excluded.get(doc_id), corpus.search_only.get(doc_id)
+        lines.append(_doc_header(doc, tiles.get(doc_id, []), *marks))
     if corpus.excluded:
         lines.append(EXCLUDED_NOTE)
+    if corpus.search_only:
+        lines.append(SEARCH_ONLY_NOTE)
     lines.append("</documents>")
     for doc_id in order:
+        if doc_id in corpus.search_only:
+            name = doc_name(docs.get(doc_id, {}))
+            lines.append(f'<doc id="{doc_id}" name="{name}" search_only="{defuse(corpus.search_only[doc_id])}">')
+            lines.extend(outline_lines(corpus, doc_id))
+            lines.append("</doc>")
+            continue
         blocks = by_doc.get(doc_id, [])
         if not blocks:
             continue

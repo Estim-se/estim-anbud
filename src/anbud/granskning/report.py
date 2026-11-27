@@ -86,6 +86,7 @@ class Report(_Model):
 
 
 OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
+SEARCH_ONLY = "Endast sökbara (prefixbudget)"
 
 
 def _where(block: Block, names: dict[str, str]) -> str:
@@ -281,6 +282,11 @@ def render_html(report: Report) -> str:
         parts.append(f"<p>{len(cov.unread_tiles)} ritningsrutor kunde inte läsas av kortsteget: {_e(unread)}</p>")
     if cov.named_not_present:
         parts.append(f"<p>Nämns men finns inte i underlaget: {_e(', '.join(cov.named_not_present))}</p>")
+    if cov.search_only_documents:
+        parts.append(
+            f"<p>{SEARCH_ONLY}: {len(cov.search_only_documents)} dokument. Prefixet höll bara deras rubriker; "
+            f"granskningen nådde texten genom sökning. {_e(', '.join(cov.search_only_documents))}</p>"
+        )
     if cov.other_discipline:
         parts.append(
             f"<p>{OTHER_DISCIPLINE}: {_e(cov.other_discipline)}. Sökbara för hänvisningar; "
@@ -463,6 +469,7 @@ def build_workbook(
         ("Väsentlighetsgräns", sek(report.materiality_sek)),
         ("Dokument i underlaget", report.coverage.documents),
         (OTHER_DISCIPLINE, report.coverage.other_discipline or "0 sidor, 0 dokument"),
+        (SEARCH_ONLY, len(report.coverage.search_only_documents)),
         ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
         ("Täckning", report.coverage.note),
     ]

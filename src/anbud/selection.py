@@ -80,25 +80,33 @@ _DOC_WORDS = (
     "entreprenad",
     "projektering",
 )
-# Document words that make a document common to every trade, matched at the start of a word.
-COMMON = (
-    "administrativ",
-    "kontrakt",
-    "rambeskrivning",
-    "tidplan",
-    "anbudsformulär",
-    "anbudsförfrågan",
-    "gränsdragning",
-    "ansvarsfördelning",
-    "ritningsförteckning",
-    "handlingsförteckning",
-    "lägenhetsförteckning",
-    "rumsförteckning",
-    "rumsbeskrivning",
-    "rumsfunktion",
-    "brandskydd",
-    "arbetsmiljö",
-    "miljöplan",
+# Document words that make a document common to every trade, matched at the start of a word, with the document's
+# role: what the prefix budget ranks by (`anbud.granskning.budget`). The first role a document's words give wins.
+COMMON: tuple[tuple[str, str], ...] = (
+    ("administrativ", "af"),
+    ("kontrakt", "contract"),
+    ("rambeskrivning", "general_description"),
+    ("tidplan", "time_plan"),
+    ("gränsdragning", "boundary_list"),
+    ("ansvarsfördelning", "boundary_list"),
+    ("lägenhetsförteckning", "object_list"),
+    ("rumsförteckning", "object_list"),
+    ("rumsbeskrivning", "object_list"),
+    ("rumsfunktion", "object_list"),
+    ("anbudsformulär", "common"),
+    ("anbudsförfrågan", "common"),
+    ("ritningsförteckning", "common"),
+    ("handlingsförteckning", "common"),
+    ("brandskydd", "common"),
+    ("arbetsmiljö", "common"),
+    ("miljöplan", "common"),
+)
+COMMON_ROLES = tuple(dict.fromkeys(["af", *(role for _, role in COMMON)]))
+# An electrical document's role, from its words: a technical description, a list of quantities, or a drawing.
+EL_ROLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("el_description", ("beskrivning",)),
+    ("el_list", ("mängdförteckning", "förteckning", "prisbilaga", "mängd")),
+    ("el_drawing", ("ritning", "plan", "schema")),
 )
 _COMMON_EXACT = ("af",)  # the administrative terms' own abbreviation, as a whole word
 _TOKEN = re.compile(r"[a-zåäöéü0-9]+")
@@ -136,6 +144,7 @@ class Classification:
     discipline: Discipline
     trade: str | None = None  # Estim's short name of the trade the signals point to
     signals: tuple[str, ...] = ()  # generic signal names, safe to log
+    role: str | None = None  # an electrical or common document's role (`COMMON`, `EL_ROLES`), for the prefix budget
 
     @property
     def read(self) -> bool:
@@ -160,14 +169,21 @@ def _trade_words(tokens: list[str]) -> list[str]:
     return [trade for trade, _, _, stems in TRADES if any(_is_word(t, s) for t in tokens for s in stems)]
 
 
-def _common_words(tokens: list[str]) -> bool:
-    return any(t in _COMMON_EXACT or t.startswith(COMMON) for t in tokens)
+def _common_roles(tokens: list[str]) -> list[str]:
+    found = ["af" for t in tokens if t in _COMMON_EXACT]
+    return found + [role for t in tokens for word, role in COMMON if t.startswith(word)]
+
+
+def _el_roles(tokens: list[str]) -> list[str]:
+    return [role for role, words in EL_ROLES if any(w in t for t in tokens for w in words)]
 
 
 def classify(view: DocumentView) -> Classification:
     """One document's discipline from its names, folders, opening text and code headings. Pure and deterministic."""
     signals: list[str] = []
     trades: list[str] = []
+    roles: list[str] = []
+    el_roles: list[str] = []
     common = False
     letters = {trade: letter for trade, _, letter, _ in TRADES if letter}
     for path in view.paths:
@@ -179,23 +195,30 @@ def classify(view: DocumentView) -> Classification:
                 if letter == m.group(1):
                     signals.append(f"name:{letter}")
                     trades.append(trade)
+                    el_roles.append("el_drawing")  # a numbered drawing, unless its words say otherwise
         for where, text in (("name", stem), *(("folder", p) for p in parts[:-1])):
             tokens = _tokens(text)
             for trade in _trade_words(tokens):
                 signals.append(f"{where}:{trade}")
                 trades.append(trade)
-            if _common_words(tokens):
+            if where == "name":
+                el_roles[:0] = _el_roles(tokens)
+            if found := _common_roles(tokens):
                 signals.append(f"{where}:common")
+                roles += found
                 common = True
     header = _tokens(view.header)
     for trade in _trade_words(header):
         signals.append(f"header:{trade}")
         trades.append(trade)
-    if _common_words(header):
+    el_roles += _el_roles(header)
+    if found := _common_roles(header):
         signals.append("header:common")
+        roles += found
         common = True
     if sum(1 for c in view.heading_codes if _AF_CODE.match(c)) >= MIN_CODES:
         signals.append("codes:AF")
+        roles.append("af")
         common = True
     classes = Counter(m.group(1) for c in view.heading_codes if (m := _SYSTEM_CODE.match(c)))
     if sum(classes.values()) >= MIN_CODES:
@@ -203,12 +226,15 @@ def classify(view: DocumentView) -> Classification:
         if n * 3 >= sum(classes.values()) * 2:
             signals.append(f"codes:{top}x")
             trades.append(SYSTEM_CLASSES[top])
+            el_roles.insert(0, "el_description")  # a description written to a code structure
     kinds = {trade: kind for trade, kind, _, _ in TRADES}
     found = tuple(dict.fromkeys(signals))
     if any(kinds.get(t) == "el" for t in trades):
-        return Classification("el", None, found)
+        order = [r for r, _ in EL_ROLES]
+        role = min(el_roles, key=order.index) if el_roles else "el"
+        return Classification("el", None, found, role)
     if common:
-        return Classification("common", None, found)
+        return Classification("common", None, found, min(roles, key=COMMON_ROLES.index))
     others = Counter(t for t in trades if kinds.get(t) == "other")
     if others:
         best = max(others.items(), key=lambda kv: (kv[1], -list(kinds).index(kv[0])))[0]

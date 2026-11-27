@@ -142,6 +142,7 @@ def run_granskning(
     on_progress: Callable[[str], None] | None = None,
     summary_file: str = "granskning.json",
     code: dict[str, Any] | None = None,
+    prefix_plan: dict[str, Any] | None = None,
 ) -> GranskningResult:
     """Map, then every lens in parallel. Returns when every lens has finished, failed or hit its cap."""
     events = _Events(client)
@@ -228,6 +229,7 @@ def run_granskning(
         },
         "code": code,
         "selection": excluded_counts(corpus),
+        "prefix_plan": prefix_plan,
         "caps": {"max_turns": caps.max_turns, "max_usd": caps.max_usd},
         "map": {
             "status": mapped.outcome.status,
