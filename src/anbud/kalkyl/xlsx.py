@@ -202,6 +202,7 @@ def _calc_sheet(ws: Worksheet, result: KalkylResult, catalog: Catalog, status: s
 OVERVIEW_COLUMNS = [("Uppgift", 44), ("Värde", 24), ("Underlag", 50), ("Källa (block)", 18), ("Citat", 60)]
 TOP_ASSUMED = 3  # the assumed posts Översikt names, largest first
 OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
+STOP = "Kostnadsstopp för körningen (nivå efter storlek)"
 BOUNDARY_LINES = "Rader i andra discipliners handlingar som rör elarbetena (lästa)"
 
 
@@ -284,6 +285,7 @@ def _overview(
         ("Underkända poster från modellen", c["records_rejected"], None),
         ("Avsnitt lästa / totalt", f"{c['chunk_status'].get('submitted', 0)} / {c['chunks']}", None),
         ("Modellkostnad (USD)", meta.get("cost_usd", 0.0), "0.0000"),
+        *([(STOP, meta["stop"], None)] if meta.get("stop") else []),
     ]
     for i, (label, value, fmt, *more) in enumerate(rows, FIRST_ROW + 2):
         _put(ws, i, 1, label)

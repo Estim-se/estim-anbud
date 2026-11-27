@@ -41,6 +41,7 @@ from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.run import run_dev_tender
 from anbud.kalkyl.settings import EXTRACT, MATCH, load_kalkyl_config
 from anbud.model_client import Budget, ModelClient, PrefixDrift
+from anbud.stops import Tier
 from anbud.tools import own_tools
 
 REQUEST = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
@@ -272,7 +273,7 @@ def test_r3_maps_an_unmapped_post_only_to_a_fitting_item(tender: Path) -> None:
 def test_a_budget_stop_leaves_the_rest_unread_and_the_calc_incomplete(tender: Path) -> None:
     from anbud.kalkyl.settings import KalkylConfig
 
-    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "stops": (Tier("S", 0.0001, 0.0001),)})
     summary = _run(fake_sdk(), kalkyl=tiny)
     assert not summary["complete"] and summary["chunk_status"] == {"not_run": 2}
     assert summary["lines_not_handled"] == summary["quantity_lines"] + summary["scope_lines"]
@@ -314,7 +315,7 @@ def test_a_frozen_run_is_never_resumed_or_replayed_in_place(tender: Path) -> Non
 def test_an_unfinished_run_stays_writable_so_its_run_id_resumes_it(tender: Path) -> None:
     from anbud.kalkyl.settings import KalkylConfig
 
-    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "stops": (Tier("S", 0.0001, 0.0001),)})
     stopped = _run(fake_sdk(), kalkyl=tiny)
     assert not stopped["frozen"] and "freeze_failures" not in stopped
     out = tender / "kalkyl" / "kalkyl-test"
@@ -436,7 +437,7 @@ def test_a_rebuild_from_a_base_run_answers_its_extraction_at_no_cost_and_never_w
 def test_a_rebuild_replay_counts_requests_the_base_run_never_made(tender: Path) -> None:
     from anbud.kalkyl.settings import KalkylConfig
 
-    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "stops": (Tier("S", 0.0001, 0.0001),)})
     _run(fake_sdk(), kalkyl=tiny)  # stopped by the budget: no extraction in its cache
     summary = run_dev_tender(
         "co-001", "t-0001", sdk=None, catalog_name="synthetic", run_id="kalkyl-rebuild", base_run="kalkyl-test"
@@ -448,7 +449,7 @@ def test_a_resumed_rebuild_keeps_its_base_run_and_refuses_another(tender: Path) 
     from anbud.kalkyl.run import KalkylError
     from anbud.kalkyl.settings import KalkylConfig
 
-    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "stops": (Tier("S", 0.0001, 0.0001),)})
     _run(fake_sdk(), kalkyl=tiny)  # stopped by the budget: the rebuild's replay misses and leaves it unfinished
     run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), catalog_name="synthetic", run_id="kalkyl-other")
     rebuild = {"catalog_name": "synthetic", "run_id": "kalkyl-rebuild"}
@@ -508,7 +509,7 @@ def test_the_cli_rebuild_replay_needs_no_key_and_exits_4_on_a_miss(
 
     from anbud.kalkyl.settings import KalkylConfig
 
-    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "hard_stop": 0.0001})
+    tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "stops": (Tier("S", 0.0001, 0.0001),)})
     run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), catalog_name="synthetic", run_id="stopped", kalkyl=tiny)
     assert cli.main([*args[:-1], "stopped", "--run-id", "kalkyl-r3"]) == cli.REPLAY_INCOMPLETE
     assert "replay incomplete" in capsys.readouterr().err

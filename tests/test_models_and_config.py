@@ -44,9 +44,28 @@ def test_config_files_parse_and_every_model_has_prices() -> None:
         assert {"input", "output", "cache_write_1h", "cache_read"} <= set(prices[model_id])
     for role, alias in providers["roles"].items():
         assert alias in providers["models"], role
-    assert budgets["run"]["hard_stop"] == 20.0
     tiers = budgets["lens_tiers"]
     assert [t["max_prefix_tokens"] for t in tiers] == sorted(t["max_prefix_tokens"] for t in tiers)
+
+
+def test_the_hard_stops_are_size_tiered_within_the_plans_20_to_60_dollars() -> None:
+    from anbud.stops import granskning_tiers, kalkyl_tiers, top
+
+    budgets = tomllib.loads((paths.repo_root() / "config" / "budgets.toml").read_text())
+    granskning, kalkyl = granskning_tiers(budgets), kalkyl_tiers(budgets)
+    assert [(t.name, t.bound, t.usd) for t in granskning] == [
+        ("S", 150_000, 20.0),
+        ("M", 300_000, 30.0),
+        ("L", 450_000, 45.0),
+    ]
+    assert [(t.name, t.usd) for t in kalkyl] == [("S", 3.0), ("M", 8.0), ("L", 15.0)]
+    assert granskning[0].usd >= 20 and top(granskning) + top(kalkyl) <= 60  # per tender, never above the plan's top
+    assert granskning[-1].bound == budgets["prefix"]["budget_tokens"]  # a planned prefix never passes the top tier
+    lens = {t["max_prefix_tokens"]: t["max_usd"] for t in budgets["lens_tiers"]}
+    assert all(lens[int(t.bound)] == t.usd / 10 for t in granskning[1:])  # matching lens tiers at 300k and 450k
+    assert "it becomes size-tiered, since plan line 661 allows $20–60." in (
+        paths.repo_root() / "config" / "budgets.toml"
+    ).read_text(encoding="utf-8")
 
 
 def test_ci_reruns_when_a_pr_title_or_body_is_edited() -> None:

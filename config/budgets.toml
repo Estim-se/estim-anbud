@@ -1,11 +1,44 @@
 # Budgets in USD. Never raise a cap or budget without the founder's approval.
 
 [run]
-hard_stop = 20.00
 target_median = 15.00
 
+# Per-run hard stops by tender size (anbud.stops). The plan the founder approved (parallel-inventing-candle, section
+# "The build lane"):
+#   "**Per-run hard stop:** it becomes size-tiered, since plan line 661 allows $20–60."
+# Granskning's tier comes from its shared prefix: the prefix plan's estimate before the first call, then the prefix
+# the map's first call measures. Kalkyl's comes from its own $0 dry-run estimate (the high end) times `margin`, before
+# any paid call. A size at a tier's bound picks that tier; a size above the top tier gets the top tier. The largest
+# pair is $45 + $15 = $60 per tender, the plan's top. The monthly workspace cap is separate.
+[[granskning_stops]]
+tier = "S"
+max_prefix_tokens = 150000
+hard_stop = 20.00
+
+[[granskning_stops]]
+tier = "M"
+max_prefix_tokens = 300000
+hard_stop = 30.00
+
+[[granskning_stops]]
+tier = "L"
+max_prefix_tokens = 450000 # the prefix budget below: a planned prefix never goes above it
+hard_stop = 45.00
+
 [kalkyl]
-hard_stop = 3.00 # per Kalkyl run; about $1-2.5 expected at the dev tender's size (plan section 7)
+margin = 1.5 # times the dry run's high estimate; the same margin as [exam]
+
+[[kalkyl_stops]]
+tier = "S"
+hard_stop = 3.00 # about $1-2.5 expected at the dev tender's size (plan section 7)
+
+[[kalkyl_stops]]
+tier = "M"
+hard_stop = 8.00
+
+[[kalkyl_stops]]
+tier = "L"
+hard_stop = 15.00
 
 [baseline]
 hard_stop = 10.00 # per old-engine baseline run; about $6 expected per dev tender (plan: Cross-engine baseline)
@@ -19,8 +52,7 @@ timeout_minutes = 90
 granskning_usd_per_mtok_prefix = 65.0
 baseline_usd_per_page = 0.022
 margin = 1.5
-# The exam counts Granskning dry runs whose estimated prefix is over the context window (the top lens tier ends there
-# too) and over a large-prefix mark.
+# The exam counts Granskning dry runs whose estimated prefix is over the context window and over a large-prefix mark.
 context_tokens = 1000000
 large_prefix_tokens = 200000
 
@@ -35,7 +67,9 @@ boundary_share = 0.10
 [schema_check]
 hard_stop = 0.10
 
-# Lens caps scale with the shared prefix size (tokens). Re-derived from measured p90 + 20% after the first runs.
+# Lens caps scale with the shared prefix size (tokens). Re-derived from measured p90 + 20% after the first runs. The
+# tiers at 300k and 450k match the run's hard stops: a lens may spend a tenth of its tier's stop. A prefix above the
+# top tier gets the top tier.
 [[lens_tiers]]
 max_prefix_tokens = 100000
 max_turns = 8
@@ -47,9 +81,14 @@ max_turns = 10
 max_usd = 2.00
 
 [[lens_tiers]]
-max_prefix_tokens = 1000000
+max_prefix_tokens = 300000
 max_turns = 12
-max_usd = 2.50
+max_usd = 3.00
+
+[[lens_tiers]]
+max_prefix_tokens = 450000
+max_turns = 12
+max_usd = 4.50
 
 [verifier]
 max_turns = 3

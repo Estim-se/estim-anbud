@@ -25,6 +25,7 @@ from anbud.granskning.toolbox import Toolbox
 from anbud.model_client import ModelClient
 from anbud.models import Event, TenderMap
 from anbud.selection import excluded_counts
+from anbud.stops import ESTIMATE, MEASURED, Stop, granskning_stop
 from anbud.store import canonical
 
 DEFAULT_CONCURRENCY = 3
@@ -90,6 +91,7 @@ class GranskningResult:
     prefix_tokens: int = 0
     prefix_measured: bool = False
     caps: LensCaps | None = None
+    stop: Stop | None = None  # the hard stop's tier, from the measured prefix (else the estimate)
     summary_blob: str | None = None
 
     @property
@@ -173,8 +175,11 @@ def run_granskning(
     estimated = estimate_tokens(system)
     prefix_tokens = measured or estimated
     caps = lens_caps(client.config.budgets, prefix_tokens)
+    stop = granskning_stop(client.config.budgets, prefix_tokens, MEASURED if measured is not None else ESTIMATE)
+    stop = stop.held_at(client.budget.set_stop(stop.usd))  # never above the tier the run opened with
+    say(f"hard stop: tier {stop.tier}, ${stop.hard_stop:.2f} (prefix {prefix_tokens} tokens, {stop.source})")
     result = GranskningResult(
-        client.run_id, mapped, prefix_tokens=prefix_tokens, prefix_measured=measured is not None, caps=caps
+        client.run_id, mapped, prefix_tokens=prefix_tokens, prefix_measured=measured is not None, caps=caps, stop=stop
     )
     lens_blobs: dict[str, str | None] = {}
     lens_errors: dict[str, str | None] = {}
@@ -231,6 +236,7 @@ def run_granskning(
         "selection": excluded_counts(corpus),
         "prefix_plan": prefix_plan,
         "caps": {"max_turns": caps.max_turns, "max_usd": caps.max_usd},
+        "stop": stop.summary(),
         "map": {
             "status": mapped.outcome.status,
             "error": mapped.outcome.error,

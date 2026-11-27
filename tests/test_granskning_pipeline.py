@@ -427,7 +427,7 @@ def test_a_run_that_hits_its_hard_stop_is_not_frozen(
     sdk = ScriptedSDK(script)
     monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
     monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
-    monkeypatch.setattr(model_client, "Budget", lambda hard_stop: Budget(0.0))
+    monkeypatch.setattr(model_client, "Budget", lambda *_a, **_k: Budget(0.0))
     assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-cap"]) == command.RUN_HALTED
     assert "not frozen" in capsys.readouterr().err
     assert not freeze.is_frozen("co-001", "t-0001")

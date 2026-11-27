@@ -79,10 +79,12 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     from anbud.granskning.catalog import load_named_catalog
     from anbud.granskning.lenses import load_lenses
     from anbud.granskning.pipeline import run_pipeline
+    from anbud.granskning.prefix import estimate_tokens, system_blocks
     from anbud.granskning.settings import load_settings
     from anbud.model_client import Budget, KeyMissing, ModelClient, keychain_key, make_sdk_client
     from anbud.prep.tender import IntakeStop
     from anbud.selection import load_selected
+    from anbud.stops import ESTIMATE, granskning_stop
     from anbud.store import RunStore, StoreError, check_run_id
 
     if getattr(args, "arm", None) is not None and kind != "dev":
@@ -170,7 +172,9 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
         except KeyMissing as exc:
             print(f"anbud run: {exc}", file=sys.stderr)
             return PAID_REFUSED
-    budget = Budget(float(config.budgets["run"]["hard_stop"]))
+    # The dry run's tier is the most the run may spend; the prefix the map's first call measures can only lower it.
+    ceiling = granskning_stop(config.budgets, estimate_tokens(system_blocks(corpus, calc)), ESTIMATE)
+    budget = Budget(ceiling.usd)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=args.company_id, store=store, salt=salt)
     counts = f"{len(corpus.blocks)} blocks, {len(corpus.tiles)} tiles, {len(calc)} calc posts, {len(lenses)} lenses"
     print(f"run {run_id}: {counts}")
@@ -199,6 +203,8 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     g = result.granskning
     how = "measured" if g.prefix_measured else "estimated"
     print(f"prefix {g.prefix_tokens} tokens ({how}); lens caps {g.caps}")
+    if g.stop is not None:
+        print(f"  hard stop: tier {g.stop.tier}, ${g.stop.hard_stop:.2f}, from the {g.stop.source} prefix")
     print(f"  map: {g.map.outcome.status}, ${g.map.outcome.cost_usd:.2f}")
     for lens in g.lenses:
         error = f" ({lens.error})" if lens.error else ""
@@ -312,6 +318,7 @@ def dry_run(
     print(f"  tiles for page cards: {len(corpus.tiles)}")
     from anbud.granskning.budget import PrefixBudget, plan_prefix
     from anbud.selection import excluded_counts
+    from anbud.stops import ESTIMATE, granskning_stop
 
     sel = excluded_counts(corpus)
     print(
@@ -319,6 +326,11 @@ def dry_run(
         f"{sel['boundary_lines']} of their lines kept"
     )
     budget = PrefixBudget.from_config(budgets)
+    stop = granskning_stop(budgets, tokens, ESTIMATE)
+    print(
+        f"  hard stop: tier {stop.tier}, ${stop.usd:.2f} at most, from the estimated prefix; a paid run lowers it when "
+        "the prefix its first call measures is in a lower tier"
+    )
     if budget is not None:
         plan = plan_prefix(corpus, calc, budget)
         print(
