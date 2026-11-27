@@ -24,6 +24,7 @@ from anbud import cli, intake, paths
 from anbud.config import CONFIG_DIR
 from anbud.evals import exam, freeze
 from anbud.evals import split_heldout as sh
+from anbud.granskning import command as cli_command
 
 NOW = datetime(2026, 12, 1, 9, 0, tzinfo=UTC)
 LOCAL_NOW = datetime(2026, 12, 1, 10, 0)
@@ -168,12 +169,19 @@ class FakeEngines(exam.Engines):
         stops: dict[str, str] | None = None,
         tokens: dict[str, int] | None = None,
         selections: dict[str, dict] | None = None,
+        prefix_stops: bool = True,
     ) -> None:
         self.costs = costs
         self.stops = stops or {}
         self.tokens = tokens or {}
         self.selections = selections or {}
+        self.prefix_stops = prefix_stops  # what the $0 check finds for a tender over the prefix budget
+        self.checked: list[str] = []
         self.calls: list[tuple[str, str]] = []
+
+    def granskning_stop_check(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> bool:
+        self.checked.append(tender_id)
+        return self.prefix_stops
 
     def selection_plan(self, vroot: Path, company_id: str, tender_id: str) -> dict | None:
         return self.selections.get(tender_id)
@@ -511,11 +519,52 @@ def test_the_selection_and_the_prefix_budget_are_one_total_over_the_tenders(data
         "max 500"
     ) in lines
     assert (
-        "prefix budget 450,000 tokens: 1 of 3 tenders would stop (fixed part and priority 1 over the budget); "
-        "planned prefix median 125,000 tokens, max 150,000 over the 2 that fit; 7 documents search-only"
+        "prefix budget 450,000 tokens: 1 of 3 tenders would stop (fixed part and priority 1 over the budget, 1 of them "
+        "checked at $0 to stop before any model call and counted at $0); planned prefix median 125,000 tokens, max "
+        "150,000 over the 2 that fit; 7 documents search-only"
     ) in lines
-    # Granskning's basis is the planned prefix: 100,000 and 150,000 tokens; the tender that would stop counts at $20.
-    assert report.combined["estimate_usd"]["granskning"] == pytest.approx(9.75 + 14.625 + 20.0, abs=0.01)
+    # Granskning's basis is the planned prefix: 100,000 and 150,000 tokens. The tender that would stop was checked
+    # at $0 and is counted at $0, in the estimate and in the worst case: its run is never started.
+    assert runner.checked == ["t-0003"]
+    assert report.combined["estimate_usd"]["granskning"] == pytest.approx(9.75 + 14.625, abs=0.01)
+    assert report.combined["worst_usd"] == 20 + 20 + 3 * 3 + 5 * 10
+
+
+def test_a_prefix_stop_the_check_does_not_confirm_counts_at_its_hard_stop_and_runs(data_root: Path) -> None:
+    sealed_store(data_root)
+    over = {"documents": 1, "unknown_documents": 0, "pages": 10, "pages_excluded": 0, "search_only": 0}
+    over |= {"p1_fits": False, "planned_tokens": 900_000, "budget_tokens": 450_000}
+    runner = FakeEngines({"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0}, selections={"t-0003": over})
+    register(data_root)
+    report = exam.run_exam(
+        "co-002",
+        "prospective",
+        paid=True,
+        budget_usd=200.0,
+        runner=runner,
+        now=NOW,
+        local_now=LOCAL_NOW,
+        say=lambda _: None,
+    )
+    # Confirmed at $0: nothing is estimated for it, and its Granskning run isn't started.
+    assert report.runs_prefix_stop == 1 and report.estimate_usd["granskning"] == pytest.approx(2 * 0.975)
+    assert runner.calls.count(("granskning", "granskning")) == 2  # of three tenders
+
+    unconfirmed = FakeEngines(
+        {"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0}, selections={"t-0003": over}, prefix_stops=False
+    )
+    lines: list[str] = []
+    again = exam.run_exam(
+        "co-002",
+        "prospective",
+        runner=unconfirmed,
+        now=datetime(2026, 12, 1, 11, 0, tzinfo=UTC),
+        local_now=LOCAL_NOW,
+        say=lines.append,
+    )
+    # Not confirmed: counted at its hard stop, as before, and a paid exam would start it.
+    assert again.estimate_usd["granskning"] == pytest.approx(2 * 0.975 + 20.0)
+    assert "0 of them checked at $0 to stop before any model call" in "\n".join(lines)
 
 
 def test_selection_sizes_come_from_the_engines_own_selection_and_prefix_plan(data_root: Path, tmp_path: Path) -> None:
@@ -556,3 +605,35 @@ def test_tenders_per_hard_stop_tier_are_one_total_and_set_the_worst_case(data_ro
     ) in lines
     # Worst case: Granskning 20 + 30 + 45, Kalkyl 3 x 3, the old engine 5 inputs x 10.
     assert report.combined["worst_usd"] == 154.0
+
+
+def _af_over_the_budget() -> list:
+    """An invented tender whose administrative terms alone are over the 450,000-token prefix budget."""
+    filler = "Text om villkor, ansvar och tider i avsnitt {p}, rad {i}. " * 5
+    items = [("heading", "AFC.1 Entreprenadform", 1)]
+    items += [("paragraph", filler.format(p=p, i=i), p) for p in range(1, 301) for i in range(10)]
+    return [("f00000000001", "Förfrågningsunderlag/AF.pdf", 300, items)]
+
+
+def test_the_prefix_stop_check_runs_granskning_at_zero_cost(data_root: Path, tmp_path: Path) -> None:
+    """`anbud run --replay` in a child process, as the exam runs it, with no model key: a tender over the prefix
+    budget stops on it; a tender that fits goes on to the first model call, which replay refuses."""
+    from mixed_trades import write_mixed_prep
+
+    vroot = data_root / "variant"
+    for t, docs in (("t-0002", _af_over_the_budget()), ("t-0003", None)):
+        write_mixed_prep(paths.dev_tender_dir("co-002", t, vroot) / "prep", docs)
+        exam._ensure_dev(vroot, "co-002", t)
+    runner = exam.Engines(data_root / "logs", tmp_path, "HEAD", None)
+    assert runner.granskning_stop_check(vroot, "co-002", "t-0002", "check-over") is True
+    assert runner.granskning_stop_check(vroot, "co-002", "t-0003", "check-fits") is False
+
+
+def test_the_prefix_stop_is_the_one_anbud_run_writes() -> None:
+    from anbud.granskning.budget import PrefixPlan, over_budget
+
+    message = over_budget(PrefixPlan(budget=3, p0=1, p1=2, p2=0, p3=0, boundary=0))
+    assert f"anbud run: stopped: {message}".startswith(exam.PREFIX_STOP)
+    command = (Path(__file__).resolve().parents[1] / "src" / "anbud" / "granskning" / "command.py").read_text()
+    assert 'print(f"anbud run: stopped: {exc}", file=sys.stderr)' in command
+    assert exam.PAID_REFUSED == cli_command.PAID_REFUSED

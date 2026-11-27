@@ -347,6 +347,10 @@ _PREFIX = re.compile(r"estimated prefix: (\d+) tokens")
 _KALKYL_HIGH = re.compile(r"^cost_usd_est_high: ([\d.]+)$", re.M)
 _KALKYL_COST = re.compile(r"^cost_usd: ([\d.]+)$", re.M)
 _GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
+# Granskning's stop when the prefix's fixed part and priority 1 exceed the prefix budget (anbud.granskning.budget),
+# as `anbud run` writes it to stderr.
+PREFIX_STOP = "anbud run: stopped: the prefix's fixed part"
+PAID_REFUSED = 3  # `anbud run`'s exit code for a run refused or stopped before any paid call
 
 # Why prep stopped, from the one line `anbud prep` writes to stderr when it stops (its messages name no file and quote
 # no text). The first fragment found decides.
@@ -406,6 +410,12 @@ class Engines:
         proc = self._anbud(vroot, ["run", company_id, tender_id, "--dry-run"], log_name)
         match = _PREFIX.search(proc.stdout)
         return int(match.group(1)) if proc.returncode == 0 and match else None
+
+    def granskning_stop_check(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> bool:
+        """Whether Granskning's run stops on the prefix budget before any model call, checked at $0: the run path in
+        replay mode under a new run id, whose step cache is empty, so any model call is refused instead of sent."""
+        proc = self._anbud(vroot, ["run", company_id, tender_id, "--replay", "--run-id", run_id], f"{run_id}.log")
+        return proc.returncode == PAID_REFUSED and PREFIX_STOP in proc.stderr and "replay incomplete" not in proc.stderr
 
     def kalkyl_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> float | None:
         proc = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--dry-run"], log_name)
@@ -575,6 +585,7 @@ class Report:
     runs_ok: dict[str, int] = field(default_factory=dict)
     runs_failed: dict[str, int] = field(default_factory=dict)
     runs_skipped_budget: int = 0
+    runs_prefix_stop: int = 0  # Granskning runs not started: they stop on the prefix budget, checked at $0
     runs_after_deadline: int = 0
     spent_usd: float = 0.0
     frozen: int = 0
@@ -721,6 +732,7 @@ def run_exam(
     prefixes: list[int] = []
     sizes: dict[str, dict[str, Any]] = {}
     caps: dict[tuple[str, str], float] = {}  # (tender, engine) -> the most its run may spend
+    prefix_stopped: set[str] = set()  # tenders whose Granskning run stops on the prefix budget, checked at $0
     for t in ready:
         roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
         tender = paths.dev_tender_dir(company_id, t, roots["granskning"])
@@ -749,7 +761,16 @@ def run_exam(
             _record_tier(size, "granskning", tender_tier("granskning", tokens))
             if tokens is not None:
                 prefixes.append(tokens)
-            if basis is None or (selection and selection.get("p1_fits") is False):
+            would_stop = bool(selection and selection.get("p1_fits") is False)
+            if would_stop:  # checked at $0; a confirmed stop is never started, so it costs nothing
+                check_id = f"exam-{kind}-{t}-granskning-prefixcheck-{stamp}"
+                stopped = runner.granskning_stop_check(roots["granskning"], company_id, t, check_id)
+                size["selection"] = {**(selection or {}), "stop_checked": stopped}
+                if stopped:
+                    prefix_stopped.add(t)
+            if t in prefix_stopped:
+                usd = cap = 0.0
+            elif basis is None or would_stop:
                 size["estimate_unknown"] += basis is None
                 usd = cap
             else:
@@ -822,6 +843,9 @@ def run_exam(
         todo: list[tuple[str, str]] = [(e, e) for e in ("granskning", "kalkyl") if e in engines]
         todo += [("baseline", v) for v in plans[t]]
         for engine, variant in todo:
+            if engine == "granskning" and t in prefix_stopped:
+                report.runs_prefix_stop += 1  # it would stop before any call: nothing to run, nothing to freeze
+                continue
             if report.spent_usd + caps.get((t, engine), stops[engine]) > budget_usd:
                 report.runs_skipped_budget += 1
                 continue
@@ -956,6 +980,7 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
             "planned": len(planned),
             "budget_tokens": max((int(x["budget_tokens"]) for x in planned), default=0),
             "would_stop": sum(not x["p1_fits"] for x in planned),
+            "stop_checked": sum(bool(x.get("stop_checked")) for x in planned if not x["p1_fits"]),
             "fitting": len(fitting),
             "planned_tokens_median": _median(fitting) if fitting else None,
             "planned_tokens_max": max(fitting) if fitting else None,
@@ -1015,9 +1040,10 @@ def _say(r: Report, say: Callable[[str], None]) -> None:
         if small:
             say("runs: counts and spend stay in the sealed exam record (fewer than 2 tenders)")
         else:
+            stopped = f"; {r.runs_prefix_stop} not started (prefix budget)" if r.runs_prefix_stop else ""
             say(
                 f"runs: ok {_counts(r.runs_ok)}; failed {_counts(r.runs_failed)}; {r.runs_skipped_budget} not "
-                f"started (budget); spent ${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger"
+                f"started (budget){stopped}; spent ${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger"
             )
         if r.runs_after_deadline:
             say(f"warning: {r.runs_after_deadline} frozen runs came after their tender's deadline")
@@ -1055,10 +1081,15 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
                 if sel["fitting"]
                 else "none fits"
             )
+            checked = (
+                f", {sel['stop_checked']} of them checked at $0 to stop before any model call and counted at $0"
+                if sel["would_stop"]
+                else ""
+            )
             say(
                 f"prefix budget {sel['budget_tokens']:,} tokens: {sel['would_stop']} of {sel['planned']} tenders would "
-                f"stop (fixed part and priority 1 over the budget); {fit}; {sel['search_only_documents']} documents "
-                "search-only"
+                f"stop (fixed part and priority 1 over the budget{checked}); {fit}; {sel['search_only_documents']} "
+                "documents search-only"
             )
     tiers = c.get("tiers") or {}
     if tiers:
