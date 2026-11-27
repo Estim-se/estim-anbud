@@ -181,6 +181,9 @@ class TenderCoverage(_Model):
     )
     other_discipline_documents: list[str] = Field(default_factory=list, description="Each one: name (trade, pages)")
     boundary_lines: int = 0
+    search_only_documents: list[str] = Field(
+        default_factory=list, description="Read documents the prefix held as outline only (budget): name (pages)"
+    )
     lenses: list[LensCoverage] = Field(default_factory=list)
     note: str = NOT_ALL_CLEAR
 
@@ -302,6 +305,7 @@ def coverage(
         other_discipline=excluded_label(corpus) if corpus.excluded else None,
         other_discipline_documents=other,
         boundary_lines=excluded_counts(corpus)["boundary_lines"],
+        search_only_documents=[f"{names.get(d, d)} ({pages.get(d, 0)} s.)" for d in corpus.search_only],
         named_not_present=list(named_not_present or []),
         unread_tiles=list(unread_tiles or []),
         lenses=[lens_coverage(r, corpus, names) for r in results],

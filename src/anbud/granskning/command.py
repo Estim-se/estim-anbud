@@ -74,6 +74,7 @@ def _dirs(args: argparse.Namespace, kind: str) -> tuple[Path, Path, Path]:
 def run_command(args: argparse.Namespace, kind: str) -> int:
     from anbud.config import load_config
     from anbud.granskning import provenance
+    from anbud.granskning.budget import PrefixOverBudget
     from anbud.granskning.calc import load_calc
     from anbud.granskning.catalog import load_named_catalog
     from anbud.granskning.lenses import load_lenses
@@ -192,7 +193,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             arm=arm,
             checks=checks_wanted(args),
         )
-    except IntakeStop as exc:
+    except (IntakeStop, PrefixOverBudget) as exc:
         print(f"anbud run: stopped: {exc}", file=sys.stderr)
         return PAID_REFUSED
     g = result.granskning
@@ -309,6 +310,28 @@ def dry_run(
         "a paid run measures it on the first call"
     )
     print(f"  tiles for page cards: {len(corpus.tiles)}")
+    from anbud.granskning.budget import PrefixBudget, plan_prefix
+    from anbud.selection import excluded_counts
+
+    sel = excluded_counts(corpus)
+    print(
+        f"  selection: {sel['documents_excluded']} documents of other trades left out ({sel['pages_excluded']} pages), "
+        f"{sel['boundary_lines']} of their lines kept"
+    )
+    budget = PrefixBudget.from_config(budgets)
+    if budget is not None:
+        plan = plan_prefix(corpus, calc, budget)
+        print(
+            f"  prefix budget {plan.budget} tokens: fixed {plan.p0}, priority 1 {plan.p1}, priority 2 {plan.p2}, "
+            f"priority 3 {plan.p3}, other trades' lines {plan.boundary}"
+        )
+        if not plan.p1_fits:
+            print("  priority 1 does not fit: a paid run stops before any model call")
+        else:
+            print(
+                f"  priority 1 fits ({plan.p0 + plan.p1} tokens); planned prefix {plan.total} tokens, "
+                f"{len(plan.search_only)} documents search-only, {len(plan.boundary_dropped)} lines past the cap"
+            )
     print(
         f"  lens tier (from the estimate): {caps.max_turns} turns, ${caps.max_usd:.2f} per lens; {len(lenses)} lenses"
     )

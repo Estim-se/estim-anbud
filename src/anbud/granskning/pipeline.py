@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from anbud.granskning.budget import PrefixBudget, PrefixOverBudget, fit_prefix, over_budget, plan_prefix
 from anbud.granskning.catalog import Catalog, with_calc_rate
 from anbud.granskning.check_loop import CHECK_ROLE, STOP_NAMES
 from anbud.granskning.checks import ChecksResult, not_run, run_checks
@@ -252,6 +253,9 @@ def run_pipeline(
     settings = settings or load_settings()
     say = on_progress or (lambda _msg: None)
     spent_before = client.budget.spent
+    budget = PrefixBudget.from_config(client.config.budgets)
+    if budget is not None and not (early := plan_prefix(corpus, calc, budget)).p1_fits:
+        raise PrefixOverBudget(over_budget(early))  # before the cards: no paid call yet
     say(f"page cards: {len(corpus.tiles)} tiles")
     read = read_all_cards(client, store, corpus)
     cards = read.cards
@@ -262,6 +266,9 @@ def run_pipeline(
     if cards.masked:  # the originals stay local, like prep's masking report
         _write(store, run_dir / "cards_masking.json", [m.model_dump(mode="json") for m in cards.masked])
     corpus = add_cards(corpus, cards)
+    corpus, plan = fit_prefix(corpus, calc, client.config.budgets)
+    if plan is not None:
+        say(f"prefix plan: {plan.total} of {plan.budget} tokens, {len(plan.search_only)} documents search-only")
 
     toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob, catalog=catalog)
     validator = flag_validator(corpus, set(CLAIM_TYPES), {p.id: p for p in calc})
@@ -276,6 +283,7 @@ def run_pipeline(
         on_progress=say,
         summary_file=summary_file,
         code=code,
+        prefix_plan=plan.summary() if plan is not None else None,
     )
 
     checked = _checks(client, store, corpus, calc, toolbox, result, run_dir, summary_file, concurrency, say, checks)
