@@ -57,6 +57,7 @@ from anbud import notice as notices
 from anbud.config import CONFIG_DIR
 from anbud.evals import baseline, freeze
 from anbud.evals import split_heldout as sh
+from anbud.stops import ESTIMATE, granskning_stop, granskning_tiers, kalkyl_stop, kalkyl_tiers, top
 from anbud.store import private_dirs
 
 KINDS = {"heldout": sh.HELDOUT, "prospective": sh.PROSPECTIVE}
@@ -103,12 +104,24 @@ def exam_config(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
 
 
 def hard_stops(config_dir: Path = CONFIG_DIR) -> dict[str, float]:
+    """Each engine's top hard stop: a tender's worst case when its dry run gives no size."""
     budgets = tomllib.loads((config_dir / "budgets.toml").read_text())
     return {
-        "granskning": float(budgets["run"]["hard_stop"]),
-        "kalkyl": float(budgets["kalkyl"]["hard_stop"]),
+        "granskning": top(granskning_tiers(budgets)),
+        "kalkyl": top(kalkyl_tiers(budgets)),
         "baseline": float(budgets["baseline"]["hard_stop"]),
     }
+
+
+def tender_stop(engine: str, size: float | None, config_dir: Path = CONFIG_DIR) -> float:
+    """The most a tender's run may spend, from its dry run (`anbud.stops`): Granskning's tier from the estimated
+    prefix, Kalkyl's from its high estimate times its margin. The top tier when the size is unknown."""
+    budgets = tomllib.loads((config_dir / "budgets.toml").read_text())
+    if size is None:
+        return hard_stops(config_dir)[engine]
+    if engine == "granskning":
+        return granskning_stop(budgets, int(size), ESTIMATE).usd
+    return kalkyl_stop(kalkyl_tiers(budgets), size, float(budgets["kalkyl"]["margin"])).usd
 
 
 # --- Deadlines ----------------------------------------------------------------------------------------------------
@@ -686,6 +699,7 @@ def run_exam(
     plans: dict[str, list[str]] = {}
     prefixes: list[int] = []
     sizes: dict[str, dict[str, Any]] = {}
+    caps: dict[tuple[str, str], float] = {}  # (tender, engine) -> the most its run may spend
     for t in ready:
         roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
         tender = paths.dev_tender_dir(company_id, t, roots["granskning"])
@@ -708,20 +722,22 @@ def run_exam(
             size["prefix_tokens"] = tokens
             planned = selection.get("planned_tokens") if selection and selection.get("p1_fits") else None
             basis = planned if planned is not None else tokens
+            cap = caps[t, "granskning"] = tender_stop("granskning", tokens)  # the tier its run opens at
             if tokens is not None:
                 prefixes.append(tokens)
             if basis is None or (selection and selection.get("p1_fits") is False):
                 size["estimate_unknown"] += basis is None
-                usd = stops["granskning"]
+                usd = cap
             else:
-                usd = min(basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin, stops["granskning"])
+                usd = min(basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin, cap)
             size["estimate_usd"]["granskning"] = usd
-            size["worst_usd"] += stops["granskning"]
+            size["worst_usd"] += cap
         if "kalkyl" in engines:
             high = runner.kalkyl_estimate(roots["kalkyl"], company_id, t, f"estimate-{t}-kalkyl.log")
+            cap = caps[t, "kalkyl"] = tender_stop("kalkyl", high)
             size["estimate_unknown"] += high is None
-            size["estimate_usd"]["kalkyl"] = stops["kalkyl"] if high is None else min(high * margin, stops["kalkyl"])
-            size["worst_usd"] += stops["kalkyl"]
+            size["estimate_usd"]["kalkyl"] = cap if high is None else min(high * margin, cap)
+            size["worst_usd"] += cap
         variants = ["granskning"] if records[t]["same_input"] else list(VARIANTS)
         plans[t] = variants if "baseline" in engines else []
         for v in plans[t]:
@@ -781,7 +797,7 @@ def run_exam(
         todo: list[tuple[str, str]] = [(e, e) for e in ("granskning", "kalkyl") if e in engines]
         todo += [("baseline", v) for v in plans[t]]
         for engine, variant in todo:
-            if report.spent_usd + stops[engine] > budget_usd:
+            if report.spent_usd + caps.get((t, engine), stops[engine]) > budget_usd:
                 report.runs_skipped_budget += 1
                 continue
             run_id = f"exam-{kind}-{t}-{engine}{'-' + variant if engine == 'baseline' else ''}-{stamp}"
@@ -793,7 +809,7 @@ def run_exam(
                 one = runner.baseline(
                     roots[variant], company_id, t, variant, run_id, exam / "baseline" / t / run_id, dry_run=False
                 )
-            report.spent_usd += stops[engine] if one.cost_usd is None else one.cost_usd
+            report.spent_usd += caps.get((t, engine), stops[engine]) if one.cost_usd is None else one.cost_usd
             bucket = report.runs_ok if one.ok else report.runs_failed
             bucket[engine] = bucket.get(engine, 0) + 1
             runs.append(one)

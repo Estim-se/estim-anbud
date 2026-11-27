@@ -41,6 +41,7 @@ from anbud.granskning.verify import VerdictValidator, VerifierLoop
 from anbud.model_client import ModelClient, ModelError
 from anbud.models import Verdict
 from anbud.prep.tender import IntakeStop
+from anbud.stops import prefix_label
 from anbud.store import RunStore, StoreError, canonical
 
 
@@ -314,7 +315,8 @@ def run_pipeline(
         checks=checked.report,
     )
     cost = client.budget.spent - spent_before  # every call this pipeline made, merge and failed calls included
-    finished.report = finished.report.model_copy(update={"cost_usd": round(cost, 4)})
+    stop = prefix_label(result.stop) if result.stop is not None else None
+    finished.report = finished.report.model_copy(update={"cost_usd": round(cost, 4), "stop": stop})
     finished.paths = write_reports(finished.report, run_dir / "report")
     ranked = finished.ranked
     ordered = ranked.shown + ranked.unpriced + ranked.generic + ranked.logged

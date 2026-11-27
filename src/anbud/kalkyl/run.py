@@ -43,6 +43,7 @@ from anbud.kalkyl.xlsx import write_workbook
 from anbud.model_client import Budget, ModelClient
 from anbud.prep.tender import CELLS_FILE, IntakeStop
 from anbud.selection import OVERRIDE_FILE, SELECTION_FILE, Selection, SelectionError, load_selected
+from anbud.stops import estimate_label, kalkyl_stop
 from anbud.store import RunStore, canonical
 
 CHARS_PER_TOKEN = 3.0  # Swedish text with block markup; conservative, so the estimate errs high
@@ -227,16 +228,24 @@ def run_dev_tender(
         raise KalkylError(f"run {run_id} is a rebuild from {stored_base}; resume it with that base or without one")
     store.open_run(run_id, salt=salt, code=code, base_run=base_run)
     base_run = base_run or stored_base  # a resumed rebuild keeps the base it started from
-    budget = Budget(kalkyl.hard_stop)
+    cells = load_cells(tender / "prep" / CELLS_FILE)
+    estimate = _estimate(config, kalkyl, corpus, cells, catalog, store, company_id, tender_id)
+    stop = kalkyl_stop(kalkyl.stops, estimate["cost_usd_est_high"], kalkyl.margin)  # before any paid call
+    budget = Budget(stop.usd)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
     corpus, cards = with_cards(client, store, corpus, tender_id)
-    cells = load_cells(tender / "prep" / CELLS_FILE)
     try:
         repetition = load_repetition(company_id, root)
     except RepetitionError as exc:
         raise KalkylError(str(exc)) from None
     result = run_kalkyl(corpus, catalog, client, kalkyl, cells=cells, recipe=recipe, repetition=repetition)
-    meta = {"company_id": company_id, "tender_id": tender_id, "run_id": run_id, "cost_usd": budget.spent}
+    meta = {
+        "company_id": company_id,
+        "tender_id": tender_id,
+        "run_id": run_id,
+        "cost_usd": budget.spent,
+        "stop": estimate_label(stop),
+    }
     workbook, rows = write_workbook(result, corpus, catalog, meta)
     result.calc_posts = calc_posts(result.posts, rows)
     store.write_file(out / "kalkyl.xlsx", workbook)
@@ -258,6 +267,7 @@ def run_dev_tender(
         "selection": selection.summary(),
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
+        "stop": {**stop.summary(), "cost_usd_est_high": estimate["cost_usd_est_high"], "margin": kalkyl.margin},
         "persist_failures": client.persist_failures,
         "replay_misses": client.replay_misses,
         "output": str(out),
@@ -271,9 +281,9 @@ def run_dev_tender(
 
 
 def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, root: Path | None = None) -> dict:
-    """The $0 dry run: what a run would send, in counts, and a cost range from config prices. No model is called, no
-    key is read and nothing is written. Cards already stored or in an earlier run's cache are counted in, and their
-    blocks are chunked as the run will chunk them."""
+    """The $0 dry run: what a run would send, in counts, a cost range from config prices and the hard stop's tier the
+    run will pick from it. No model is called, no key is read and nothing is written. Cards already stored or in an
+    earlier run's cache are counted in, and their blocks are chunked as the run will chunk them."""
     config = load_config()
     kalkyl = load_kalkyl_config()
     prep_dir = paths.dev_tender_dir(company_id, tender_id, root) / "prep"
@@ -284,17 +294,50 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
         catalog: Catalog | None = load(catalog_name or kalkyl.default_catalog, root)
     except CatalogError:
         catalog = None
-    store = RunStore(company_id, root)
+    recipe = load_bound_recipe(company_id, catalog, root) if catalog else None
+    estimate = _estimate(config, kalkyl, corpus, cells, catalog, RunStore(company_id, root), company_id, tender_id)
+    stop = kalkyl_stop(kalkyl.stops, estimate["cost_usd_est_high"], kalkyl.margin)
+    return {
+        "chunks": estimate["chunks"],
+        "quantity_lines": estimate["quantity_lines"],
+        "scope_lines": estimate["scope_lines"],
+        "rows_with_cells": len(cells),
+        "selection": selection.summary(),
+        "recipe": recipe.label if recipe else None,
+        "repetition": repetition.label if repetition else None,
+        "recipe_items": len(recipe.counts) if recipe else 0,
+        "recipe_items_unbound": recipe.unbound if recipe else 0,
+        **{k: v for k, v in estimate.items() if k not in ("chunks", "quantity_lines", "scope_lines")},
+        "catalog": catalog.name if catalog else "missing",
+        "catalog_items": len(catalog.items) if catalog else 0,
+        "hard_stop_usd": stop.usd,
+        "stop_tier": stop.tier,
+        "stop_picked_from_usd": stop.size,  # cost_usd_est_high times the margin
+        "stop_above_top_tier": stop.above_top,
+        "max_tokens_per_r2_call": kalkyl.roles[EXTRACT].max_tokens,
+    }
+
+
+def _estimate(
+    config: Config,
+    kalkyl: KalkylConfig,
+    corpus: Corpus,
+    cells: Any,
+    catalog: Catalog | None,
+    store: RunStore,
+    company_id: str,
+    tender_id: str,
+) -> dict[str, Any]:
+    """Chunk counts and the cost range, at $0: the dry run's numbers, and what a run picks its hard stop's tier from
+    before its first paid call."""
     offline = ModelClient(config, None, Budget(0.0), run_id="plan", company_id=company_id)  # no store: writes nothing
     free, sources = available_cards(offline, store, corpus.tiles.values(), card_source_runs(store, tender_id))
     corpus = add_cards(corpus, free)  # chunks as the run will cut them, as far as the cards are known
     chunks = make_chunks(corpus, kalkyl.chunk_max_chars, kalkyl.chunk_max_quantity_lines)
     heads = heading_paths(corpus)
-    recipe = load_bound_recipe(company_id, catalog, root) if catalog else None
     catalog_chars = len(prompt_lines(catalog)) if catalog else 0
     prefix_tokens = int((len(BRIEF) + catalog_chars + len(outline_text(corpus))) / CHARS_PER_TOKEN) + 3000  # + tools
     chunk_tokens = [int(len(chunk_message(c, corpus, heads, cells)) / CHARS_PER_TOKEN) for c in chunks]
-    settings = kalkyl.roles[EXTRACT]
     price = config.price_for(config.model_for(EXTRACT))
     match = kalkyl.roles[MATCH]
     match_price = config.price_for(config.model_for(MATCH))
@@ -315,23 +358,13 @@ def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, ro
         "chunks": len(chunks),
         "quantity_lines": sum(len(c.quantity_ids) for c in chunks),
         "scope_lines": sum(len(c.scope_ids) for c in chunks),
-        "rows_with_cells": len(cells),
-        "selection": selection.summary(),
-        "recipe": recipe.label if recipe else None,
-        "repetition": repetition.label if repetition else None,
-        "recipe_items": len(recipe.counts) if recipe else 0,
-        "recipe_items_unbound": recipe.unbound if recipe else 0,
         "block_chars": sum(c.chars for c in chunks),
         "tiles": len(corpus.tiles),
         "cards_stored": sources["stored"],
         "cards_from_earlier_run": sources["earlier_run"],
         "cards_to_read": sources["read"],
-        "catalog": catalog.name if catalog else "missing",
-        "catalog_items": len(catalog.items) if catalog else 0,
         "prefix_tokens_est": prefix_tokens,
         "chunk_tokens_est_max": max(chunk_tokens, default=0),
         "cost_usd_est_low": round(cost(low, 0.1), 2),
         "cost_usd_est_high": round(cost(high, 0.5), 2),
-        "hard_stop_usd": kalkyl.hard_stop,
-        "max_tokens_per_r2_call": settings.max_tokens,
     }

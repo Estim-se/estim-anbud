@@ -1,5 +1,6 @@
-"""Kalkyl's settings: chunk sizes, effort, `max_tokens` and turn caps from config/kalkyl.toml, the run's hard stop from
-budgets.toml [kalkyl]. Models come from providers.toml [roles] like every role's.
+"""Kalkyl's settings: chunk sizes, effort, `max_tokens` and turn caps from config/kalkyl.toml, the hard stop's tiers
+from budgets.toml `[[kalkyl_stops]]` and their margin from `[kalkyl]`. Models come from providers.toml [roles] like
+every role's.
 
 Roles (in `anbud.tools.ROLES`, each with its own tool list):
 - `kalkyl_extract` (R2): reads one chunk and calls `submit_quantities`.
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from anbud.config import CONFIG_DIR
 from anbud.model_client import EFFORTS
+from anbud.stops import Tier, kalkyl_tiers
 
 EXTRACT = "kalkyl_extract"
 MATCH = "kalkyl_match"
@@ -30,7 +32,8 @@ class RoleSettings:
 
 @dataclass(frozen=True)
 class KalkylConfig:
-    hard_stop: float
+    stops: tuple[Tier, ...]  # the hard stop's tiers (budgets.toml `[[kalkyl_stops]]`, `anbud.stops`)
+    margin: float  # times the dry run's high estimate, to pick the tier
     default_catalog: str
     chunk_max_chars: int
     chunk_max_quantity_lines: int
@@ -53,7 +56,8 @@ def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
         if settings.effort not in EFFORTS:
             raise ValueError(f"kalkyl.toml: effort must be one of {EFFORTS}")
     return KalkylConfig(
-        hard_stop=float(budgets["kalkyl"]["hard_stop"]),
+        stops=kalkyl_tiers(budgets),
+        margin=float(budgets["kalkyl"]["margin"]),
         default_catalog=raw["catalog"]["default"],
         chunk_max_chars=int(raw["chunks"]["max_chars"]),
         chunk_max_quantity_lines=int(raw["chunks"]["max_quantity_lines"]),

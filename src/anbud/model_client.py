@@ -79,8 +79,9 @@ class ModelError(RuntimeError):
 class Budget:
     """A run's hard stop in USD. Thread-safe, for parallel lenses."""
 
-    def __init__(self, hard_stop_usd: float) -> None:
+    def __init__(self, hard_stop_usd: float, ceiling_usd: float | None = None) -> None:
         self.hard_stop = hard_stop_usd
+        self.ceiling = hard_stop_usd if ceiling_usd is None else ceiling_usd  # set_stop never goes above it
         self.spent = 0.0
         self.reserved = 0.0
         self._lock = threading.Lock()
@@ -94,6 +95,12 @@ class Budget:
                 )
             self.reserved += usd
             return usd
+
+    def set_stop(self, usd: float) -> float:
+        """Moves the stop when the run learns its size (`anbud.stops`), never above the ceiling set at the start."""
+        with self._lock:
+            self.hard_stop = min(usd, self.ceiling)
+            return self.hard_stop
 
     def settle(self, reserved_usd: float, actual_usd: float) -> None:
         with self._lock:

@@ -82,11 +82,13 @@ class Report(_Model):
     coverage: TenderCoverage
     sources: dict[str, str] = Field(default_factory=dict, description="block id -> where it is, for citations")
     cost_usd: float | None = None
+    stop: str | None = Field(default=None, description="The run's hard stop: its size tier and the prefix it came from")
     checks: ChecksReport | None = Field(default=None, description="Zero rows, per-space rules, outlets per room type")
 
 
 OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
 SEARCH_ONLY = "Endast sökbara (prefixbudget)"
+STOP = "Kostnadsstopp (nivå efter storlek)"
 
 
 def _where(block: Block, names: dict[str, str]) -> str:
@@ -244,6 +246,8 @@ def render_html(report: Report) -> str:
         f'<p class="meta">Körning {_e(report.run_id)} · {_e(report.company_id)} · '
         f"{_e(report.created_at.strftime('%Y-%m-%d %H:%M'))} UTC</p>",
     ]
+    if report.stop:
+        parts.append(f'<p class="meta">{STOP}: {_e(report.stop)}.</p>')
     if report.catalog:
         note = " Priserna är Estims standardvärden, inte företagets egna." if report.default_catalog else ""
         parts.append(f'<p class="meta">Kronor beräknade med {_e(report.catalog)}.{_e(note)}</p>')
@@ -471,6 +475,7 @@ def build_workbook(
         (OTHER_DISCIPLINE, report.coverage.other_discipline or "0 sidor, 0 dokument"),
         (SEARCH_ONLY, len(report.coverage.search_only_documents)),
         ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
+        (STOP, report.stop or "Okänt"),
         ("Täckning", report.coverage.note),
     ]
     for row, (label, value) in enumerate(rows, 1):
