@@ -475,7 +475,9 @@ def test_no_figure_for_a_group_of_fewer_than_two_tenders(data_root: Path) -> Non
 
     prospective = exam_pass("prospective", NOW)
     assert "prep: 3 prepared, 0 stopped" in prospective  # three tenders: the split's own lines carry figures
-    combined = [line for line in prospective if line.startswith(("both splits", "granskning prefix", "estimate"))]
+    combined = [
+        line for line in prospective if line.startswith(("both splits", "granskning prefix", "hard-stop", "estimate"))
+    ]
     assert combined[0] == (
         "both splits, one total over 4 prepared tenders (heldout 1, prospective 3): 8 documents "
         "(skipped by type: none), 200 pages (granskning input)"
@@ -538,3 +540,19 @@ def test_selection_sizes_come_from_the_engines_own_selection_and_prefix_plan(dat
     assert tight is not None and tight["p1_fits"] is False
 
     assert exam.selection_sizes(tmp_path / "no-prep", tmp_path / "calc", budgets) is None
+
+
+def test_tenders_per_hard_stop_tier_are_one_total_and_set_the_worst_case(data_root: Path) -> None:
+    sealed_store(data_root)
+    # Prefixes of 100,000 (tier S, $20), 250,000 (M, $30) and 1,200,000 tokens (above L: L's $45); Kalkyl's dry run
+    # $1.00 high, times 1.5, is tier S ($3) for each.
+    tokens = {"t-0002": 100_000, "t-0003": 250_000, "t-0004": 1_200_000}
+    runner = FakeEngines({"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0}, tokens=tokens)
+    lines: list[str] = []
+    report = exam.run_exam("co-002", "prospective", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
+    assert (
+        "hard-stop tiers, tenders per tier from the dry runs: granskning S 1, M 1, L 1 (1 above the top tier); "
+        "kalkyl S 3, M 0, L 0"
+    ) in lines
+    # Worst case: Granskning 20 + 30 + 45, Kalkyl 3 x 3, the old engine 5 inputs x 10.
+    assert report.combined["worst_usd"] == 154.0
