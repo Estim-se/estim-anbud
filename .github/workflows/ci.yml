@@ -38,14 +38,19 @@ jobs:
         run: uv sync --locked
 
       # First, so a lint or test failure can't skip it. It scans the whole history every run.
+      # The branch name and the PR title and body are read from the event file inside the script, never through
+      # env:, since a step's env block is printed in the public log.
       - name: Guards (names, document files, licensed text)
         env:
           ANBUD_NAMES_HMAC: ${{ secrets.ANBUD_NAMES_HMAC }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: uv run python -m anbud.guards ci
+        run: |
+          HEAD_REF="$(jq -r '.pull_request.head.ref // empty' "$GITHUB_EVENT_PATH")"
+          PR_TITLE="$(jq -r '.pull_request.title // empty' "$GITHUB_EVENT_PATH")"
+          PR_BODY="$(jq -r '.pull_request.body // empty' "$GITHUB_EVENT_PATH")"
+          HEAD_REF="${HEAD_REF:-$GITHUB_REF_NAME}"
+          export HEAD_REF PR_TITLE PR_BODY
+          uv run python -m anbud.guards ci
 
       - name: Lint
         run: |
