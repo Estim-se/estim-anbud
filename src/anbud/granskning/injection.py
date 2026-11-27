@@ -95,7 +95,7 @@ def anchor_blocks(corpus: Corpus, text: str, file: str | None = None) -> list[Bl
         docs = {d["doc_id"] for d in corpus.documents if any(Path(p).name == file for p in d.get("paths", []))}
     return [
         corpus.blocks[b]
-        for b in corpus.order
+        for b in corpus.all_order
         if wanted in fold(corpus.blocks[b].text) and (docs is None or corpus.blocks[b].doc_id in docs)
     ]
 

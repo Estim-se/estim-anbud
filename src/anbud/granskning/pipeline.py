@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,8 @@ def add_cards(corpus: Corpus, cards: Cards) -> Corpus:
     as it was."""
     new = [b for b in cards.blocks if b.id not in corpus.blocks]
     blocks = dict(corpus.blocks) | {b.id: b for b in new}
-    return Corpus(blocks, [*corpus.order, *(b.id for b in new)], corpus.outline, corpus.tiles, corpus.documents)
+    ids = [b.id for b in new]
+    return replace(corpus, blocks=blocks, order=[*corpus.order, *ids], all_order=[*corpus.all_order, *ids])
 
 
 @dataclass

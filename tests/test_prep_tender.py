@@ -200,6 +200,38 @@ def test_a_multi_page_tiff_is_one_page_per_frame(data_root: Path) -> None:
     assert summary["pages_by_kind"] == {"scan": 3} and summary["tiles"] == 3
 
 
+def test_an_image_over_the_limit_is_skipped_with_its_own_label_and_count(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+
+    monkeypatch.setattr(tender, "MAX_IMAGE_PIXELS", 100_000)
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 300), "white").save(buf, format="PNG")  # 120 000 pixels
+    damaged = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+    folder = inbox(data_root, {"stor.png": buf.getvalue(), "trasig.png": damaged})
+    out = folder.parent / "prep"
+    summary = tender.prepare("co-001", folder, out, root=data_root)
+    assert summary["skipped"] == 2 and summary["skipped_over_image_limit"] == 1
+    reasons = sorted(d["skipped"] for d in json.loads((out / "documents.json").read_text()))
+    assert reasons == sorted([tender.OVER_IMAGE_LIMIT, "unreadable, damaged or password-protected"])
+
+
+def test_prep_writes_which_documents_the_models_will_read(data_root: Path) -> None:
+    files = {
+        "El/E-63-1-001 Teknisk beskrivning el.pdf": text_pdf("Uttag 3 st i förråd."),
+        "VS/R-50-1-001 Teknisk beskrivning VS.pdf": text_pdf("Rör 30 m.", "Pumpar elansluts av elentreprenören."),
+    }
+    folder = inbox(data_root, files)
+    out = folder.parent / "prep"
+    summary = tender.prepare("co-001", folder, out, root=data_root)
+    assert summary["selection"]["documents_excluded"] == 1 and summary["selection"]["boundary_lines"] == 1
+    saved = json.loads((out / "selection.json").read_text())
+    assert sorted((d["discipline"], d["read"]) for d in saved["documents"]) == [("el", True), ("other", False)]
+    assert json.loads((out / "summary.json").read_text())["selection"] == summary["selection"]
+    assert "Teknisk" not in (out / "selection.json").read_text()  # ids, classes and signals, never a name
+
+
 def test_cli_prep_only_for_dev_tenders_and_prints_counts(data_root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     secret_line = "Fiktivbolaget AB levererar enligt avtal till Påhittade Fastigheter i år."
     inbox(data_root, {"a.pdf": text_pdf(secret_line)})

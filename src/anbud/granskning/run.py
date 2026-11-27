@@ -24,6 +24,7 @@ from anbud.granskning.prefix import CHARS_PER_TOKEN, defuse, estimate_tokens, pr
 from anbud.granskning.toolbox import Toolbox
 from anbud.model_client import ModelClient
 from anbud.models import Event, TenderMap
+from anbud.selection import excluded_counts
 from anbud.store import canonical
 
 DEFAULT_CONCURRENCY = 3
@@ -226,6 +227,7 @@ def run_granskning(
             "tier_from": "measured" if measured is not None else "estimate",
         },
         "code": code,
+        "selection": excluded_counts(corpus),
         "caps": {"max_turns": caps.max_turns, "max_usd": caps.max_usd},
         "map": {
             "status": mapped.outcome.status,

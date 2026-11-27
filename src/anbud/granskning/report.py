@@ -85,6 +85,9 @@ class Report(_Model):
     checks: ChecksReport | None = Field(default=None, description="Zero rows, per-space rules, outlets per room type")
 
 
+OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
+
+
 def _where(block: Block, names: dict[str, str]) -> str:
     parts = [names.get(block.doc_id, block.doc_id)]
     if block.page is not None:
@@ -278,6 +281,12 @@ def render_html(report: Report) -> str:
         parts.append(f"<p>{len(cov.unread_tiles)} ritningsrutor kunde inte läsas av kortsteget: {_e(unread)}</p>")
     if cov.named_not_present:
         parts.append(f"<p>Nämns men finns inte i underlaget: {_e(', '.join(cov.named_not_present))}</p>")
+    if cov.other_discipline:
+        parts.append(
+            f"<p>{OTHER_DISCIPLINE}: {_e(cov.other_discipline)}. Sökbara för hänvisningar; "
+            f"{cov.boundary_lines} rader som rör elarbetena lästes ändå. "
+            f"{_e(', '.join(cov.other_discipline_documents))}</p>"
+        )
     for lens in cov.lenses:
         parts.append('<div class="flag">')
         parts.append(
@@ -453,6 +462,7 @@ def build_workbook(
         ("Estims standardkatalog", _yes(report.default_catalog)),
         ("Väsentlighetsgräns", sek(report.materiality_sek)),
         ("Dokument i underlaget", report.coverage.documents),
+        (OTHER_DISCIPLINE, report.coverage.other_discipline or "0 sidor, 0 dokument"),
         ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
         ("Täckning", report.coverage.note),
     ]

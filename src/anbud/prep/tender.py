@@ -39,6 +39,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from PIL import Image, ImageSequence, UnidentifiedImageError
 
 from anbud import answer_terms, models, paths
+from anbud.granskning.corpus import Corpus
 from anbud.prep.build import DocBuilder, Piece
 from anbud.prep.docx import read_docx
 from anbud.prep.html import read_html
@@ -47,6 +48,7 @@ from anbud.prep.pdf import read_pdf, tile_grid
 from anbud.prep.sheets import read_xlsx
 from anbud.prep.sources import Loaded, Source, load_folder
 from anbud.prep.text import DOC_PREFIX
+from anbud.selection import OVERRIDE_FILE, SELECTION_FILE, SelectionError, select
 from anbud.store import RunStore, StoreError, canonical
 
 PREP_VERSION = "1"
@@ -54,6 +56,13 @@ CELLS_FILE = "cells.jsonl"
 _LIBRARIES = ("pypdfium2", "openpyxl", "pillow", "defusedxml")
 MAX_IMAGE_PIXELS = 120_000_000
 MAX_IMAGE_PAGES = 500
+
+
+OVER_IMAGE_LIMIT = "över bildgränsen"  # an image over the pixel or page limit: skipped and counted on its own
+
+
+class ImageLimit(Exception):  # noqa: N818 - a reason to skip, not a failure
+    """An image over the pixel or page limit. Not a RuntimeError, so it is never read as a damaged file."""
 
 
 class PrepError(RuntimeError):
@@ -107,7 +116,7 @@ def read_image(data: bytes, builder: DocBuilder, put_blob: Callable[[bytes], str
     with Image.open(io.BytesIO(data)) as img:
         for n, frame in enumerate(ImageSequence.Iterator(img), 1):
             if n > MAX_IMAGE_PAGES or frame.width * frame.height > MAX_IMAGE_PIXELS:
-                raise PrepError("an image is larger than the pixel or page limit")
+                raise ImageLimit
             image = frame.convert("RGB")
             count = 0
             for k, (x0, y0, x1, y1) in enumerate(tile_grid(image.width, image.height), 1):
@@ -229,6 +238,11 @@ def prepare_file(src: Source, store: RunStore, version: str | None = None) -> tu
     except StoreError:
         staging.discard()
         raise
+    except (ImageLimit, Image.DecompressionBombError):
+        staging.discard()
+        builder = DocBuilder(src.sha256, src.doc_id)
+        pages, sheets, tiles, dropped, withheld = [], [], [], 0, 0
+        skipped = OVER_IMAGE_LIMIT
     except _UNREADABLE:
         staging.discard()
         builder = DocBuilder(src.sha256, src.doc_id)
@@ -272,6 +286,7 @@ def summarise(docs: list[DocPrep], loaded: Loaded, cache_hits: int) -> dict[str,
         "documents": len(docs),
         "documents_by_kind": dict(Counter(d.kind for d in docs)),
         "skipped": sum(d.skipped is not None for d in docs),
+        "skipped_over_image_limit": sum(d.skipped == OVER_IMAGE_LIMIT for d in docs),
         "pages_by_kind": dict(Counter(p.kind for p in pages)),
         "sheets": sum(len(d.sheets) for d in docs),
         "blocks_by_kind": dict(Counter(b.kind for b in blocks)),
@@ -322,6 +337,7 @@ def prepare(
             raise PrepError("two files share a block-id prefix; block ids would collide")
         summary = summarise(docs, loaded, sum(hit for _, hit in results))
         _write_outputs(store, new, loaded, docs, summary)
+        _write_selection(store, new, out_dir.parent / OVERRIDE_FILE, summary)
     except BaseException:
         remove_tree(store, new)
         remove_tree(store, out_dir)  # outputs that no longer match the inbox are worse than none
@@ -357,6 +373,17 @@ def write_cells_sidecar(
     rows = [c for d in docs for c in d.cells]
     store.write_file(out_dir / CELLS_FILE, _jsonl(rows))
     return {"rows_with_cells": len(rows), "blocks_unchanged": True}
+
+
+def _write_selection(store: RunStore, out_dir: Path, override: Path, summary: dict) -> None:
+    """Which documents the models will read, for review before a run (each run writes the selection it used)."""
+    try:
+        selection = select(Corpus.load(out_dir), override)
+    except SelectionError as exc:
+        raise PrepError(str(exc)) from None
+    store.write_file(out_dir / SELECTION_FILE, canonical(selection.to_json()))
+    summary["selection"] = selection.summary()
+    store.write_file(out_dir / "summary.json", json.dumps(summary, indent=2, sort_keys=True).encode())
 
 
 def _write_outputs(store: RunStore, out_dir: Path, loaded: Loaded, docs: list[DocPrep], summary: dict) -> None:
