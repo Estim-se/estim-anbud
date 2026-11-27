@@ -57,7 +57,7 @@ from anbud import notice as notices
 from anbud.config import CONFIG_DIR
 from anbud.evals import baseline, freeze
 from anbud.evals import split_heldout as sh
-from anbud.stops import ESTIMATE, granskning_stop, granskning_tiers, kalkyl_stop, kalkyl_tiers, top
+from anbud.stops import ESTIMATE, Stop, granskning_stop, granskning_tiers, kalkyl_stop, kalkyl_tiers, top
 from anbud.store import private_dirs
 
 KINDS = {"heldout": sh.HELDOUT, "prospective": sh.PROSPECTIVE}
@@ -113,15 +113,36 @@ def hard_stops(config_dir: Path = CONFIG_DIR) -> dict[str, float]:
     }
 
 
-def tender_stop(engine: str, size: float | None, config_dir: Path = CONFIG_DIR) -> float:
-    """The most a tender's run may spend, from its dry run (`anbud.stops`): Granskning's tier from the estimated
-    prefix, Kalkyl's from its high estimate times its margin. The top tier when the size is unknown."""
-    budgets = tomllib.loads((config_dir / "budgets.toml").read_text())
+def tender_tier(engine: str, size: float | None, config_dir: Path = CONFIG_DIR) -> Stop | None:
+    """The tier a tender's run opens at, from its dry run (`anbud.stops`): Granskning's from the estimated prefix,
+    Kalkyl's from its high estimate times its margin. None when the dry run gave no size."""
     if size is None:
-        return hard_stops(config_dir)[engine]
+        return None
+    budgets = tomllib.loads((config_dir / "budgets.toml").read_text())
     if engine == "granskning":
-        return granskning_stop(budgets, int(size), ESTIMATE).usd
-    return kalkyl_stop(kalkyl_tiers(budgets), size, float(budgets["kalkyl"]["margin"])).usd
+        return granskning_stop(budgets, int(size), ESTIMATE)
+    return kalkyl_stop(kalkyl_tiers(budgets), size, float(budgets["kalkyl"]["margin"]))
+
+
+def tender_stop(engine: str, size: float | None, config_dir: Path = CONFIG_DIR) -> float:
+    """The most a tender's run may spend: its tier's stop (`tender_tier`), or the top tier's when the size is
+    unknown."""
+    stop = tender_tier(engine, size, config_dir)
+    return hard_stops(config_dir)[engine] if stop is None else stop.usd
+
+
+def tier_names(config_dir: Path = CONFIG_DIR) -> dict[str, list[str]]:
+    """Each engine's tier names, smallest first."""
+    budgets = tomllib.loads((config_dir / "budgets.toml").read_text())
+    return {
+        "granskning": [t.name for t in granskning_tiers(budgets)],
+        "kalkyl": [t.name for t in kalkyl_tiers(budgets)],
+    }
+
+
+def _record_tier(size: dict[str, Any], engine: str, stop: Stop | None) -> None:
+    size["tiers"][engine] = stop.tier if stop is not None else "unknown"
+    size["above_top"][engine] = bool(stop is not None and stop.above_top)
 
 
 # --- Deadlines ----------------------------------------------------------------------------------------------------
@@ -716,6 +737,8 @@ def run_exam(
             "estimate_unknown": 0,
             "worst_usd": 0.0,
             "baseline_runs": 0,
+            "tiers": {},  # engine -> the tier its run opens at, or "unknown" (the top tier's stop)
+            "above_top": {},  # engine -> whether the size is above the top tier
         }
         if "granskning" in engines:
             tokens = runner.granskning_estimate(roots["granskning"], company_id, t, f"estimate-{t}-granskning.log")
@@ -723,6 +746,7 @@ def run_exam(
             planned = selection.get("planned_tokens") if selection and selection.get("p1_fits") else None
             basis = planned if planned is not None else tokens
             cap = caps[t, "granskning"] = tender_stop("granskning", tokens)  # the tier its run opens at
+            _record_tier(size, "granskning", tender_tier("granskning", tokens))
             if tokens is not None:
                 prefixes.append(tokens)
             if basis is None or (selection and selection.get("p1_fits") is False):
@@ -735,6 +759,7 @@ def run_exam(
         if "kalkyl" in engines:
             high = runner.kalkyl_estimate(roots["kalkyl"], company_id, t, f"estimate-{t}-kalkyl.log")
             cap = caps[t, "kalkyl"] = tender_stop("kalkyl", high)
+            _record_tier(size, "kalkyl", tender_tier("kalkyl", high))
             size["estimate_unknown"] += high is None
             size["estimate_usd"]["kalkyl"] = cap if high is None else min(high * margin, cap)
             size["worst_usd"] += cap
@@ -853,6 +878,21 @@ def _median(values: list[int]) -> int:
     return round(statistics.median(values))
 
 
+def _tier_counts(found: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per engine, tenders per tier in tier order (unknown last, when any), and how many are above the top tier."""
+    out: dict[str, dict[str, Any]] = {}
+    for engine, names in tier_names().items():
+        got = [one["tiers"][engine] for one in found if engine in (one.get("tiers") or {})]
+        if not got:
+            continue
+        counts = {name: got.count(name) for name in names}
+        if "unknown" in got:
+            counts["unknown"] = got.count("unknown")
+        above = sum(bool((one.get("above_top") or {}).get(engine)) for one in found)
+        out[engine] = {"counts": counts, "above_top": above}
+    return out
+
+
 def combine(company_id: str, status: dict[str, str], root: Path | None = None) -> dict[str, Any]:
     """Sizes, the selection, the prefix plan and the estimate as one total over every tender of both splits whose
     last exam pass prepared it, from the sealed tender records. Never per tender or per split; `tenders` and
@@ -894,6 +934,7 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
         "estimate_unknown": sum(int(one.get("estimate_unknown") or 0) for one in found),
         "worst_usd": round(sum(float(one.get("worst_usd") or 0) for one in found), 2),
         "baseline_runs": sum(int(one.get("baseline_runs") or 0) for one in found),
+        "tiers": _tier_counts(found),
     }
     selections = [one["selection"] for one in found if isinstance(one.get("selection"), dict)]
     if selections:
@@ -1019,6 +1060,14 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
                 f"stop (fixed part and priority 1 over the budget); {fit}; {sel['search_only_documents']} documents "
                 "search-only"
             )
+    tiers = c.get("tiers") or {}
+    if tiers:
+        rows = []
+        for engine, t in tiers.items():
+            counts = ", ".join(f"{name} {n}" for name, n in t["counts"].items())
+            above = f" ({t['above_top']} above the top tier)" if t["above_top"] else ""
+            rows.append(f"{engine} {counts}{above}")
+        say(f"hard-stop tiers, tenders per tier from the dry runs: {'; '.join(rows)}")
     parts = ", ".join(f"{k} ${v:.2f}" for k, v in c["estimate_usd"].items()) or "nothing to run"
     total = round(sum(c["estimate_usd"].values()), 2)
     unknown = (
