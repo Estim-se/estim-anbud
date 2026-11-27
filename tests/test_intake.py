@@ -33,11 +33,19 @@ FOLDERS = {
 DEV_FOLDER = "Fiktivbolaget kv Ett"  # forced dev
 
 
+ZIP_TIME = (2026, 1, 1, 0, 0, 0)
+
+
 def zip_bytes(entries: dict[str, bytes | str], **kwargs: object) -> bytes:
+    """A zip of `entries`. Every entry has the same fixed time, so the same entries always give the same bytes:
+    `writestr` with a plain name stamps the current time (to two seconds), and a test that builds its expected zip
+    after the code under test has run would fail whenever the clock moved on in between."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", **kwargs) as zf:  # type: ignore[arg-type]
         for name, data in entries.items():
-            zf.writestr(name, data)
+            info = zipfile.ZipInfo(name, date_time=ZIP_TIME)
+            info.external_attr = (0o40775 << 16) | 0x10 if info.is_dir() else 0o600 << 16  # as writestr sets them
+            zf.writestr(info, data, compress_type=zf.compression, compresslevel=zf.compresslevel)
     return buf.getvalue()
 
 
