@@ -209,7 +209,7 @@ def data_root_of(tender: Path) -> Path:
 def test_the_xlsx_has_the_label_on_every_sheet_citations_and_ej_omhandertaget(tender: Path) -> None:
     _run(fake_sdk())
     wb = openpyxl.load_workbook(tender / "kalkyl" / "kalkyl-test" / "kalkyl.xlsx")
-    names = ["Översikt", "Kalkyl", "Underlag", "Objektmodell", "Ej omhändertaget", "Bortvalt med skäl"]
+    names = ["Översikt", "Kalkyl", "Underlag", "Objektmodell", "Ej omhändertaget", "Bortvalt med skäl", "Kodgrupper"]
     assert wb.sheetnames == names
     for ws in wb.worksheets:
         assert ws["A1"].value == "Katalog: Syntetisk testkatalog"
