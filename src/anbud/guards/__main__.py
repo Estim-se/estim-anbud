@@ -9,6 +9,8 @@ Modes:
                      A new branch is checked over its whole history.
   ci                 CI: the same over the whole history of HEAD_SHA, plus the branch name and the PR title and body
   tree [REV]         the tracked files in the working tree, or the tree at REV
+  text               text on stdin, such as a PR title and body, an issue or a comment, before it leaves the machine
+                     (scripts/guard-text): names only, by line
   hash-names         print the hashed names list for the ANBUD_NAMES_HMAC secret
 
 Exit codes: 0 clean, 1 findings, 2 the guard couldn't run (it fails closed). Output never contains a listed name:
@@ -266,6 +268,10 @@ def _run(mode: str, rest: list[str], env: Mapping[str, str], matcher: names.Matc
         return mode_pre_push(sys.stdin, matcher)
     if mode == "ci":
         return mode_ci(env, matcher)
+    if mode == "text":
+        scanner = Scanner(matcher, set())
+        scanner.text("text", sys.stdin.buffer.read())
+        return scanner.findings, "text from stdin"
     if mode == "tree" and rest:
         scanner = Scanner(matcher, parse_manifest(sources.blob_at(rest[0], MANIFEST)))
         scanner.entries(sources.tree_entries(rest[0]))

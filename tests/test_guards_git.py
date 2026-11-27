@@ -324,3 +324,24 @@ def test_a_non_utf8_names_list_exits_2_without_a_traceback(repo: Path, tmp_path:
     latin.write_bytes("Påhittade Fastigheter\n".encode("cp1252"))
     result = run_guard(repo, {"ANBUD_NAMES_FILE": str(latin)}, "tree")
     assert result.returncode == 2 and "Traceback" not in result.stderr
+
+
+def test_text_on_stdin_is_checked_before_it_leaves_the_machine(repo: Path, local_env: dict[str, str]) -> None:
+    body = "Large tenders, PR 1 of 3.\n\nOn the dev tender: nothing excluded.\nMed Påhittade Fastigheter.\n"
+    named = run_guard(repo, local_env, "text", stdin=body)
+    assert named.returncode == 1 and "text line 4" in named.stdout
+    assert_no_fake_names(named.stdout, named.stderr)
+    clean = run_guard(repo, local_env, "text", stdin=body.replace("Påhittade Fastigheter", "the client"))
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+    assert run_guard(repo, {}, "text", stdin=body).returncode == 2  # no names list: it fails closed
+
+
+def test_the_guard_text_script_runs_the_text_mode(local_env: dict[str, str]) -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "guard-text"
+    assert os.access(script, os.X_OK)
+    env = {k: v for k, v in os.environ.items() if k not in ("CI", "ANBUD_NAMES_HMAC", "ANBUD_NAMES_FILE")}
+    run = subprocess.run(
+        [str(script)], input="Fix för Örjan Exempelsson\n", env={**env, **local_env}, text=True, capture_output=True
+    )
+    assert run.returncode == 1 and "text line 1" in run.stdout
+    assert_no_fake_names(run.stdout, run.stderr)

@@ -1,0 +1,5 @@
+#!/bin/sh
+# The names guard over text on stdin, before it leaves the machine: a PR title and body, an issue, a comment.
+#   printf '%s\n\n%s\n' "$TITLE" "$BODY" | scripts/guard-text && gh pr create --title "$TITLE" --body "$BODY"
+# Exit 0 clean, 1 a listed name (the line number is printed, never the name), 2 the guard couldn't run.
+exec uv run --quiet --frozen --project "$(dirname "$0")/.." python -m anbud.guards text
