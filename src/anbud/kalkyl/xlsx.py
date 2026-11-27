@@ -25,6 +25,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
 from anbud.granskning.catalog import Catalog
+from anbud.kalkyl.code_groups import SECTIONS, TECHNICAL, CodeCoverage
+from anbud.kalkyl.code_groups import for_result as code_coverage
 from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Line, Post, assumed_posts
 from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered
 from anbud.selection import excluded_counts, excluded_label
@@ -205,6 +207,10 @@ OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
 STOP = "Kostnadsstopp för körningen (nivå efter storlek)"
 BOUNDARY_LINES = "Rader i andra discipliners handlingar som rör elarbetena (lästa)"
 
+CODE_GROUPS = "Kodgrupper (AMA/AF) i tekniska beskrivningen och AF"
+CODE_GROUPS_MISSING = "Kodgrupper utan post eller skäl (se Kodgrupper)"
+NO_CODES = "Inga kodade rubriker (AMA/AF) i tekniska beskrivningen eller AF: inte kontrollerat"
+
 
 def _pct(part: Decimal, whole: Decimal) -> str:
     return f"{(part / whole * 100).quantize(Decimal(1))} %"
@@ -233,8 +239,59 @@ def _assumed_rows(result: KalkylResult) -> list[tuple[Any, ...]]:
     return rows
 
 
+def _code_groups_value(codes: CodeCoverage) -> str:
+    if not codes.codes:
+        return NO_CODES
+    parts = []
+    for name, label in SECTIONS.items():
+        n = codes.counts(name)
+        if n["codes"]:
+            parts.append(
+                f"{label}: {n['codes']} koder, {n['with_post']} med post, {n['with_reason_only']} med skäl, "
+                f"{n['without']} utan"
+            )
+    return "; ".join(parts)
+
+
+CODE_GROUP_COLUMNS = [
+    ("Kod", 12),
+    ("Del", 20),
+    ("Koder i gruppen", 10),
+    ("Dokument", 14),
+    ("Första rubrikens block", 20),
+    ("Sida", 6),
+    ("Textblock", 10),
+    ("Rader kalkylen räknar", 12),
+    ("varav ej omhändertagna", 12),
+    ("Status", 30),
+]
+
+
+def _code_groups_sheet(ws: Worksheet, codes: CodeCoverage, catalog: Catalog, status: str, run: str) -> None:
+    """The topmost code groups with neither a post nor a reason: technical description first, then AF."""
+    _header(ws, catalog, status, run, CODE_GROUP_COLUMNS)
+    if not codes.missing:
+        _put(
+            ws, FIRST_ROW, 1, NO_CODES if not codes.codes else "Alla kodgrupper har en post eller ett bortval med skäl."
+        )
+        return
+    order = sorted(codes.missing, key=lambda g: g.section != TECHNICAL)  # stable: reading order within each part
+    for r, g in enumerate(order, FIRST_ROW):
+        values = [g.code, SECTIONS[g.section], g.codes, g.doc_id, g.block_id, g.page, g.blocks, g.lines, g.open_lines]
+        for col, value in enumerate([*values, "Ingen post och inget bortval med skäl"], 1):
+            if value is not None:
+                _put(ws, r, col, value)
+
+
 def _overview(
-    ws: Worksheet, result: KalkylResult, catalog: Catalog, status: str, run: str, meta: dict, corpus: Corpus
+    ws: Worksheet,
+    result: KalkylResult,
+    catalog: Catalog,
+    status: str,
+    run: str,
+    meta: dict,
+    corpus: Corpus,
+    codes: CodeCoverage,
 ) -> None:
     _header(ws, catalog, status, run, OVERVIEW_COLUMNS)
     _put(ws, FIRST_ROW, 1, "Kalkyl (skugga)")
@@ -271,6 +328,8 @@ def _overview(
         ("Anslutningsposter för annans utrustning (tillagda av kod)", c["connection_posts"], None),
         ("Rader och stycken utan post", c["lines_not_handled"], None),
         ("varav ej omhändertagna (se Ej omhändertaget)", c["lines_unresolved"], None),
+        (CODE_GROUPS, _code_groups_value(codes), None),
+        (CODE_GROUPS_MISSING, len(codes.missing), None, "koder och block, aldrig rubrikernas ord"),
         (OTHER_DISCIPLINE, excluded_label(corpus), None, "sökbara; räknas inte i Ej omhändertaget"),
         (BOUNDARY_LINES, excluded_counts(corpus)["boundary_lines"], None),
         ("varav bortvalda med skäl (se Bortvalt med skäl)", c["lines_not_handled"] - c["lines_unresolved"], None),
@@ -292,7 +351,7 @@ def _overview(
         _put(ws, i, 2, value, fmt)
         for col, extra in enumerate(more, 3):
             _put(ws, i, col, extra)
-        if label.startswith("Andel av summan") and t.assumed_total:
+        if (label.startswith("Andel av summan") and t.assumed_total) or (label == CODE_GROUPS_MISSING and value):
             ws.cell(row=i, column=2).fill = WARN_FILL
 
 
@@ -435,7 +494,8 @@ def write_workbook(result: KalkylResult, corpus: Corpus, catalog: Catalog, meta:
     wb = Workbook()
     overview = wb.active
     overview.title = "Översikt"
-    _overview(overview, result, catalog, status, run, meta, corpus)
+    codes = code_coverage(result, corpus)
+    _overview(overview, result, catalog, status, run, meta, corpus, codes)
     rows = _calc_sheet(wb.create_sheet("Kalkyl"), result, catalog, status, run)
     _evidence_sheet(wb.create_sheet("Underlag"), result, catalog, status, run)
     _objects_sheet(wb.create_sheet("Objektmodell"), result, catalog, status, run)
@@ -443,6 +503,7 @@ def write_workbook(result: KalkylResult, corpus: Corpus, catalog: Catalog, meta:
     reasoned = sorted((u for u in result.uncovered if not u.unresolved), key=lambda u: u.set_aside_kind or "")
     _uncovered_sheet(wb.create_sheet("Ej omhändertaget"), result, unresolved, corpus, catalog, status, run)
     _uncovered_sheet(wb.create_sheet("Bortvalt med skäl"), result, reasoned, corpus, catalog, status, run)
+    _code_groups_sheet(wb.create_sheet("Kodgrupper"), codes, catalog, status, run)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), rows

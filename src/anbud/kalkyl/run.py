@@ -30,6 +30,7 @@ from anbud.granskning.catalog import Catalog
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.pipeline import add_cards
 from anbud.kalkyl.catalog import CatalogError, load, prompt_lines
+from anbud.kalkyl.code_groups import for_result as code_coverage
 from anbud.kalkyl.extract import BRIEF, chunk_message, outline_text
 from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.pipeline import KalkylResult, run_kalkyl
@@ -265,6 +266,7 @@ def run_dev_tender(
         "tiles_unread": len(cards.failed),
         "repetition": repetition.label if repetition else None,
         "selection": selection.summary(),
+        "code_groups": code_coverage(result, corpus).summary(),
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
         "stop": {**stop.summary(), "cost_usd_est_high": estimate["cost_usd_est_high"], "margin": kalkyl.margin},
