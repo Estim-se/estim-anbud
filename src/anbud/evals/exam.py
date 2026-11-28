@@ -24,7 +24,8 @@ Per tender of the split status asked for:
    estimate): Granskning on the granskning input, Kalkyl on the
    kalkyl input, and the old engine at matched settings on both (once when they're the same). A run is not started
    when it could take the spend past the budget. Each run is frozen into the sealed ledger with the variant it used,
-   its settings and whether it came after the tender's deadline.
+   its settings, whether it came after the tender's deadline and how it ended (`EngineRun.status`): finished, halted
+   by a limit, or failed. Every attempt is frozen; only a finished run can be a scored prediction.
 
 For prospective tenders it prints the nearest deadline of the open ones, in days, and warns about every tender whose
 deadline has passed: a run after the deadline isn't a prospective prediction any more.
@@ -341,16 +342,28 @@ class EngineRun:
     outputs_dir: Path | None = None
     record_dir: Path | None = None
     settings: dict[str, Any] | None = None
+    halted: bool = False  # stopped by a limit: its hard stop, the spend cap, a stop marker or the timeout
+
+    @property
+    def status(self) -> str:
+        """How the run ended, as its freeze line says: only a finished run can be a scored prediction."""
+        return freeze.FINISHED if self.ok else freeze.HALTED if self.halted else freeze.FAILED
 
 
 _PREFIX = re.compile(r"estimated prefix: (\d+) tokens")
 _KALKYL_HIGH = re.compile(r"^cost_usd_est_high: ([\d.]+)$", re.M)
 _KALKYL_COST = re.compile(r"^cost_usd: ([\d.]+)$", re.M)
+# Kalkyl exits 0 when its calc is incomplete too; it finished only when it froze its own outputs. `halted` counts the
+# calls a limit refused.
+_KALKYL_FROZEN = re.compile(r"^frozen: True$", re.M)
+_KALKYL_HALTED = re.compile(r"^halted: (\d+)$", re.M)
 _GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
 # Granskning's stop when the prefix's fixed part and priority 1 exceed the prefix budget (anbud.granskning.budget),
 # as `anbud run` writes it to stderr.
 PREFIX_STOP = "anbud run: stopped: the prefix's fixed part"
 PAID_REFUSED = 3  # `anbud run`'s exit code for a run refused or stopped before any paid call
+RUN_HALTED = 5  # `anbud run`'s exit code for a run a limit stopped before it finished
+BASELINE_HALTS = ("hard_stop", "stopped", "timeout")  # the old engine's outcomes that are a limit, not an error
 
 # Why prep stopped, from the one line `anbud prep` writes to stderr when it stops (its messages name no file and quote
 # no text). The first fragment found decides.
@@ -434,20 +447,23 @@ class Engines:
             float(match.group(1)) if match else None,
             paths.dev_tender_dir(company_id, tender_id, vroot) / "runs" / run_id,
             paths.company_dir(company_id, vroot) / "runs" / run_id,
+            halted=code == RUN_HALTED,
         )
 
     def kalkyl(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
         proc = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
         code, match = proc.returncode, _KALKYL_COST.search(proc.stdout)
+        halted = _KALKYL_HALTED.search(proc.stdout)
         return EngineRun(
             "kalkyl",
             "kalkyl",
             run_id,
             code,
-            code == 0,
+            code == 0 and _KALKYL_FROZEN.search(proc.stdout) is not None,
             float(match.group(1)) if match else None,
             paths.dev_tender_dir(company_id, tender_id, vroot) / "kalkyl" / run_id,
             paths.company_dir(company_id, vroot) / "runs" / run_id,
+            halted=halted is not None and int(halted.group(1)) > 0,
         )
 
     def selection_plan(self, vroot: Path, company_id: str, tender_id: str) -> dict[str, Any] | None:
@@ -518,6 +534,7 @@ class Engines:
             run_dir / "outputs",
             run_dir / "record",
             recorded,
+            halted=result.outcome in BASELINE_HALTS,
         )
 
 
@@ -582,13 +599,16 @@ class Report:
     dry_runs: dict[str, int] = field(default_factory=dict)
     paid: bool = False
     plan: dict[str, Any] | None = None
-    runs_ok: dict[str, int] = field(default_factory=dict)
+    runs_ok: dict[str, int] = field(default_factory=dict)  # finished runs, by engine
+    runs_halted: dict[str, int] = field(default_factory=dict)  # stopped by a limit, by engine
     runs_failed: dict[str, int] = field(default_factory=dict)
     runs_skipped_budget: int = 0
     runs_prefix_stop: int = 0  # Granskning runs not started: they stop on the prefix budget, checked at $0
     runs_after_deadline: int = 0
     spent_usd: float = 0.0
     frozen: int = 0
+    frozen_by_status: dict[str, int] = field(default_factory=dict)
+    not_frozen: int = 0  # runs that left no run record, or whose freeze was refused
     combined: dict[str, Any] = field(default_factory=dict)  # one total over both splits (`combine`)
 
     @property
@@ -859,12 +879,17 @@ def run_exam(
                     roots[variant], company_id, t, variant, run_id, exam / "baseline" / t / run_id, dry_run=False
                 )
             report.spent_usd += caps.get((t, engine), stops[engine]) if one.cost_usd is None else one.cost_usd
-            bucket = report.runs_ok if one.ok else report.runs_failed
+            status = one.status
+            bucket = {freeze.FINISHED: report.runs_ok, freeze.HALTED: report.runs_halted}.get(
+                status, report.runs_failed
+            )
             bucket[engine] = bucket.get(engine, 0) + 1
             runs.append(one)
-            if not one.ok or one.outputs_dir is None or one.record_dir is None:
+            if one.outputs_dir is None or one.record_dir is None:
+                report.not_frozen += 1  # it left nothing to freeze
                 continue
-            report.runs_after_deadline += after[t]
+            if one.ok:
+                report.runs_after_deadline += after[t]
             extra = {
                 "exam": {
                     "kind": kind,
@@ -887,11 +912,15 @@ def run_exam(
                     input_dir=paths.dev_tender_dir(company_id, t, roots[variant]),
                     extra=extra,
                     root=root,
+                    status=status,
                 )
                 report.frozen += 1
+                report.frozen_by_status[status] = report.frozen_by_status.get(status, 0) + 1
             except freeze.FreezeError:
-                bucket[engine] -= 1
-                report.runs_failed[engine] = report.runs_failed.get(engine, 0) + 1
+                report.not_frozen += 1
+                if one.ok:  # a finished run that isn't frozen can't be scored
+                    bucket[engine] -= 1
+                    report.runs_failed[engine] = report.runs_failed.get(engine, 0) + 1
     report.spent_usd = round(report.spent_usd, 2)
     _write_exam(exam, stamp, report, records, runs)
     _say(report, say)
@@ -996,7 +1025,7 @@ def _write_exam(
     data = {
         "report": asdict(report),
         "tenders": records,
-        "runs": [{**asdict(r), "outputs_dir": None, "record_dir": None} for r in runs],
+        "runs": [{**asdict(r), "status": r.status, "outputs_dir": None, "record_dir": None} for r in runs],
     }
     target = exam / "exams" / f"{stamp}.json"
     private_dirs(target.parent)
@@ -1041,9 +1070,11 @@ def _say(r: Report, say: Callable[[str], None]) -> None:
             say("runs: counts and spend stay in the sealed exam record (fewer than 2 tenders)")
         else:
             stopped = f"; {r.runs_prefix_stop} not started (prefix budget)" if r.runs_prefix_stop else ""
+            unfrozen = f"; {r.not_frozen} not frozen" if r.not_frozen else ""
             say(
-                f"runs: ok {_counts(r.runs_ok)}; failed {_counts(r.runs_failed)}; {r.runs_skipped_budget} not "
-                f"started (budget){stopped}; spent ${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger"
+                f"runs: finished {_counts(r.runs_ok)}; halted {_counts(r.runs_halted)}; failed "
+                f"{_counts(r.runs_failed)}; {r.runs_skipped_budget} not started (budget){stopped}; spent "
+                f"${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger ({_counts(r.frozen_by_status)}){unfrozen}"
             )
         if r.runs_after_deadline:
             say(f"warning: {r.runs_after_deadline} frozen runs came after their tender's deadline")

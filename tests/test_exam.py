@@ -9,8 +9,10 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tomllib
 import zipfile
+from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,7 +24,7 @@ from test_intake_blind import notice_page
 
 from anbud import cli, intake, paths
 from anbud.config import CONFIG_DIR
-from anbud.evals import exam, freeze
+from anbud.evals import baseline, exam, freeze
 from anbud.evals import split_heldout as sh
 from anbud.granskning import command as cli_command
 
@@ -170,7 +172,13 @@ class FakeEngines(exam.Engines):
         tokens: dict[str, int] | None = None,
         selections: dict[str, dict] | None = None,
         prefix_stops: bool = True,
+        ends: dict[str, str] | None = None,
+        bare: frozenset[str] = frozenset(),
+        nothing: frozenset[str] = frozenset(),
     ) -> None:
+        self.ends = ends or {}  # how each engine's runs end; finished unless given
+        self.bare = bare  # engines whose runs write no outputs folder
+        self.nothing = nothing  # engines whose runs leave no folder at all
         self.costs = costs
         self.stops = stops or {}
         self.tokens = tokens or {}
@@ -204,14 +212,28 @@ class FakeEngines(exam.Engines):
         self, engine: str, variant: str, vroot: Path, company_id: str, tender_id: str, run_id: str
     ) -> exam.EngineRun:
         self.calls.append((engine, variant))
+        end = self.ends.get(engine, freeze.FINISHED)
+        if engine in self.nothing:
+            return exam.EngineRun(engine, variant, run_id, None, False, 0.0)
         out = vroot / "fake-runs" / run_id
-        (out / "outputs").mkdir(parents=True)
-        (out / "outputs" / "result.json").write_text("{}")
-        (out / "record").mkdir()
+        if engine not in self.bare:
+            (out / "outputs").mkdir(parents=True)
+            (out / "outputs" / "result.json").write_text("{}")
+        (out / "record").mkdir(parents=True)
         (out / "record" / "run.json").write_text(json.dumps({"code": {"harness_sha": "x"}}))
         settings = {"basis": "matched"} if engine == "baseline" else None
+        ok = end == freeze.FINISHED
         return exam.EngineRun(
-            engine, variant, run_id, 0, True, self.costs[engine], out / "outputs", out / "record", settings
+            engine,
+            variant,
+            run_id,
+            0 if ok else 1,
+            ok,
+            self.costs[engine],
+            out / "outputs",
+            out / "record",
+            settings,
+            halted=end == freeze.HALTED,
         )
 
     def granskning(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> exam.EngineRun:
@@ -304,6 +326,88 @@ def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget
     plans = freeze.verify(freeze.ledger_file("co-002")).kinds
     assert plans == {"preregistration": 1}  # the plan only: no run is frozen in the plain ledger
     assert "frozen runs came after their tender's deadline" in "\n".join(lines)
+
+
+def _paid(runner: FakeEngines, lines: list[str], budget: float = 200.0) -> exam.Report:
+    return exam.run_exam(
+        "co-002",
+        "prospective",
+        paid=True,
+        budget_usd=budget,
+        runner=runner,
+        now=NOW,
+        local_now=LOCAL_NOW,
+        say=lines.append,
+    )
+
+
+def test_a_run_that_halts_or_fails_is_frozen_with_its_status_and_never_counted_finished(data_root: Path) -> None:
+    sealed_store(data_root)
+    register(data_root)
+    runner = FakeEngines(
+        {"granskning": 8.0, "kalkyl": 1.0, "baseline": 2.0},
+        ends={"granskning": freeze.HALTED, "kalkyl": freeze.FAILED},
+        bare=frozenset({"kalkyl"}),
+    )
+    lines: list[str] = []
+    report = _paid(runner, lines)
+    records = [json.loads(line) for line in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
+    finished = report.runs_ok["baseline"]
+    assert Counter((r["exam"]["engine"], r["status"]) for r in records) == {
+        ("granskning", "halted"): 3,
+        ("kalkyl", "failed"): 3,
+        ("baseline", "finished"): finished,
+    }
+    assert report.runs_halted == {"granskning": 3} and report.runs_failed == {"kalkyl": 3}
+    assert report.runs_ok.keys() == {"baseline"} and report.frozen == len(records) == len(runner.calls)
+    assert report.frozen_by_status == {"failed": 3, "finished": finished, "halted": 3} and report.not_frozen == 0
+    kalkyl = [r for r in records if r["exam"]["engine"] == "kalkyl"]
+    assert all(r["outputs_dir"] is None and r["outputs_sha256"] == {} for r in kalkyl)  # nothing written, still frozen
+    late = sum(1 for r in records if r["exam"]["after_deadline"] and r["status"] == "finished")
+    assert 0 < late == report.runs_after_deadline  # only a finished run counts as a late prediction
+    printed = "\n".join(lines)
+    assert f"runs: finished baseline {finished}; halted granskning 3; failed kalkyl 3; 0 not started" in printed
+    assert f"{len(records)} frozen in the sealed ledger (failed 3, finished {finished}, halted 3)" in printed
+    exams = list((exam.exam_dir("co-002", "prospective") / "exams").glob("*.json"))
+    runs = json.loads(exams[0].read_text())["runs"]
+    assert Counter(r["status"] for r in runs) == {"halted": 3, "failed": 3, "finished": finished}
+
+
+def test_a_run_that_leaves_no_folder_is_counted_and_not_frozen(data_root: Path) -> None:
+    sealed_store(data_root)
+    register(data_root)
+    runner = FakeEngines({"granskning": 8.0, "kalkyl": 1.0, "baseline": 2.0}, nothing=frozenset({"baseline"}))
+    lines: list[str] = []
+    report = _paid(runner, lines)
+    records = [json.loads(line) for line in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
+    assert {r["exam"]["engine"] for r in records} == {"granskning", "kalkyl"}
+    assert report.not_frozen == report.runs_failed["baseline"] > 0
+    assert f"; {report.not_frozen} not frozen" in "\n".join(lines)
+
+
+@pytest.mark.parametrize(
+    ("engine", "code", "summary", "status"),
+    [
+        ("granskning", 0, {}, "finished"),
+        ("granskning", cli_command.RUN_HALTED, {}, "halted"),
+        ("granskning", 1, {}, "failed"),
+        ("kalkyl", 0, {"frozen": True, "halted": 0}, "finished"),
+        ("kalkyl", 0, {"frozen": False, "halted": 2}, "halted"),  # a limit stopped it: its calc is incomplete
+        ("kalkyl", 0, {"frozen": False, "halted": 0}, "failed"),
+        ("kalkyl", 3, {}, "failed"),
+    ],
+)
+def test_each_engine_s_exit_says_whether_it_finished_halted_or_failed(
+    engine: str, code: int, summary: dict, status: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = exam.Engines(tmp_path / "logs", tmp_path, "HEAD", tmp_path)
+    stdout = "\n".join(f"{k}: {v}" for k, v in {"cost_usd": 1.5, **summary}.items())  # as `anbud kalkyl` prints
+    monkeypatch.setattr(runner, "_anbud", lambda vroot, args, log: subprocess.CompletedProcess(args, code, stdout, ""))
+    one = getattr(runner, engine)(tmp_path, "co-002", "t-0002", "r1")
+    assert one.status == status and exam.RUN_HALTED == cli_command.RUN_HALTED
+    assert (
+        set(exam.BASELINE_HALTS) == {"hard_stop", "stopped", "timeout"} and "hard_stop" in baseline.EXIT_CODES.values()
+    )
 
 
 def test_prep_stops_are_counted_by_category_and_prefix_sizes_summarised(data_root: Path) -> None:
