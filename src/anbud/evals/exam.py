@@ -567,13 +567,14 @@ def selection_sizes(prep_dir: Path, calc_dir: Path, budgets: dict[str, Any]) -> 
             "planned_tokens": plan.total,
             "search_only": len(plan.search_only),
             "p1_search_only": len(plan.p1_search_only),  # of them, P1 documents read through search
+            "core_search_only": len(plan.core_search_only),  # of those, the AF or the contract: a partial review
         }
     return out
 
 
 def _stops(selection: dict[str, Any]) -> bool:
-    """Whether a tender's run stops at its prefix check. A size record from before P1 could be demoted has no `stops`:
-    then P1 not fitting was the stop."""
+    """Whether a tender's run stops at its prefix check: not even every document's outline fits. A size record from
+    before P1 could be demoted has no `stops`: then P1 not fitting was the stop."""
     return bool(selection.get("stops", selection.get("p1_fits") is False))
 
 
@@ -1062,6 +1063,8 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
             "planned_tokens_max": max(fitting) if fitting else None,
             "search_only_documents": sum(int(x.get("search_only") or 0) for x in planned),
             "p1_search_only_documents": sum(int(x.get("p1_search_only") or 0) for x in planned),
+            "core_search_only_documents": sum(int(x.get("core_search_only") or 0) for x in planned),
+            "partial": sum(bool(x.get("core_search_only")) for x in planned if not _stops(x)),
         }
     return out
 
@@ -1170,11 +1173,18 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
                 if sel["would_stop"]
                 else ""
             )
-            p1 = sel.get("p1_search_only_documents") or 0
+            p1, core = sel.get("p1_search_only_documents") or 0, sel.get("core_search_only_documents") or 0
+            partial = (
+                f"; {core} of them the AF or the contract, so {sel.get('partial', 0)} tenders get a partial review"
+                if core
+                else ""
+            )
             say(
                 f"prefix budget {sel['budget_tokens']:,} tokens: {sel['would_stop']} of {sel['planned']} tenders would "
-                f"stop (fixed part and priority 1 over the budget{checked}); {fit}; {sel['search_only_documents']} "
-                "documents search-only" + (f", {p1} of them priority 1 read through search" if p1 else "")
+                f"stop (fixed part and every document's outline over the budget{checked}); {fit}; "
+                f"{sel['search_only_documents']} documents search-only"
+                + (f", {p1} of them priority 1 read through search" if p1 else "")
+                + partial
             )
     runs_on = c.get("runs_on") or {}
     # An engine that runs on one tender: any figure for it is that tender's, and the other engines' tiers with the

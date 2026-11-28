@@ -646,7 +646,8 @@ def test_the_selection_and_the_prefix_budget_are_one_total_over_the_tenders(data
         "max 500"
     ) in lines
     assert (
-        "prefix budget 450,000 tokens: 1 of 3 tenders would stop (fixed part and priority 1 over the budget, 1 of them "
+        "prefix budget 450,000 tokens: 1 of 3 tenders would stop (fixed part and every document's outline over the "
+        "budget, 1 of them "
         "checked at $0 to stop before any model call and counted at $0); planned prefix median 125,000 tokens, max "
         "150,000 over the 2 that fit; 7 documents search-only"
     ) in lines
@@ -813,11 +814,11 @@ def test_tenders_per_hard_stop_tier_are_one_total_and_set_the_worst_case(data_ro
     assert report.combined["worst_usd"] == 154.0
 
 
-def _af_over_the_budget() -> list:
-    """An invented tender whose administrative terms alone are over the 450,000-token prefix budget."""
-    filler = "Text om villkor, ansvar och tider i avsnitt {p}, rad {i}. " * 5
-    items = [("heading", "AFC.1 Entreprenadform", 1)]
-    items += [("paragraph", filler.format(p=p, i=i), p) for p in range(1, 301) for i in range(10)]
+def _outline_over_the_budget() -> list:
+    """An invented tender whose administrative terms' outline alone is over the 450,000-token prefix budget: even
+    with every document search-only, the prefix can't fit."""
+    title = "AFC.{p}{i} Villkor, ansvar och tider i avsnitt {p}, punkt {i}. " + "Rubriktext utan innehåll. " * 4
+    items = [("heading", title.format(p=p, i=i), p) for p in range(1, 301) for i in range(30)]
     return [("f00000000001", "Förfrågningsunderlag/AF.pdf", 300, items)]
 
 
@@ -827,7 +828,7 @@ def test_the_prefix_stop_check_runs_granskning_at_zero_cost(data_root: Path, tmp
     from mixed_trades import write_mixed_prep
 
     vroot = data_root / "variant"
-    for t, docs in (("t-0002", _af_over_the_budget()), ("t-0003", None)):
+    for t, docs in (("t-0002", _outline_over_the_budget()), ("t-0003", None)):
         write_mixed_prep(paths.dev_tender_dir("co-002", t, vroot) / "prep", docs)
         exam._ensure_dev(vroot, "co-002", t)
     runner = exam.Engines(data_root / "logs", tmp_path, "HEAD", None)

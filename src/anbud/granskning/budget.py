@@ -7,22 +7,24 @@ own estimate, so the plan is deterministic and a rebuild sends the same bytes:
 
 - P0, always in full: the brief, the rules and the calc.
 - P1: the administrative terms (AF), the contract, the general description (rambeskrivning), the time plan and the
-  electrical technical description. The AF and the contract are the core: always in full.
+  electrical technical description. The AF and the contract are the core.
 - P2: the electrical drawings and lists, the boundary and object lists, the other electrical documents, and the lines
   brought back from other trades' documents (capped at a share of the budget).
 - P3: the other common documents and the unclassified ones.
 
-Over the budget, documents become search-only, P3 before P2 before P1, the largest first within each: the prefix keeps
-the document's outline (headings with block ids and pages), and search_blocks and read_blocks reach its text. Of P1,
-only what isn't core is demoted, and a small time plan goes last. A large tender gets a partial review, with its P1
-documents reached by search, instead of none. Boundary lines beyond their cap leave the prefix in reading order from
-the last. Nothing is cut silently: the plan, the run summary and the report name every search-only document, and the
-report and the lenses are told which P1 documents were read through search (`SEARCH_ONLY_P1`).
+Over the budget, documents become search-only, rung by rung: P3, then P2, then P1 without its core (a small time plan
+last), then the core, the largest first within each. The prefix keeps a search-only document's outline (headings with
+block ids and pages), and search_blocks and read_blocks reach its text. A large tender gets a partial review, reached by
+search, instead of none. Boundary lines beyond their cap leave the prefix in reading order from the last, and only
+when every document is down to its outline do the rest follow. Nothing is cut silently: the plan, the run summary and
+the report name every search-only document, and the report and the lenses are told which P1 documents, and which of
+the core, were read through search (`SEARCH_ONLY_P1`, `SEARCH_ONLY_CORE`); a demoted core makes the review partial.
 
-The run stops before any paid call (`PrefixOverBudget`) only when P0 and the core alone exceed the budget. The page
-cards are read before the plan is made, and their text joins its documents, so the check before the cards counts for
-each tile the most text its card can add (`card_tokens`): a run that the core's cards would take over the budget stops
-before the first card is paid for, not after. The dry run shows P1 and the core on their own lines.
+The run stops before any paid call (`PrefixOverBudget`) only when P0 and every document's outline alone exceed the
+budget: the last rung. The page cards are read after the check and their text joins its documents, but a card adds
+no outline line, so the floor is the same before and after the cards: a run that goes on never stops after a card is
+paid for, and pays for none when it stops. The card bound (`card_tokens`) still says, before the cards, whether P1 and
+its core can stay in full. The dry run shows P1, the core and the floor on their own lines.
 """
 
 from __future__ import annotations
@@ -39,11 +41,12 @@ from anbud.prep.model import Tile
 from anbud.selection import HEADER_BLOCKS, HEADER_CHARS, classify, views
 
 P1_ROLES = ("af", "contract", "general_description", "time_plan", "el_description")
-CORE_ROLES = ("af", "contract")  # of P1, always in full
+CORE_ROLES = ("af", "contract")  # of P1, the core: demoted only after the rest of P1
 SMALL_TIME_PLAN = 0.05  # a time plan up to this share of the budget is demoted last of P1
 P2_ROLES = ("el_list", "el_drawing", "el", "boundary_list", "object_list")
 SEARCH_ONLY = "prefixbudget"  # why a document is search-only
 SEARCH_ONLY_P1 = "prefixbudget, priority 1"  # a P1 document demoted: its text is reached by search
+SEARCH_ONLY_CORE = "prefixbudget, priority 1, AF or contract"  # the core demoted: the review is partial
 MARK_CHARS = 1000  # the search-only note and marks the plan adds to the document list
 DOC_CHARS = 100  # a document's <doc> and </doc> lines
 # At most one tile's card text, and its paragraphs (each a block line). About three dense A4 pages of text: the cards
@@ -53,8 +56,7 @@ CARD_BLOCKS = 60
 
 
 class PrefixOverBudget(RuntimeError):
-    """P0 and the core of P1 (AF and contract) alone exceed the prefix budget: raised before any paid call, with counts
-    only."""
+    """P0 and every document's outline alone exceed the prefix budget: raised before any paid call, with counts only."""
 
 
 @dataclass(frozen=True)
@@ -78,14 +80,18 @@ class PrefixPlan:
     p2: int
     p3: int
     boundary: int  # lines brought back from other trades' documents, before their cap
+    boundary_share: float = 0.10
     priority: dict[str, int] = field(default_factory=dict)  # doc_id -> 1, 2 or 3
     search_only: list[str] = field(default_factory=list)  # doc ids, in the order they were demoted
     boundary_dropped: list[str] = field(default_factory=list)  # block ids past the cap
     total: int = 0  # the planned prefix, estimated
     cards: int = 0  # at most what the page cards still to be read add to P1 (`card_tokens`); 0 once they are in
-    core: int = 0  # the AF and the contract: P1 that is never demoted
+    core: int = 0  # the AF and the contract: P1 that is demoted last
     core_cards: int = 0  # at most what the page cards still to be read add to the core
-    p1_search_only: list[str] = field(default_factory=list)  # the P1 doc ids of `search_only`, in the same order
+    p1_search_only: list[str] = field(default_factory=list)  # the P1 doc ids of `search_only`, the core's included
+    core_search_only: list[str] = field(default_factory=list)  # of those, the core's
+    floor: int = 0  # P0 and every document's outline: the smallest prefix the plan can reach
+    core_floor: int = 0  # P0, the core in full and every other document's outline
 
     @property
     def p1_fits(self) -> bool:
@@ -93,9 +99,19 @@ class PrefixPlan:
         return self.p0 + self.p1 + self.cards <= self.budget
 
     @property
+    def core_fits(self) -> bool:
+        """The core can stay in full: with every other document search-only, the boundary lines within their cap and
+        the most the core's cards can add, it fits."""
+        return self.core_floor + self.core_cards + min(self.boundary, self.cap) <= self.budget
+
+    @property
+    def cap(self) -> int:
+        return int(self.budget * self.boundary_share)
+
+    @property
     def stops(self) -> bool:
-        """P0 and the core don't fit: the run stops before any paid call."""
-        return self.p0 + self.core + self.core_cards > self.budget
+        """Not even P0 and every document's outline fit: the run stops before any paid call."""
+        return self.floor > self.budget
 
     def summary(self) -> dict[str, Any]:
         """Counts only: safe to print and to log."""
@@ -119,6 +135,9 @@ class PrefixPlan:
                     "stops": self.stops,
                     "p1_search_only_documents": len(self.p1_search_only),
                     "p1_search_only": list(self.p1_search_only),
+                    "floor_tokens": self.floor,
+                    "core_search_only_documents": len(self.core_search_only),
+                    "core_search_only": list(self.core_search_only),
                 }
                 if not self.p1_fits
                 else {}
@@ -196,22 +215,23 @@ def card_tokens(
 
 
 def _demotion_order(sizes: dict[str, int], prio: dict[str, int], role: dict[str, str | None], budget: int) -> list[str]:
-    """P3, then P2, then P1 without its core, the largest first within each; a small time plan last."""
+    """P3, then P2, then P1 without its core (a small time plan last), then the core, the largest first within each."""
 
     def level(n: int) -> list[str]:
         return sorted((d for d in sizes if prio.get(d, 3) == n), key=lambda d: (-sizes[d], d))
 
     p1 = [d for d in level(1) if role.get(d) not in CORE_ROLES]
+    core = [d for d in level(1) if role.get(d) in CORE_ROLES]
     small = [d for d in p1 if role.get(d) == "time_plan" and sizes[d] <= budget * SMALL_TIME_PLAN]
-    return [*level(3), *level(2), *(d for d in p1 if d not in small), *small]
+    return [*level(3), *level(2), *(d for d in p1 if d not in small), *small, *core]
 
 
 def plan_prefix(
     corpus: Corpus, calc: list[CalcPost], budget: PrefixBudget, cards_for: Iterable[Tile] = ()
 ) -> PrefixPlan:
     """What stays in full and what becomes search-only. Deterministic: sizes from characters, ties by doc id.
-    `cards_for` are the tiles whose cards are still to be read: before the cards, the core must fit with the most text
-    they can add (`card_tokens`)."""
+    `cards_for` are the tiles whose cards are still to be read: the most text they can add (`card_tokens`) says whether
+    P1 and the core can stay in full; it never moves the floor, since a card adds no outline line."""
     p0 = _tokens(prefix_chars(system_blocks(replace(corpus, order=[]), calc)) + MARK_CHARS)  # all but document text
     chars = _doc_chars(corpus)
     role = roles(corpus)
@@ -224,14 +244,34 @@ def plan_prefix(
     boundary = _tokens(tags + sum(len(block_line(corpus.blocks[b])) + 1 for b in boundary_ids))
     cards, core_cards = card_tokens(corpus, cards_for, prio, core_ids)
     core = sum(sizes[d] for d in core_ids)
+    outline = _outline_tokens(corpus)
     plan = PrefixPlan(
-        budget.tokens, p0, by[1], by[2], by[3], boundary, prio, cards=cards, core=core, core_cards=core_cards
+        budget.tokens,
+        p0,
+        by[1],
+        by[2],
+        by[3],
+        boundary,
+        budget.boundary_share,
+        prio,
+        cards=cards,
+        core=core,
+        core_cards=core_cards,
     )
+    least = {d: min(sizes[d], outline.get(d, 0)) for d in sizes}
+    # A document whose only text is still to come from its cards has no block yet: once they are in, it is in the
+    # prefix, at least as its <doc> lines and outline. Counted now, so the cards can't move the floor.
+    pending = {t.doc_id for t in cards_for if t.doc_id not in sizes and t.doc_id not in corpus.excluded}
+    least |= {d: _tokens(DOC_CHARS + sum(len(line) + 1 for line in outline_lines(corpus, d))) for d in pending}
+    # What the boundary lines leave when every one of them is dropped, by the same sums the plan uses below
+    residual = boundary - sum(_tokens(len(block_line(corpus.blocks[b])) + 1) for b in boundary_ids)
+    plan.floor = p0 + sum(least.values()) + residual
+    plan.core_floor = plan.floor + sum(sizes[d] - least[d] for d in core_ids)
     if plan.stops:
-        plan.total = p0 + sum(by.values()) + boundary
+        plan.total = plan.floor
         return plan
 
-    cap = int(budget.tokens * budget.boundary_share)
+    cap = plan.cap
     kept = boundary
     for block_id in reversed(boundary_ids):
         if kept <= cap:
@@ -240,14 +280,23 @@ def plan_prefix(
         plan.boundary_dropped.insert(0, block_id)
 
     total = p0 + sum(by.values()) + kept
-    outline = _outline_tokens(corpus)
     for doc_id in _demotion_order(sizes, prio, role, budget.tokens):
         if total <= budget.tokens:
             break
+        if outline.get(doc_id, 0) >= sizes[doc_id]:
+            continue  # its outline is no smaller than its text: search-only would save nothing
         total -= sizes[doc_id] - outline.get(doc_id, 0)
         plan.search_only.append(doc_id)
         if prio.get(doc_id) == 1:
             plan.p1_search_only.append(doc_id)
+            if role.get(doc_id) in CORE_ROLES:
+                plan.core_search_only.append(doc_id)
+    dropped = set(plan.boundary_dropped)
+    for block_id in reversed([b for b in boundary_ids if b not in dropped]):
+        if total <= budget.tokens:
+            break  # every document is down to its outline: the lines within the cap follow, from the last
+        total -= _tokens(len(block_line(corpus.blocks[block_id])) + 1)
+        plan.boundary_dropped.insert(0, block_id)
     plan.total = total
     return plan
 
@@ -267,18 +316,24 @@ def apply_plan(corpus: Corpus, plan: PrefixPlan) -> Corpus:
     gone = set(plan.boundary_dropped)
     demoted = set(plan.search_only)
     order = [b for b in corpus.order if b not in gone and corpus.blocks[b].doc_id not in demoted]
-    p1 = set(plan.p1_search_only)
-    why = {d: SEARCH_ONLY_P1 if d in p1 else SEARCH_ONLY for d in plan.search_only}
+    p1, core = set(plan.p1_search_only), set(plan.core_search_only)
+    why = {d: SEARCH_ONLY_CORE if d in core else SEARCH_ONLY_P1 if d in p1 else SEARCH_ONLY for d in plan.search_only}
     return replace(corpus, order=order, search_only={**corpus.search_only, **why})
 
 
 def p1_search_only(corpus: Corpus) -> list[str]:
-    """The P1 documents the plan demoted, in document order: their text was reached by search, not held in full."""
-    return [d for d, why in corpus.search_only.items() if why == SEARCH_ONLY_P1]
+    """The P1 documents the plan demoted, the core's included, in document order: their text was reached by search,
+    not held in full."""
+    return [d for d, why in corpus.search_only.items() if why in (SEARCH_ONLY_P1, SEARCH_ONLY_CORE)]
+
+
+def core_search_only(corpus: Corpus) -> list[str]:
+    """Of those, the core's (the AF and the contract): with any, the review is partial."""
+    return [d for d, why in corpus.search_only.items() if why == SEARCH_ONLY_CORE]
 
 
 def fit_prefix(corpus: Corpus, calc: list[CalcPost], budgets: dict[str, Any]) -> tuple[Corpus, PrefixPlan | None]:
-    """The planned corpus, or the corpus as it is when config sets no budget. Raises when the core doesn't fit."""
+    """The planned corpus, or the corpus as it is when config sets no budget. Raises when the floor doesn't fit."""
     budget = PrefixBudget.from_config(budgets)
     if budget is None:
         return corpus, None
@@ -289,8 +344,7 @@ def fit_prefix(corpus: Corpus, calc: list[CalcPost], budgets: dict[str, Any]) ->
 
 
 def over_budget(plan: PrefixPlan) -> str:
-    cards = f" with at most {plan.core_cards} tokens of their page cards," if plan.core_cards else ""
     return (
-        f"the prefix's fixed part ({plan.p0} tokens) and its priority-1 core, the AF and the contract ({plan.core} "
-        f"tokens{cards}), exceed the budget of {plan.budget} tokens"
+        f"the prefix's fixed part ({plan.p0} tokens) and every document's outline ({plan.floor - plan.p0} tokens), "
+        f"with every document search-only and no boundary line, exceed the budget of {plan.budget} tokens"
     )

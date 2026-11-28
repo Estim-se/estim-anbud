@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from anbud.granskning.budget import p1_search_only
+from anbud.granskning.budget import core_search_only, p1_search_only
 from anbud.granskning.contracts import CalcPost, LensResult
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.lenses import Lens
@@ -60,14 +60,25 @@ SEARCH_ONLY_P1_NOTE = """\
 <search_only_priority_1>
 These priority-1 documents were too large for the prefix in full: {ids}. The document list marks them search_only, \
 and the corpus holds only their outline. Where your checklist relies on their text, reach it with search_blocks and \
-read_blocks, and never report something as missing from the tender only because it isn't in the prefix.
+read_blocks, and never report something as missing from the tender only because it isn't in the prefix.{core}
 </search_only_priority_1>"""
+SEARCH_ONLY_CORE_NOTE = """
+Of them, {ids} hold the administrative terms (AF) or the contract: not even they fit in full, so the review is \
+partial. Search them for every term your checklist needs before you conclude anything about the contract."""
 
 
-def lens_message(lens: Lens, tender_map: TenderMap | None, caps: LensCaps, p1_search_only: Sequence[str] = ()) -> str:
+def lens_message(
+    lens: Lens,
+    tender_map: TenderMap | None,
+    caps: LensCaps,
+    p1_search_only: Sequence[str] = (),
+    core_search_only: Sequence[str] = (),
+) -> str:
     """The lens's first message. When the prefix plan demoted priority-1 documents (`budget.SEARCH_ONLY_P1`), it
-    names them, so a lens that relies on their text searches for it; otherwise the message is as it always was."""
-    note = "\n" + SEARCH_ONLY_P1_NOTE.format(ids=", ".join(p1_search_only)) if p1_search_only else ""
+    names them, so a lens that relies on their text searches for it, and says which are the AF or the contract
+    (`budget.SEARCH_ONLY_CORE`) when any is; otherwise the message is as it always was."""
+    core = SEARCH_ONLY_CORE_NOTE.format(ids=", ".join(core_search_only)) if core_search_only else ""
+    note = "\n" + SEARCH_ONLY_P1_NOTE.format(ids=", ".join(p1_search_only), core=core) if p1_search_only else ""
     focus: list[str] = []
     if tender_map is not None:
         for plan in tender_map.lenses:
@@ -204,7 +215,9 @@ def run_granskning(
                 lens_id=lens.id,
                 role=lens.role,
                 system=system,
-                first_message=lens_message(lens, mapped.tender_map, caps, p1_search_only(corpus)),
+                first_message=lens_message(
+                    lens, mapped.tender_map, caps, p1_search_only(corpus), core_search_only(corpus)
+                ),
                 toolbox=toolbox,
                 max_turns=caps.max_turns,
                 max_usd=caps.max_usd,

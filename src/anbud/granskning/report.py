@@ -89,6 +89,7 @@ class Report(_Model):
 OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
 SEARCH_ONLY = "Endast sökbara (prefixbudget)"
 SEARCH_ONLY_P1 = "Prioritet 1 granskad via sökning, inte i sin helhet"
+PARTIAL = "Partiell granskning: AF eller kontrakt via sökning"
 STOP = "Kostnadsstopp (nivå efter storlek)"
 
 
@@ -293,10 +294,17 @@ def render_html(report: Report) -> str:
             f"granskningen nådde texten genom sökning. {_e(', '.join(cov.search_only_documents))}</p>"
         )
     if cov.search_only_priority_1:
+        whole = "" if cov.search_only_core else "AF och kontrakt låg i sin helhet; d"
         parts.append(
-            f"<p><strong>{SEARCH_ONLY_P1}</strong>: {len(cov.search_only_priority_1)} dokument. AF och kontrakt "
-            "låg i sin helhet; dessa prioritet 1-handlingar var för stora för prefixet och lästes genom sökning, så "
-            f"granskningen av dem är ofullständig. {_e(', '.join(cov.search_only_priority_1))}</p>"
+            f"<p><strong>{SEARCH_ONLY_P1}</strong>: {len(cov.search_only_priority_1)} dokument. {whole or 'D'}essa "
+            "prioritet 1-handlingar var för stora för prefixet och lästes genom sökning, så granskningen av dem är "
+            f"ofullständig. {_e(', '.join(cov.search_only_priority_1))}</p>"
+        )
+    if cov.search_only_core:
+        parts.append(
+            f"<p><strong>{PARTIAL}</strong>: {len(cov.search_only_core)} dokument. Inte ens AF och kontrakt fick plats "
+            "i sin helhet i prefixet, så hela granskningen är partiell: villkor som bara står i dem kan ha missats. "
+            f"{_e(', '.join(cov.search_only_core))}</p>"
         )
     if cov.other_discipline:
         parts.append(
@@ -486,6 +494,7 @@ def build_workbook(
             if report.coverage.search_only_priority_1
             else []
         ),
+        *([(PARTIAL, ", ".join(report.coverage.search_only_core))] if report.coverage.search_only_core else []),
         ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
         (STOP, report.stop or "Okänt"),
         ("Täckning", report.coverage.note),
