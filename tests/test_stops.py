@@ -53,6 +53,8 @@ def test_a_size_above_the_top_tier_gets_the_top_tier_and_says_so() -> None:
         "size": 450_001,
         "from": "estimate",
         "above_top_tier": True,
+        "floor_usd": 0.0,  # a tier pick alone has no floor (`stops.scaled`)
+        "scaled": False,
     }
     assert kalkyl_stop(kalkyl_tiers(BUDGETS), 17.0, 1.5).above_top  # $25.50 needed, over the $25 top tier
     assert not kalkyl_stop(kalkyl_tiers(BUDGETS), 11.0, 1.5).above_top  # $16.50 fits the $25 top tier
@@ -142,7 +144,8 @@ def test_the_measured_prefix_at_a_bound_picks_the_lower_tier_and_the_record_and_
         "size": SMALL,
         "from": "measured",
         "above_top_tier": False,
-    }
+    } | {"floor_usd": summary["stop"]["floor_usd"], "scaled": False}  # the floor stays below the tier's stop here
+    assert 0 < summary["stop"]["floor_usd"] < 20.0
     label = f"S, 20 USD (prefix {SMALL} token, mätt)"
     assert (
         about["Kostnadsstopp (nivå efter storlek)"] == label and f"Kostnadsstopp (nivå efter storlek): {label}." in page

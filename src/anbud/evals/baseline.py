@@ -37,6 +37,7 @@ from typing import Any
 
 from anbud import paths
 from anbud.config import CONFIG_DIR, load_config
+from anbud.stops import baseline_run_stop
 from anbud.store import check_run_id, private_dirs
 
 APP_DIR = Path.home() / "Documents/estim/workspace/estim"
@@ -82,6 +83,22 @@ class Outcome:
 
 def baseline_budget(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
     return dict(tomllib.loads((config_dir / "budgets.toml").read_text())["baseline"])
+
+
+def prep_pages(tender: Path) -> int:
+    """The pages a tender's prep counted (`prep/summary.json` `pages_by_kind`, summed); 0 without a readable summary."""
+    try:
+        summary = json.loads((tender / "prep" / "summary.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    by_kind = summary.get("pages_by_kind") if isinstance(summary, dict) else None
+    return sum(int(n) for n in by_kind.values()) if isinstance(by_kind, dict) else 0
+
+
+def run_stop(pages: int, config_dir: Path = CONFIG_DIR) -> float:
+    """The old engine's stop for a run on `pages` pages, scaled to them (`stops.baseline_run_stop`): the exam passes the
+    same stop to its runs and records it as their cap."""
+    return baseline_run_stop(tomllib.loads((config_dir / "budgets.toml").read_text()), pages)
 
 
 def baseline_price(config_dir: Path = CONFIG_DIR) -> dict[str, float]:
@@ -464,7 +481,7 @@ def run_dev(
 ) -> Outcome:
     """The baseline on one dev tender (the caller has run the run guard and, for a paid run, the clean-tree check)."""
     budget = baseline_budget()
-    cap = float(budget["hard_stop"])
+    cap = run_stop(prep_pages(paths.dev_tender_dir(company_id, tender_id, root)))  # scaled to the tender's pages
     if hard_stop is not None and hard_stop > cap:
         raise BaselineError(f"--hard-stop may lower the ${cap:.2f} hard stop, never raise it")
     stop = cap if hard_stop is None else hard_stop

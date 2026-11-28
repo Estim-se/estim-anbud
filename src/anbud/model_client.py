@@ -102,9 +102,12 @@ class Budget:
     room ahead of an earlier one, so calls start in the order they asked. It is refused only when it doesn't fit with
     nothing in flight. Reservations alone then never stop a run below its stop, and its worst case stays capped."""
 
-    def __init__(self, hard_stop_usd: float, ceiling_usd: float | None = None, *, wait: bool = False) -> None:
+    def __init__(
+        self, hard_stop_usd: float, ceiling_usd: float | None = None, *, wait: bool = False, floor_usd: float = 0.0
+    ) -> None:
         self.hard_stop = hard_stop_usd
         self.ceiling = hard_stop_usd if ceiling_usd is None else ceiling_usd  # set_stop never goes above it
+        self.floor = floor_usd  # nor below it: the run's scaled stop (`anbud.stops`)
         self.spent = 0.0
         self.reserved = 0.0
         self.in_flight = 0  # calls reserved and not yet settled: a count, so a float's residue never holds a wait
@@ -154,9 +157,10 @@ class Budget:
         )
 
     def set_stop(self, usd: float) -> float:
-        """Moves the stop when the run learns its size (`anbud.stops`), never above the ceiling set at the start."""
+        """Moves the stop when the run learns its size (`anbud.stops`), never above the ceiling set at the start and
+        never below the floor its size was scaled to."""
         with self._room:
-            self.hard_stop = min(usd, self.ceiling)
+            self.hard_stop = min(max(usd, self.floor), self.ceiling)
             self._room.notify_all()
             return self.hard_stop
 

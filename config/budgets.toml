@@ -12,6 +12,19 @@ target_median = 15.00
 # pair was $45 + $15 = $60 per tender, the plan's top. Kalkyl's top tier is now $25, so the largest pair is
 # $45 + $25 = $70: the founder approved it in chat on 27 Nov 2026, "$500 cap + calc to $25", after the exam's $0 pass
 # showed every exam tender above Kalkyl's $15 tier. The monthly workspace cap is separate.
+# Scaled stops (anbud.stops): each run's stop is raised to a floor scaled to its size, so a cap never cuts off normal
+# work, and never goes below its tier's stop. Each floor is fixed before the first paid call, from the numbers its dry
+# run prints, and the exam records the same stop as the run's cap. An engine's `max_scaled_stop`, unset by default,
+# would cap its floor. Promoted from the exam's size checks (config/exam_checks.toml, audit 2 C10 and G2).
+[granskning]
+# Page cards come before the map, and neither degrades: a refused card or map reservation halts the run. The floor is
+# the cards (tiles times card_usd_per_tile) plus the map's reservation (the estimated prefix at the map model's dearest
+# input price, plus its max tokens), over card_map_share, so the lenses keep the rest. A run that lowers its tier on
+# the measured prefix never goes below it.
+card_usd_per_tile = 0.03 # one card: a ~9,000-token image tile at Sonnet's input price and ~1,200 output tokens
+card_map_share = 0.5
+# max_scaled_stop = 0.00 # an optional per-run ceiling on the floor
+
 [[granskning_stops]]
 tier = "S"
 max_prefix_tokens = 150000
@@ -29,6 +42,11 @@ hard_stop = 45.00
 
 [kalkyl]
 margin = 1.5 # times the dry run's high estimate; the same margin as [exam]
+# The floor: the dry run's cost_usd_est_high times spend_ratio, a run's spend over that estimate. Measured on the dev
+# tender against the current code's high (config/exam_checks.toml [kalkyl]): at most 0.142 over 9 first paid runs,
+# 0.256 if every chunk were repaired, and 0.291 with a margin for size, which this takes.
+spend_ratio = 0.291
+# max_scaled_stop = 0.00 # an optional per-run ceiling on the floor
 
 [[kalkyl_stops]]
 tier = "S"
@@ -45,6 +63,10 @@ hard_stop = 25.00 # founder-approved 27 Nov 2026 (see the comment above)
 [baseline]
 hard_stop = 10.00 # per old-engine baseline run; about $6 expected per dev tender (plan: Cross-engine baseline)
 timeout_minutes = 90
+# The floor: the run's pages (its prep's pages_by_kind) times usd_per_page times margin, as [exam] estimates it.
+usd_per_page = 0.022
+margin = 1.5
+# max_scaled_stop = 0.00 # an optional per-run ceiling on the floor
 
 [exam]
 # Estimates before a paid exam (anbud eval heldout|prospective), from the dev tender's measured runs (26 Nov):
