@@ -231,7 +231,8 @@ def check_api(
     """A $0 check that a paid call could be sent: the key reads (`keychain_key` gives up after `KEYCHAIN_TIMEOUT_S`),
     and the API answers a token count with it within `timeout_s`. None when both hold, else the kind that failed:
     `key_missing` or `classify`'s. Never the key or the API's message. Its one request is fixed: the map role's model
-    and the message "ok", with nothing of any tender.
+    and the message "ok", with nothing of any tender. A transient kind is tried again after each of `RETRY_DELAYS`,
+    as a paid call would be, so a blip doesn't stop the exam.
 
     A token count is free, so it may answer while the credit balance can't pay for a call. A paid call's refusal says
     that, and the engines count it among their failed calls."""
@@ -241,12 +242,20 @@ def check_api(
         return "key_missing"
     try:
         sdk = (make_sdk or make_sdk_client)(config, key)
-        sdk.messages.count_tokens(
-            model=config.model_for("map"), messages=[{"role": "user", "content": "ok"}], timeout=timeout_s
-        )
     except Exception as exc:  # noqa: BLE001 - any failure is a kind here, and the caller stops on any
         return classify(exc).kind
-    return None
+    for delay in (*RETRY_DELAYS, None):
+        try:
+            sdk.messages.count_tokens(
+                model=config.model_for("map"), messages=[{"role": "user", "content": "ok"}], timeout=timeout_s
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - any failure is a kind here, and the caller stops on any
+            kind = classify(exc).kind
+        if kind not in TRANSIENT or delay is None:
+            return kind
+        time.sleep(delay)
+    return None  # not reached: the last delay is None
 
 
 def _digest(*parts: Any) -> str:

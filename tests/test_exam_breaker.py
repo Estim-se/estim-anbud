@@ -260,6 +260,20 @@ def test_a_run_refused_or_reaching_no_model_stops_the_exam(data_root: Path, engi
     assert [e for e, _ in runner.calls] == (["granskning"] if engine == "granskning" else ["granskning", "kalkyl"])
 
 
+@pytest.mark.parametrize("engine", ["granskning", "kalkyl"])
+def test_a_run_that_finished_but_couldnt_freeze_itself_doesnt_stop_the_exam(data_root: Path, engine: str) -> None:
+    """Exit 7 (the build lane's FINISHED_NOT_FROZEN, audit B6): the run finished and only its own freeze step failed.
+    That says nothing about the environment, so the exam goes on. Mutation: adding `or one.exit_code == 7` to the
+    exit-3 condition in `_breaks` makes it fail."""
+    from anbud.granskning import command
+
+    sealed_store(data_root)
+    register(data_root)
+    code = getattr(command, "FINISHED_NOT_FROZEN", 7)
+    lines = _paid(FakeEngines(COSTS, codes={(FIRST, engine): code}))
+    assert lines[-1].startswith("paid exam: complete. One total over both splits")
+
+
 def test_model_unreachable_is_the_engines_exit_6() -> None:
     from anbud.granskning import command
 
@@ -519,6 +533,36 @@ def test_the_api_check_sends_one_fixed_request_and_returns_only_a_kind() -> None
 
     never: list[str] = []
     assert model_client.check_api(config, no_key, lambda c, k: never.append(k) or ok) == "key_missing" and never == []
+
+
+class _Flaky(_Sdk):
+    """Fails `n` times with its error, then answers."""
+
+    def __init__(self, error: Exception, n: int) -> None:
+        super().__init__(error)
+        self.n = n
+
+    def count_tokens(self, **params: Any) -> Any:
+        self.counted.append(params)
+        if len(self.counted) <= self.n:
+            raise self.error  # type: ignore[misc]
+        return SimpleNamespace(input_tokens=8)
+
+
+def test_the_api_check_tries_a_transient_failure_again_and_never_a_refusal() -> None:
+    """A blip on the free check would stop an unattended exam, so a transient kind gets the client's retries
+    (`RETRY_DELAYS`, zeroed under tests). Mutation: `if True:` for the retry condition makes it fail."""
+    config = load_config()
+    tries = len(model_client.RETRY_DELAYS) + 1
+    blip = _Flaky(anthropic.APIConnectionError(request=REQUEST), tries - 1)
+    assert model_client.check_api(config, lambda: "sk-test-value", lambda c, k: blip) is None
+    assert len(blip.counted) == tries
+    down = _Flaky(anthropic.APIConnectionError(request=REQUEST), 99)
+    assert model_client.check_api(config, lambda: "sk-test-value", lambda c, k: down) == "connection"
+    assert len(down.counted) == tries
+    refused = _Flaky(_status_error(anthropic.AuthenticationError, 401, "invalid x-api-key"), 99)
+    assert model_client.check_api(config, lambda: "sk-test-value", lambda c, k: refused) == "auth"
+    assert len(refused.counted) == 1
 
 
 def test_the_exams_api_check_uses_the_workspace_key(monkeypatch: pytest.MonkeyPatch) -> None:
