@@ -149,6 +149,10 @@ def validate_verdict(
     return (None, reasons) if reasons else (verdict, [])
 
 
+class NotVerified(RuntimeError):
+    """The verifier loop got no verdict because the hard stop refused its call: the flag is "budget", not "failed"."""
+
+
 def run_verifier(
     selected: list[tuple[Item, Verification]],
     corpus: Corpus,
@@ -157,16 +161,20 @@ def run_verifier(
     calc_post_ids: set[str] | None = None,
     parallel: int = 1,
 ) -> list[Item]:
-    """Each selected item with its verdict and how it was selected; "failed" if the loop returned no verdict."""
+    """Each selected item with its verdict and how it was selected; "failed" if the loop returned no verdict, "budget"
+    if the hard stop refused it (`NotVerified`)."""
 
     def one(pair: tuple[Item, Verification]) -> Item:
         item, how = pair
-        verdict = loop(
-            step=f"verify:{item.fingerprint[:16]}",
-            system_blocks=system_blocks,
-            user_message=verifier_message(item, corpus),
-            validate=lambda raw: validate_verdict(raw, item.fingerprint, calc_post_ids),
-        )
+        try:
+            verdict = loop(
+                step=f"verify:{item.fingerprint[:16]}",
+                system_blocks=system_blocks,
+                user_message=verifier_message(item, corpus),
+                validate=lambda raw: validate_verdict(raw, item.fingerprint, calc_post_ids),
+            )
+        except NotVerified:
+            return item.model_copy(update={"verdict": None, "verification": "budget"})
         return item.model_copy(update={"verdict": verdict, "verification": how if verdict else "failed"})
 
     if parallel <= 1:

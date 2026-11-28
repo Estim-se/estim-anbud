@@ -75,13 +75,20 @@ def finish(
         i.fingerprint: i for i in run_verifier(chosen, corpus, system_blocks, verifier_loop, set(posts), parallel)
     }
     final = price_items([verified.get(i.fingerprint, i) for i in provisional], catalog, posts, settings)
+    tender_coverage = coverage(results, corpus, named_not_present, unread_tiles).model_copy(
+        update={
+            "verifier_selected": len(chosen),
+            "verifier_verified": sum(i.verdict is not None for i in verified.values()),
+            "not_verified_budget": sum(i.verification == "budget" for i in verified.values()),
+        }
+    )
     ranked = rank(final, settings, action_rates)
     report = build_report(
         run_id=run_id,
         company_id=company_id,
         tender_id=tender_id,
         ranked=ranked,
-        coverage=coverage(results, corpus, named_not_present, unread_tiles),
+        coverage=tender_coverage,
         corpus=corpus,
         catalog=catalog,
         materiality_sek=settings.materiality_sek,

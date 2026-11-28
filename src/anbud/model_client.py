@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from anbud.config import Config
 from anbud.models import Event
@@ -199,7 +199,11 @@ class ModelClient:
         clock: Callable[[], float] = time.monotonic,
         store: RunStore | None = None,
         salt: str | None = None,
+        degrade_roles: frozenset[str] = frozenset(),
     ) -> None:
+        """`degrade_roles`: roles whose call the hard stop refuses is skipped, not a halt (`_refuse`). Granskning
+        passes its lenses, merge and verifier: a run that reached them finishes with what it has. Kalkyl passes none:
+        there a refused call leaves the calc incomplete, so the run halts."""
         if store is not None and store.company_id != company_id:
             raise ValueError("the store belongs to another company")
         self.store = store
@@ -209,6 +213,9 @@ class ModelClient:
         self.persist_failures = 0  # store writes that failed; the caller should stop the run if this isn't 0
         self.replay_misses = 0  # replayed requests not in the step cache; a replay with any is incomplete
         self.halted = 0  # calls refused by a stop marker, the hard stop or the spend cap; a run with any is incomplete
+        self.degrade_roles = degrade_roles
+        self.budget_refused = 0  # calls of `degrade_roles` the hard stop refused: the run goes on without them
+        self.refuse_roles: set[str] = set()  # roles a paid run refuses from now on, as at the hard stop (`refuse_role`)
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -270,6 +277,10 @@ class ModelClient:
         record = self.store.step_get(key) if self.store is not None else None
         if record is None:
             return None
+        if record.get("refused"):  # the hard stop refused this request when it was first made
+            if self.sdk is None:
+                self._refuse(step, None, "the hard stop refused this call when it was made")  # a replay refuses it too
+            return None  # a paid run tries it again
         import anthropic
 
         message = anthropic.types.Message.model_validate_json(self.store.get_blob(record["response"]))
@@ -310,6 +321,8 @@ class ModelClient:
             with self._lock:
                 self.replay_misses += 1
             raise ReplayMiss("this request isn't in the step cache, and replay never calls a model")
+        if role in self.refuse_roles and role in self.degrade_roles:
+            self._refuse(step, key, f"{role} calls stopped at the hard stop")
         price = self.config.price_for(model)
         count_params = {k: v for k, v in params.items() if k != "max_tokens"}
         try:
@@ -318,7 +331,9 @@ class ModelClient:
             raise self._failed(exc) from exc
         try:
             reserved = self.budget.reserve(price.max_cost(input_tokens, max_tokens))
-        except BudgetExceeded:
+        except BudgetExceeded as exc:
+            if role in self.degrade_roles:
+                self._refuse(step, key, str(exc))
             self._halt()
             raise
         start = self.clock()
@@ -377,6 +392,25 @@ class ModelClient:
     def _halt(self) -> None:
         with self._lock:
             self.halted += 1
+
+    def refuse_role(self, role: str) -> None:
+        """From now on, a paid run refuses `role`'s calls as the hard stop would (the verifier, once one of its calls
+        was refused). A replay follows each request's own record instead, so the same calls are refused in any order."""
+        with self._lock:
+            self.refuse_roles.add(role)
+
+    def _refuse(self, step: str, key: str | None, why: str) -> NoReturn:
+        """A call of a degrade role refused at the hard stop: counted, logged and recorded under its step key, so a
+        rebuild refuses the same request, then raised. Never a halt: the caller goes on without it."""
+        with self._lock:
+            self.budget_refused += 1
+        if self.store is not None and key is not None:
+            try:
+                self.store.step_put(key, {"refused": "budget"})
+            except OSError:
+                self.persist_failures += 1
+        self._emit(step, "error", cost_usd=0.0)
+        raise BudgetExceeded(why)
 
     def _ms(self, start: float) -> int:
         return int((self.clock() - start) * 1000)
