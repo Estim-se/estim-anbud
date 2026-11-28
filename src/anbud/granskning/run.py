@@ -200,7 +200,7 @@ def run_granskning(
             "tool_log": [c.model_dump(mode="json") for c in mapped.outcome.tool_log],
         }
     )
-    events("map", "result" if mapped.tender_map else "error", cost_usd=mapped.outcome.cost_usd, blob=map_blob)
+    events("map", "result" if mapped.tender_map else "step_error", cost_usd=mapped.outcome.cost_usd, blob=map_blob)
     map_error = f" ({mapped.outcome.error})" if mapped.outcome.error else ""
     say(f"map: {mapped.outcome.status}{map_error}, {'valid' if mapped.tender_map else 'no valid map'}")
     if mapped.tender_map is not None:
@@ -247,7 +247,7 @@ def run_granskning(
             )
         blob = events.blob(lens_result.model_dump(mode="json"))
         lens_blobs[lens.id] = blob
-        kind = "error" if lens_result.status == "error" else "result"
+        kind = "step_error" if lens_result.status == "error" else "result"  # its calls' events carry the cost
         events(f"lens:{lens.id}", kind, cost_usd=lens_result.cost_usd, blob=blob)
         error = f" ({lens_errors[lens.id]})" if lens_errors.get(lens.id) else ""
         say(f"lens {lens.id}: {lens_result.status}{error}, {len(lens_result.flags)} flags, {lens_result.turns} turns")
