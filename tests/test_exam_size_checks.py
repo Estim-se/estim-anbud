@@ -61,7 +61,11 @@ def test_the_free_pass_counts_the_tenders_each_engine_may_stop_on(data_root: Pat
 
 def test_the_line_follows_the_config(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutation: a fixed ratio list in `_size_checks` instead of `checks["kalkyl"]["spend_ratios"]` makes it fail."""
-    checks = {"granskning": {"card_usd_per_tile": 0.03, "card_map_share": 0.9}, "kalkyl": {"spend_ratios": [0.2]}}
+    checks = {
+        "granskning": {"card_usd_per_tile": 0.03, "card_map_share": 0.9},
+        "kalkyl": {"spend_ratios": [0.2]},
+        "scaled": {"stop_bands": [60, 100, 150]},
+    }
     monkeypatch.setattr(exam, "exam_checks", lambda config_dir=CONFIG_DIR: checks)
     line = _size_line(_free_pass(data_root))
     assert "above 90% of the stop 1, above the stop 1 (1 unknown)" in line  # 400 tiles is 64% of the stop

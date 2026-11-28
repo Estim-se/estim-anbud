@@ -17,3 +17,10 @@ spend_ratios = [
     0.29, # the all-repaired extrapolation, not a measurement: every chunk repaired (measured runs had 0 to 3 in 19)
     0.33, # a margin for size: a larger tender carries a larger uncapped outline prefix, whose share grows with size
 ]
+
+[scaled]
+# The pass also prints what the exam would cost if each tender's stop were scaled so that no engine is cut off by its
+# cap (its "scaled stops" line), never below the tier's stop: the old engine at its estimate with the margin, Kalkyl at
+# its high estimate times the largest of [kalkyl] spend_ratios, Granskning at its cards and map over [granskning]
+# card_map_share, so the lenses keep the rest. A diagnostic for a cap decision: no stop reads it.
+stop_bands = [60, 100, 150] # each tender's largest scaled stop, counted by band: whether a per-run ceiling matters

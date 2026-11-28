@@ -775,7 +775,7 @@ def test_an_engine_on_a_single_tender_prints_totals_only(data_root: Path) -> Non
         assert "granskning prefix: 1 tender runs it, fewer than 2, so no figures" in lines
         assert "1 fits, fewer than 2, so no planned prefix" in text and "planned prefix median" not in text
         assert "hard-stop tiers: not shown, since granskning runs on fewer than 2 tenders; 2 stopping" in text
-        assert "size checks" not in text  # its counts per engine would be that one run's too
+        assert "size checks" not in text and "scaled stops" not in text  # per engine, they'd be that one run's too
         assert "per engine only when each runs on at least 2 tenders" in text and "granskning $" not in text
     # Only the estimate line's totals, over three tenders, can differ with that one run's size.
     assert [x for x in printed[0] if not x.startswith("estimate")] == [
