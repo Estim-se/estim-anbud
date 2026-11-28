@@ -26,7 +26,7 @@ from anbud.granskning.toolbox import Toolbox
 from anbud.model_client import ModelClient
 from anbud.models import Event, TenderMap
 from anbud.selection import excluded_counts
-from anbud.stops import ESTIMATE, MEASURED, Stop, granskning_stop
+from anbud.stops import ESTIMATE, MEASURED, Stop, granskning_stop, granskning_tiers
 from anbud.store import canonical
 
 DEFAULT_CONCURRENCY = 3
@@ -50,6 +50,15 @@ def lens_caps(budgets: dict[str, Any], prefix_tokens: int) -> LensCaps:
         if prefix_tokens <= tier["max_prefix_tokens"]:
             return LensCaps(int(tier["max_turns"]), float(tier["max_usd"]))
     return LensCaps(int(tiers[-1]["max_turns"]), float(tiers[-1]["max_usd"]))
+
+
+def held_tokens(budgets: dict[str, Any], prefix_tokens: int, hard_stop: float) -> int:
+    """The prefix size the lens caps are picked for: the prefix, but never above the largest stop tier that fits under
+    the stop in force. A run held at a lower tier than its measured prefix (it opened at the estimate's) gets that
+    tier's caps, so its lenses, each within its own cap, fit under the stop together."""
+    held = [t.bound for t in granskning_tiers(budgets) if t.usd <= hard_stop]
+    bound = max(held) if held else granskning_tiers(budgets)[0].bound
+    return min(prefix_tokens, int(bound))
 
 
 def _map_summary(tender_map: TenderMap | None) -> str:
@@ -200,9 +209,9 @@ def run_granskning(
     measured = mapped.prefix_tokens
     estimated = estimate_tokens(system)
     prefix_tokens = measured or estimated
-    caps = lens_caps(client.config.budgets, prefix_tokens)
     stop = granskning_stop(client.config.budgets, prefix_tokens, MEASURED if measured is not None else ESTIMATE)
     stop = stop.held_at(client.budget.set_stop(stop.usd))  # never above the tier the run opened with
+    caps = lens_caps(client.config.budgets, held_tokens(client.config.budgets, prefix_tokens, stop.hard_stop))
     say(f"hard stop: tier {stop.tier}, ${stop.hard_stop:.2f} (prefix {prefix_tokens} tokens, {stop.source})")
     result = GranskningResult(
         client.run_id, mapped, prefix_tokens=prefix_tokens, prefix_measured=measured is not None, caps=caps, stop=stop
