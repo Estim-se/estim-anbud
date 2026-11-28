@@ -22,12 +22,13 @@ from anbud.evals import split_heldout as sh
 from anbud.granskning import provenance
 from anbud.granskning.budget import (
     DOC_CHARS,
+    SEARCH_ONLY_CORE,
     SEARCH_ONLY_P1,
     PrefixBudget,
-    PrefixOverBudget,
     PrefixPlan,
     _card_tokens_each,
     apply_plan,
+    core_search_only,
     fit_prefix,
     p1_search_only,
     plan_prefix,
@@ -130,16 +131,19 @@ def _budget(monkeypatch: pytest.MonkeyPatch, tokens: int) -> None:
     monkeypatch.setattr(config_module, "load_config", load_config)
 
 
-def test_a_priority_1_over_the_budget_stops_the_run_before_any_model_call(
+def test_when_not_even_the_outlines_fit_the_run_stops_before_any_model_call(
     tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The last rung: P0 alone is over the budget. Mutation: `.stops:` -> `.stops and False:` on the check before the
+    cards in `run_pipeline`, and the tile's card is paid for before `fit_prefix` stops the run."""
     _budget(monkeypatch, 1000)  # less than the brief alone
     sdk = ScriptedSDK(lambda params: pytest.fail("no model call may be made"))
     monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
     monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
     assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-budget"]) != 0
     err = capsys.readouterr().err
-    assert "stopped: the prefix's fixed part" in err and "budget of 1000 tokens" in err
+    assert "stopped: the prefix's fixed part" in err and "every document's outline" in err
+    assert "budget of 1000 tokens" in err
     assert sdk.sent == []  # not even a page card
 
 
@@ -151,7 +155,7 @@ def test_the_dry_run_shows_priority_1_on_its_own(
     assert "prefix budget 450000 tokens: fixed " in out and "priority 1 fits (" in out
     _budget(monkeypatch, 1000)
     assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
-    assert "priority 1 does not fit: a paid run stops before any model call" in capsys.readouterr().out
+    assert "nothing fits: a paid run stops before any model call" in capsys.readouterr().out
 
 
 # An invented card: a dense page of text, larger than the room left in the budget.
@@ -171,27 +175,37 @@ def _tile_on(prep: Path, doc: str, page: int, name: str | None = None) -> None:
         (prep / "documents.json").write_text(json.dumps(docs))
 
 
-def test_page_cards_that_would_take_priority_1_over_the_budget_stop_the_run_before_the_first_card(
-    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _tile_on(tender / "prep", DOC_AF, 2)  # a scanned page of the AF: its card's text joins priority 1
+def test_a_card_never_moves_the_floor_so_a_run_never_stops_after_paying_for_one(tender: Path) -> None:
+    """A dense card on a scanned AF page takes the core over the budget once it is read. The floor, every document's
+    outline, is the same with the card, so the check before the cards holds: the run reads the card and demotes the
+    AF instead of stopping. Mutation: count each document's full text in the floor (`min(sizes[d], ...)` ->
+    `sizes[d]`), and the card moves it."""
+    _tile_on(tender / "prep", DOC_AF, 2)  # a scanned page of the AF: its card's text joins the core
     corpus, _ = load_selected(tender / "prep")
     calc = load_calc(tender / "calc")
     without = plan_prefix(corpus, calc, BUDGET)
     tokens = without.p0 + without.p1 + 1000
-    assert plan_prefix(corpus, calc, PrefixBudget(tokens, 0.1)).p1_fits  # the check before the cards, without them
+    before = plan_prefix(corpus, calc, PrefixBudget(tokens, 0.1), corpus.tiles.values())
+    assert not before.stops and not before.core_fits  # the core's cards could take it over: no stop for that
     card = card_from_message(next(iter(corpus.tiles.values())), reply(BIG_CARD))
-    with pytest.raises(PrefixOverBudget):  # the check after them stops: by then the card was paid for
-        fit_prefix(add_cards(corpus, card), calc, {"prefix": {"budget_tokens": tokens, "boundary_share": 0.1}})
+    carded = add_cards(corpus, card)
+    after = plan_prefix(carded, calc, PrefixBudget(tokens, 0.1))
+    assert after.floor == before.floor and not after.stops
+    assert after.core_search_only == [DOC_AF] and after.total <= tokens
+    fit_prefix(carded, calc, {"prefix": {"budget_tokens": tokens, "boundary_share": 0.1}})  # no stop after the card
 
-    _budget(monkeypatch, tokens)
-    sdk = ScriptedSDK(lambda params: reply(BIG_CARD))
-    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
-    monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
-    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-cards"]) != 0
-    assert sdk.sent == []  # stopped before the first card
-    err = capsys.readouterr().err
-    assert "tokens of their page cards" in err and f"budget of {tokens} tokens" in err
+
+def test_a_document_whose_only_text_comes_from_its_cards_is_in_the_floor_before_they_are_read(tmp_path: Path) -> None:
+    """The synthetic drawing has a tile and no block: before its card it has no outline yet, after it its <doc> lines
+    are in the prefix. Mutation: delete the `least |= ...` line for `pending` documents in `plan_prefix`, and the
+    card moves the floor."""
+    prep = write_prep(tmp_path / "prep")
+    corpus, _ = load_selected(prep)
+    tile = next(iter(corpus.tiles.values()))
+    assert tile.doc_id == DOC_RIT and not any(corpus.blocks[b].doc_id == DOC_RIT for b in corpus.order)
+    before = plan_prefix(corpus, [], BUDGET, corpus.tiles.values())
+    after = plan_prefix(add_cards(corpus, card_from_message(tile, reply(BIG_CARD))), [], BUDGET)
+    assert before.floor == after.floor
 
 
 def test_the_card_bound_counts_only_cards_that_can_reach_priority_1(tmp_path: Path) -> None:
@@ -220,6 +234,8 @@ def test_the_card_bound_counts_only_cards_that_can_reach_priority_1(tmp_path: Pa
 
 
 def test_over_the_budget_priority_1_beyond_the_core_becomes_search_only_largest_first(large) -> None:
+    """The first rung: P1 without its core. Mutation: `*(d for d in p1 if d not in small), *small, *core` -> `*core,
+    *(d for d in p1 if d not in small), *small` in `_demotion_order`, and the AF goes before the rest of P1."""
     _, selected, _ = large
     full = plan_prefix(selected, [], BUDGET)
     budget = PrefixBudget(100_000, 0.10)  # holds the core, not the rest of priority 1
@@ -243,6 +259,48 @@ def test_over_the_budget_priority_1_beyond_the_core_becomes_search_only_largest_
     assert f'search_only="{SEARCH_ONLY_P1}"' in corpus_text(applied)
     names = coverage([], applied).search_only_priority_1
     assert names == ["E-63-1-001 Teknisk beskrivning el.pdf (60 s.)", "Rambeskrivning.pdf (20 s.)"]
+
+
+def test_past_the_rest_of_priority_1_the_core_goes_largest_first_and_the_floor_is_the_last_rung(large) -> None:
+    """Each rung in turn on the 1000-page tender: a budget just under the last plan demotes the next document, the
+    time plan before the core and the AF (the larger core document) before the contract. At the floor everything is
+    search-only and the run still goes on; a token under it, it stops. Mutation: put `*core` before `*small` in
+    `_demotion_order`, and the AF goes before the time plan."""
+    _, selected, _ = large
+    boundary = [b for b in selected.order if selected.blocks[b].doc_id in selected.excluded]
+    plan = plan_prefix(selected, [], PrefixBudget(100_000, 0.10))
+    while not plan.core_search_only:
+        before = list(plan.search_only)
+        plan = plan_prefix(selected, [], PrefixBudget(plan.total - 1, 0.10))
+        assert plan.search_only[: len(before)] == before and len(plan.search_only) > len(before)
+    p1 = ["E-63-1-001 Teknisk beskrivning el.pdf", "Rambeskrivning.pdf", "Tidplan.pdf", "AF.pdf"]
+    assert [NAMES[d] for d in plan.p1_search_only] == p1 and [NAMES[d] for d in plan.core_search_only] == ["AF.pdf"]
+    assert not plan.stops and plan.total <= plan.budget and not plan.core_fits  # the dry run's word for it
+    applied = apply_plan(selected, plan)
+    assert core_search_only(applied) == [BY_NAME["AF.pdf"]]
+    assert f'search_only="{SEARCH_ONLY_CORE}"' in corpus_text(applied)
+    assert coverage([], applied).search_only_core == ["AF.pdf (30 s.)"]
+
+    at_floor = plan_prefix(selected, [], PrefixBudget(plan.floor, 0.10))
+    assert not at_floor.stops and at_floor.total <= plan.floor
+    assert set(at_floor.search_only) == set(priorities(selected)) and len(at_floor.core_search_only) == 2
+    assert at_floor.boundary_dropped == boundary  # the lines within the cap go last, from the last
+    under = plan_prefix(selected, [], PrefixBudget(plan.floor - 1, 0.10))
+    assert under.stops and under.search_only == [] and under.total == plan.floor
+
+
+def test_the_exam_counts_a_demoted_core_and_stops_only_below_the_floor(tmp_path: Path) -> None:
+    """Mutation: `"core_search_only": len(plan.core_search_only)` -> `0` in `selection_sizes`."""
+    from anbud.evals import exam
+
+    prep = write_large_prep(tmp_path / "large" / "prep")
+    corpus, _ = load_selected(prep)
+    floor = plan_prefix(corpus, [], PrefixBudget(10**9, 0.10)).floor
+    calc = tmp_path / "large" / "calc"
+    sizes = exam.selection_sizes(prep, calc, {"prefix": {"budget_tokens": floor + 100}})
+    assert sizes is not None and sizes["stops"] is False and sizes["core_search_only"] == 2
+    sizes = exam.selection_sizes(prep, calc, {"prefix": {"budget_tokens": floor - 100}})
+    assert sizes is not None and sizes["stops"] is True
 
 
 def test_the_exam_counts_priority_1_read_through_search_and_no_stop(tmp_path: Path) -> None:
@@ -294,24 +352,40 @@ def test_a_priority_1_over_the_budget_is_reviewed_through_search_instead_of_stop
     assert about["Prioritet 1 granskad via sökning, inte i sin helhet"] == f"{TB_EL} (3 s.)"
 
 
-def test_when_the_core_alone_is_over_the_budget_the_run_still_stops_before_any_call(
+def test_when_the_core_alone_is_over_the_budget_it_is_reviewed_through_search_and_the_review_is_partial(
     tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The core's rung end to end. Mutation: `core = ""` in `lens_message`, and the lenses aren't told the AF is
+    search-only."""
     full = _p1_tender(tender)
-    _budget(monkeypatch, full.p0 + full.core - 1)
-    sdk = ScriptedSDK(lambda params: pytest.fail("no model call may be made"))
+    _budget(monkeypatch, full.floor + 1)  # this small tender's outlines leave room for little more than themselves
+    sdk = ScriptedSDK(pipeline_script)
     monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
     monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
-    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-core"]) != 0
-    assert sdk.sent == []
-    assert "the AF and the contract" in capsys.readouterr().err
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-core"]) == 0
+    assert "(2 of priority 1, 1 of them the AF or the contract)" in capsys.readouterr().out
+
+    record = json.loads((RunStore("co-001").run_dir("t-0001-core") / "granskning.json").read_text())
+    plan = next(v for k, v in record.items() if isinstance(v, dict) and "core_search_only" in v)
+    assert plan["core_search_only"] == [DOC_AF] and plan["p1_search_only"] == [DOC_EL, DOC_AF]
+    assert plan["stops"] is False and plan["core_search_only_documents"] == 1
+    lens_calls = [first_text(p) for p in sdk.sent if "review lens `" in str(p["messages"][0]["content"])]
+    assert lens_calls and all("hold the administrative terms (AF) or the contract" in t for t in lens_calls)
+    assert all(DOC_AF in t.split("<search_only_priority_1>")[1] for t in lens_calls)
+    report = tender / "runs" / "t-0001-core" / "report"
+    page = (report / "granskning.html").read_text(encoding="utf-8")
+    assert "Partiell granskning: AF eller kontrakt via sökning" in page
+    assert "AF och kontrakt låg i sin helhet" not in page
+    about = {r[0].value: r[1].value for r in load_workbook(report / "granskning.xlsx")["Om rapporten"].iter_rows()}
+    assert about["Partiell granskning: AF eller kontrakt via sökning"] == "AF.pdf (2 s.)"
 
     assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
-    assert "priority 1 does not fit: a paid run stops before any model call" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "nor does its core, the AF and the contract" in out and "1 of them the core's" in out
     _budget(monkeypatch, full.p0 + full.p1 - 1)
     assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "priority 1 does not fit in full" in out and "1 priority-1 documents become search-only" in out
+    assert "its core, the AF and the contract, fits" in out and "1 priority-1 documents become search-only" in out
 
 
 def test_a_lens_message_is_unchanged_when_nothing_of_priority_1_is_demoted() -> None:

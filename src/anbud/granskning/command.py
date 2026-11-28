@@ -339,15 +339,21 @@ def dry_run(
         )
         if plan.stops:
             print(
-                "  priority 1 does not fit: a paid run stops before any model call (the fixed part and the core, "
-                f"the AF and the contract, {plan.p0 + plan.core + plan.core_cards} tokens with their cards at most)"
+                "  nothing fits: a paid run stops before any model call (the fixed part and every document's outline, "
+                f"{plan.floor} tokens, with every document search-only)"
             )
         elif not plan.p1_fits:
+            core = (
+                f"its core, the AF and the contract, fits ({plan.p0 + plan.core + plan.core_cards} tokens)"
+                if plan.core_fits
+                else f"nor does its core, the AF and the contract ({plan.p0 + plan.core + plan.core_cards} tokens with "
+                "their cards at most), so the review may be partial"
+            )
             print(
                 f"  priority 1 does not fit in full ({plan.p0 + plan.p1 + plan.cards} tokens with its cards at most); "
-                f"its core, the AF and the contract, fits ({plan.p0 + plan.core + plan.core_cards} tokens): "
-                f"{len(plan.p1_search_only)} priority-1 documents become search-only; planned prefix {plan.total} "
-                f"tokens before the cards, {len(plan.search_only)} documents search-only in all, "
+                f"{core}: {len(plan.p1_search_only)} priority-1 documents become search-only, "
+                f"{len(plan.core_search_only)} of them the core's; planned prefix {plan.total} tokens before the cards "
+                f"(at least {plan.floor}), {len(plan.search_only)} documents search-only in all, "
                 f"{len(plan.boundary_dropped)} lines past the cap"
             )
         else:

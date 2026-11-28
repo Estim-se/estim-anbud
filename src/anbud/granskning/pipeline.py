@@ -269,7 +269,8 @@ def run_pipeline(
     corpus = add_cards(corpus, cards)
     corpus, plan = fit_prefix(corpus, calc, client.config.budgets)
     if plan is not None:
-        p1 = f" ({len(plan.p1_search_only)} of priority 1)" if plan.p1_search_only else ""
+        core = f", {len(plan.core_search_only)} of them the AF or the contract" if plan.core_search_only else ""
+        p1 = f" ({len(plan.p1_search_only)} of priority 1{core})" if plan.p1_search_only else ""
         say(f"prefix plan: {plan.total} of {plan.budget} tokens, {len(plan.search_only)} documents search-only{p1}")
 
     toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob, catalog=catalog)

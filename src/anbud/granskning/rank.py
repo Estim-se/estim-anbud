@@ -20,7 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from anbud.granskning.budget import p1_search_only
+from anbud.granskning.budget import core_search_only, p1_search_only
 from anbud.granskning.catalog import Catalog
 from anbud.granskning.contracts import CalcPost, LensResult
 from anbud.granskning.corpus import Corpus
@@ -188,6 +188,9 @@ class TenderCoverage(_Model):
     search_only_priority_1: list[str] = Field(
         default_factory=list, description="Of those, the priority-1 documents: reviewed through search, not in full"
     )
+    search_only_core: list[str] = Field(
+        default_factory=list, description="Of those, the AF or the contract: with any, the review is partial"
+    )
     lenses: list[LensCoverage] = Field(default_factory=list)
     note: str = NOT_ALL_CLEAR
 
@@ -311,6 +314,7 @@ def coverage(
         boundary_lines=excluded_counts(corpus)["boundary_lines"],
         search_only_documents=[f"{names.get(d, d)} ({pages.get(d, 0)} s.)" for d in corpus.search_only],
         search_only_priority_1=[f"{names.get(d, d)} ({pages.get(d, 0)} s.)" for d in p1_search_only(corpus)],
+        search_only_core=[f"{names.get(d, d)} ({pages.get(d, 0)} s.)" for d in core_search_only(corpus)],
         named_not_present=list(named_not_present or []),
         unread_tiles=list(unread_tiles or []),
         lenses=[lens_coverage(r, corpus, names) for r in results],

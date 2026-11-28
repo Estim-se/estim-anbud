@@ -59,9 +59,10 @@ context_tokens = 1000000
 large_prefix_tokens = 200000
 
 # The shared prefix's budget in tokens, estimated from characters (anbud.granskning.budget). Selected documents beyond
-# it become search-only (outline in the prefix, text by search), priority 3 before 2, largest first. If the fixed part
-# and the priority-1 documents alone exceed it, the run stops before any paid call. Lines brought back from other
-# trades' documents take at most `boundary_share` of it.
+# it become search-only (outline in the prefix, text by search): priority 3, then 2, then priority 1 without the AF
+# and the contract, then those two, the largest first within each. Only if the fixed part and every document's outline
+# alone exceed it does the run stop, before any paid call. Lines brought back from other trades' documents take at
+# most `boundary_share` of it.
 [prefix]
 budget_tokens = 450000
 boundary_share = 0.10
