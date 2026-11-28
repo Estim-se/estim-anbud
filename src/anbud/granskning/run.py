@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -210,7 +210,8 @@ def run_granskning(
     estimated = estimate_tokens(system)
     prefix_tokens = measured or estimated
     stop = granskning_stop(client.config.budgets, prefix_tokens, MEASURED if measured is not None else ESTIMATE)
-    stop = stop.held_at(client.budget.set_stop(stop.usd))  # never above the tier the run opened with
+    stop = replace(stop, floor=client.budget.floor)  # the floor the run opened with (`stops.granskning_run_stop`)
+    stop = stop.held_at(client.budget.set_stop(stop.hard_stop))  # never above the stop the run opened with
     caps = lens_caps(client.config.budgets, held_tokens(client.config.budgets, prefix_tokens, stop.hard_stop))
     say(f"hard stop: tier {stop.tier}, ${stop.hard_stop:.2f} (prefix {prefix_tokens} tokens, {stop.source})")
     result = GranskningResult(

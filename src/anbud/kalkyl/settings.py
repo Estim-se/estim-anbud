@@ -15,7 +15,7 @@ from pathlib import Path
 
 from anbud.config import CONFIG_DIR
 from anbud.model_client import EFFORTS
-from anbud.stops import Tier, kalkyl_tiers
+from anbud.stops import Tier, kalkyl_tiers, max_scaled_stop
 
 EXTRACT = "kalkyl_extract"
 MATCH = "kalkyl_match"
@@ -41,6 +41,8 @@ class KalkylConfig:
     match_batch: int
     roles: dict[str, RoleSettings]
     group_pass: bool = False  # the code-group pass after R2 (`kalkyl.group_pass`)
+    spend_ratio: float = 0.0  # the scaled stop's floor, times the high estimate (`stops.kalkyl_run_stop`)
+    max_scaled_stop: float | None = None  # an optional ceiling on that floor
 
 
 def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
@@ -66,4 +68,6 @@ def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
         match_batch=max(1, int(ma["batch_size"])),
         roles=roles,
         group_pass=bool(raw.get("group_pass", {}).get("enabled", False)),
+        spend_ratio=float(budgets["kalkyl"]["spend_ratio"]),
+        max_scaled_stop=max_scaled_stop(budgets["kalkyl"]),
     )

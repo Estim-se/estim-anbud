@@ -47,7 +47,7 @@ from anbud.model_client import Budget, ModelClient
 from anbud.models import Event
 from anbud.prep.tender import CELLS_FILE, IntakeStop
 from anbud.selection import OVERRIDE_FILE, SELECTION_FILE, Selection, SelectionError, load_selected
-from anbud.stops import estimate_label, kalkyl_stop
+from anbud.stops import estimate_label, kalkyl_run_stop
 from anbud.store import RunStore, canonical
 
 READ_STEP = "kalkyl.extract."  # every R2 reading call's step starts so (`extract.extract_chunk`)
@@ -258,8 +258,8 @@ def run_dev_tender(
     base_run = base_run or stored_base  # a resumed rebuild keeps the base it started from
     cells = load_cells(tender / "prep" / CELLS_FILE)
     estimate = _estimate(config, kalkyl, corpus, cells, catalog, store, company_id, tender_id)
-    stop = kalkyl_stop(kalkyl.stops, estimate["cost_usd_est_high"], kalkyl.margin)  # before any paid call
-    budget = Budget(stop.usd, wait=True)  # a call waits for room while others are in flight (`Budget`)
+    stop = kalkyl_run_stop(kalkyl, estimate["cost_usd_est_high"])  # before any paid call; the exam's cap is this stop
+    budget = Budget(stop.hard_stop, wait=True)  # a call waits for room while others are in flight (`Budget`)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
     corpus, cards = with_cards(client, store, corpus, tender_id)
     try:
@@ -363,7 +363,7 @@ def plan(
         catalog = None
     recipe = load_bound_recipe(company_id, catalog, root) if catalog else None
     estimate = _estimate(config, kalkyl, corpus, cells, catalog, RunStore(company_id, root), company_id, tender_id)
-    stop = kalkyl_stop(kalkyl.stops, estimate["cost_usd_est_high"], kalkyl.margin)
+    stop = kalkyl_run_stop(kalkyl, estimate["cost_usd_est_high"])
     return {
         "chunks": estimate["chunks"],
         "quantity_lines": estimate["quantity_lines"],
@@ -377,8 +377,10 @@ def plan(
         **{k: v for k, v in estimate.items() if k not in ("chunks", "quantity_lines", "scope_lines")},
         "catalog": catalog.name if catalog else "missing",
         "catalog_items": len(catalog.items) if catalog else 0,
-        "hard_stop_usd": stop.usd,
+        "hard_stop_usd": stop.hard_stop,  # the tier's stop, or the floor when that is higher
         "stop_tier": stop.tier,
+        "stop_tier_usd": stop.usd,
+        "stop_floor_usd": stop.floor,  # cost_usd_est_high times spend_ratio (`stops.kalkyl_run_stop`)
         "stop_picked_from_usd": stop.size,  # cost_usd_est_high times the margin
         "stop_above_top_tier": stop.above_top,
         "max_tokens_per_r2_call": kalkyl.roles[EXTRACT].max_tokens,

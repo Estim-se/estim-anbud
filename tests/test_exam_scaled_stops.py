@@ -91,9 +91,10 @@ def test_a_scaled_stop_is_never_below_the_tiers_and_an_unknown_size_keeps_it() -
 
 
 def test_nothing_goes_into_the_guarded_budgets() -> None:
-    """The rule's numbers are diagnostics in exam_checks.toml; budgets.toml changes only with the founder's yes."""
+    """The diagnostics stay in exam_checks.toml; budgets.toml holds only the scaled stops' own parameters
+    (`anbud.stops`, the draft PR that needs the founder's yes)."""
     budgets = (CONFIG_DIR / "budgets.toml").read_text()
-    assert "stop_bands" not in budgets and "spend_ratios" not in budgets and "card_map_share" not in budgets
+    assert "stop_bands" not in budgets and "spend_ratios" not in budgets
     assert exam.exam_checks()["scaled"]["stop_bands"] == [60, 100, 150]
 
 

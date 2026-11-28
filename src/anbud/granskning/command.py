@@ -94,7 +94,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     from anbud.model_client import Budget, KeyMissing, ModelClient, keychain_key, make_sdk_client
     from anbud.prep.tender import IntakeStop
     from anbud.selection import load_selected
-    from anbud.stops import ESTIMATE, granskning_stop
+    from anbud.stops import granskning_run_stop
     from anbud.store import RunStore, StoreError, check_run_id
 
     if getattr(args, "arm", None) is not None and kind != "dev":
@@ -182,9 +182,10 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
         except KeyMissing as exc:
             print(f"anbud run: {exc}", file=sys.stderr)
             return PAID_REFUSED
-    # The dry run's tier is the most the run may spend; the prefix the map's first call measures can only lower it.
-    ceiling = granskning_stop(config.budgets, estimate_tokens(system_blocks(corpus, calc)), ESTIMATE)
-    budget = Budget(ceiling.usd, wait=True)  # a call waits for room while others are in flight (`Budget`)
+    # The dry run's tier, raised to its scaled floor, is the most the run may spend (the exam's cap is this stop); the
+    # prefix the map's first call measures can only lower it, never below the floor.
+    ceiling = granskning_run_stop(config, estimate_tokens(system_blocks(corpus, calc)), len(corpus.tiles))
+    budget = Budget(ceiling.hard_stop, wait=True, floor_usd=ceiling.floor)  # a call waits for room (`Budget`)
     client = ModelClient(
         config,
         sdk,
@@ -367,9 +368,10 @@ def dry_run(
         "a paid run measures it on the first call"
     )
     print(f"  tiles for page cards: {len(corpus.tiles)}")
+    from anbud.config import load_config
     from anbud.granskning.budget import PrefixBudget, plan_prefix
     from anbud.selection import excluded_counts
-    from anbud.stops import ESTIMATE, granskning_stop
+    from anbud.stops import granskning_run_stop
 
     sel = excluded_counts(corpus)
     print(
@@ -377,10 +379,14 @@ def dry_run(
         f"{sel['boundary_lines']} of their lines kept"
     )
     budget = PrefixBudget.from_config(budgets)
-    stop = granskning_stop(budgets, tokens, ESTIMATE)
+    stop = granskning_run_stop(load_config(), tokens, len(corpus.tiles))
     print(
-        f"  hard stop: tier {stop.tier}, ${stop.usd:.2f} at most, from the estimated prefix; a paid run lowers it when "
-        "the prefix its first call measures is in a lower tier"
+        f"  hard stop: tier {stop.tier}, ${stop.hard_stop:.2f} at most, from the estimated prefix; a paid run lowers "
+        "it when the prefix its first call measures is in a lower tier, never below its floor"
+    )
+    print(
+        f"  scaled floor: ${stop.floor:.2f}, so page cards and the map take at most "
+        f"{float(budgets['granskning']['card_map_share']):g} of the stop (tier's stop ${stop.usd:.2f})"
     )
     if budget is not None:
         plan = plan_prefix(corpus, calc, budget, corpus.tiles.values())
