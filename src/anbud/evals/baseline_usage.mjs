@@ -100,6 +100,9 @@ export function headerIds(headers) {
   return out;
 }
 
+/** Why an aborted call ends: the signal's own reason, as a real fetch rejects with, else an AbortError. */
+const abortReason = signal => signal.reason ?? new DOMException('This operation was aborted', 'AbortError');
+
 /** A call the hard stop refuses: it doesn't fit with nothing else in flight, or it waited past the limit. */
 export class Refused extends Error {
   constructor(reserve, waited) {
@@ -113,7 +116,8 @@ export class Refused extends Error {
  * The hard stop's room, shared by the calls in flight. Each call reserves the most it can cost (`maxCost`) and
  * settles what it did cost. With `wait`, a call that doesn't fit while others are in flight waits for them, in
  * arrival order: a later call never takes the room ahead of an earlier one. It is refused only when it doesn't fit
- * with nothing in flight, or after `limitMs`. Reservations alone then never end a run below its stop.
+ * with nothing in flight, or after `limitMs`. Reservations alone then never end a run below its stop. A caller that
+ * aborts its call (`signal`) while it waits leaves the line at once, holding no room: it was never sent.
  */
 export class Room {
   constructor(hardStop, { wait = true, limitMs = WAIT_LIMIT_MS } = {}) {
@@ -130,8 +134,10 @@ export class Room {
     return this.spent + this.reserved + usd <= this.hardStop;
   }
 
-  /** Resolves when the call may go, with how it waited (null: it didn't); rejects with Refused. */
-  take(usd) {
+  /** Resolves when the call may go, with how it waited (null: it didn't); rejects with Refused, or with the
+   * signal's reason when the caller aborts the call first. */
+  take(usd, signal) {
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
     if (!this.queue.length && this.fits(usd)) {
       this.#grant(usd);
       return Promise.resolve(null);
@@ -139,12 +145,18 @@ export class Room {
     if (!this.wait || (!this.queue.length && this.inFlight === 0)) return Promise.reject(new Refused(usd, null));
     const waited = { reserved_usd: this.reserved, in_flight: this.inFlight };
     return new Promise((resolve, reject) => {
-      const waiter = { usd, waited, resolve, reject };
+      const waiter = { usd, waited, resolve, reject, signal };
       waiter.timer = setTimeout(() => {
-        this.queue.splice(this.queue.indexOf(waiter), 1);
+        this.#leave(waiter);
         reject(new Refused(usd, waited));
         this.#drain();
       }, this.limitMs);
+      waiter.onAbort = () => {
+        this.#leave(waiter);
+        reject(abortReason(signal));
+        this.#drain(); // the call behind it may fit now
+      };
+      signal?.addEventListener('abort', waiter.onAbort, { once: true });
       this.queue.push(waiter);
     });
   }
@@ -162,17 +174,22 @@ export class Room {
     this.inFlight += 1;
   }
 
+  #leave(waiter) {
+    const i = this.queue.indexOf(waiter);
+    if (i >= 0) this.queue.splice(i, 1);
+    clearTimeout(waiter.timer);
+    waiter.signal?.removeEventListener('abort', waiter.onAbort);
+  }
+
   #drain() {
     while (this.queue.length) {
       const head = this.queue[0];
       if (this.fits(head.usd)) {
-        this.queue.shift();
-        clearTimeout(head.timer);
+        this.#leave(head);
         this.#grant(head.usd);
         head.resolve(head.waited);
       } else if (this.inFlight === 0) {
-        this.queue.shift();
-        clearTimeout(head.timer);
+        this.#leave(head);
         head.reject(new Refused(head.usd, head.waited)); // nothing left to settle: it never fits
       } else {
         return;
