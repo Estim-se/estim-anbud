@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,7 +49,7 @@ KEYCHAIN_TIMEOUT_S = 10.0  # the `security` read; a locked Keychain or a prompt 
 
 
 class BudgetExceeded(RuntimeError):
-    pass
+    waited: Waited | None = None  # set when the call waited for room before it was refused (`Budget.take`)
 
 
 class PrefixDrift(RuntimeError):
@@ -83,36 +84,95 @@ class ModelError(RuntimeError):
         return f"{self.kind} ({status}, request {self.request_id or 'unknown'})"
 
 
-class Budget:
-    """A run's hard stop in USD. Thread-safe, for parallel lenses."""
+@dataclass(frozen=True)
+class Waited:
+    """A call that waited for room under the hard stop: what was reserved, and how many calls were in flight, when it
+    began to. Ids and numbers only (`ModelClient`'s `budget_wait` event)."""
 
-    def __init__(self, hard_stop_usd: float, ceiling_usd: float | None = None) -> None:
+    reserved_usd: float
+    in_flight: int
+
+
+class Budget:
+    """A run's hard stop in USD. Thread-safe, for parallel calls. Each call reserves the most it can cost, then
+    settles what it did cost.
+
+    Without `wait`, a call that doesn't fit is refused at once. With `wait` (both engines' paid runs), a call that
+    doesn't fit while others are in flight waits for them to settle, in arrival order: a later call never takes the
+    room ahead of an earlier one, so calls start in the order they asked. It is refused only when it doesn't fit with
+    nothing in flight. Reservations alone then never stop a run below its stop, and its worst case stays capped."""
+
+    def __init__(self, hard_stop_usd: float, ceiling_usd: float | None = None, *, wait: bool = False) -> None:
         self.hard_stop = hard_stop_usd
         self.ceiling = hard_stop_usd if ceiling_usd is None else ceiling_usd  # set_stop never goes above it
         self.spent = 0.0
         self.reserved = 0.0
+        self.in_flight = 0  # calls reserved and not yet settled: a count, so a float's residue never holds a wait
+        self.wait = wait
         self._lock = threading.Lock()
+        self._room = threading.Condition(self._lock)
+        self._queue: deque[object] = deque()  # the calls waiting for room, oldest first
 
     def reserve(self, usd: float) -> float:
-        with self._lock:
-            if self.spent + self.reserved + usd > self.hard_stop:
-                raise BudgetExceeded(
-                    f"a call that may cost ${usd:.4f} would pass the ${self.hard_stop:.2f} hard stop "
-                    f"(spent ${self.spent:.4f}, reserved ${self.reserved:.4f})"
-                )
-            self.reserved += usd
-            return usd
+        return self.take(usd)[0]
+
+    def take(self, usd: float) -> tuple[float, Waited | None]:
+        """Reserves `usd`, waiting for room as the class says. Returns it and how the call waited (None: it didn't).
+        A refusal after a wait carries the wait as `BudgetExceeded.waited`."""
+        with self._room:
+            if not self._queue and self._fits(usd):
+                return self._take(usd), None
+            if not self.wait or (not self._queue and self.in_flight == 0):
+                raise self._refused(usd)
+            waited = Waited(round(self.reserved, 6), self.in_flight)
+            ticket = object()
+            self._queue.append(ticket)
+            try:
+                while not (self._queue[0] is ticket and self._fits(usd)):
+                    if self._queue[0] is ticket and self.in_flight == 0:  # nothing left to settle: it never fits
+                        refused = self._refused(usd)
+                        refused.waited = waited
+                        raise refused
+                    self._room.wait()
+            finally:
+                self._queue.remove(ticket)
+                self._room.notify_all()  # the next in line looks again
+            return self._take(usd), waited
+
+    def _fits(self, usd: float) -> bool:
+        return self.spent + self.reserved + usd <= self.hard_stop
+
+    def _take(self, usd: float) -> float:
+        self.reserved += usd
+        self.in_flight += 1
+        return usd
+
+    def _refused(self, usd: float) -> BudgetExceeded:
+        return BudgetExceeded(
+            f"a call that may cost ${usd:.4f} would pass the ${self.hard_stop:.2f} hard stop "
+            f"(spent ${self.spent:.4f}, reserved ${self.reserved:.4f})"
+        )
 
     def set_stop(self, usd: float) -> float:
         """Moves the stop when the run learns its size (`anbud.stops`), never above the ceiling set at the start."""
-        with self._lock:
+        with self._room:
             self.hard_stop = min(usd, self.ceiling)
+            self._room.notify_all()
             return self.hard_stop
 
     def settle(self, reserved_usd: float, actual_usd: float) -> None:
-        with self._lock:
+        """A reserved call ended, whatever the way: its reservation is released and what it cost is spent."""
+        with self._room:
             self.reserved -= reserved_usd
             self.spent += actual_usd
+            self.in_flight -= 1
+            self._room.notify_all()
+
+    def charge(self, usd: float) -> None:
+        """Spend with no call in flight: what a resumed run already spent."""
+        with self._room:
+            self.spent += usd
+            self._room.notify_all()
 
 
 @dataclass(frozen=True)
@@ -285,7 +345,7 @@ class ModelClient:
         self.store = store
         self.salt = store.open_run(run_id, salt) if store is not None else salt
         if store is not None:
-            budget.settle(0.0, store.run_spend(run_id))  # a resumed run keeps counting against the same hard stop
+            budget.charge(store.run_spend(run_id))  # a resumed run keeps counting against the same hard stop
         self.persist_failures = 0  # store writes that failed; the caller should stop the run if this isn't 0
         self.replay_misses = 0  # replayed requests not in the step cache; a replay with any is incomplete
         self.halted = 0  # calls refused by a stop marker, the hard stop or the spend cap; a run with any is incomplete
@@ -442,28 +502,39 @@ class ModelClient:
             input_tokens = self.sdk.messages.count_tokens(**count_params).input_tokens
         except Exception as exc:  # noqa: BLE001 - the SDK's call only: mapped to ModelError (`_mapped`)
             raise self._failed(exc) from exc
+        reserve = price.max_cost(input_tokens, max_tokens)
+        asked = self.clock()
         try:
-            reserved = self.budget.reserve(price.max_cost(input_tokens, max_tokens))
+            reserved, waited = self.budget.take(reserve)
         except BudgetExceeded as exc:
+            self._waited(step, asked, reserve, exc.waited)
             if role in self.degrade_roles:
                 self._refuse(step, key, str(exc), retried)
             self._halt()
             raise
+        self._waited(step, asked, reserve, waited)
         start = self.clock()
         opened = False
         request_id = None
+        settled = False
         try:
-            with self.sdk.messages.stream(**params) as stream:  # the request is sent here
-                opened = True
-                request_id = getattr(stream, "request_id", None)  # streamed messages don't carry it themselves
-                message = stream.get_final_message()
-        except Exception as exc:  # noqa: BLE001
-            charged = 0.0 if self._refused_unbilled(exc, opened) else reserved
-            self.budget.settle(reserved, charged)
-            self._emit(step, "error", duration_ms=self._ms(start), cost_usd=charged)
-            raise self._failed(exc) from exc
-        cost = price.cost(message.usage)
-        self.budget.settle(reserved, cost)
+            try:
+                with self.sdk.messages.stream(**params) as stream:  # the request is sent here
+                    opened = True
+                    request_id = getattr(stream, "request_id", None)  # streamed messages don't carry it themselves
+                    message = stream.get_final_message()
+            except Exception as exc:  # noqa: BLE001
+                charged = 0.0 if self._refused_unbilled(exc, opened) else reserved
+                self.budget.settle(reserved, charged)
+                settled = True
+                self._emit(step, "error", duration_ms=self._ms(start), cost_usd=charged)
+                raise self._failed(exc) from exc
+            cost = price.cost(message.usage)
+            self.budget.settle(reserved, cost)
+            settled = True
+        finally:
+            if not settled:  # a kill, an interrupt or a cancelled call: it may have been billed, so it stays spent
+                self.budget.settle(reserved, reserved)
         usage = message.usage
         duration = self._ms(start)
         blobs: dict[str, Any] = {}
@@ -496,6 +567,18 @@ class ModelClient:
             **blobs,
         )
         return CallResult(message, model, cost, duration, request_id)
+
+    def _waited(self, step: str, asked: float, reserve: float, waited: Waited | None) -> None:
+        """The call's wait for room under the hard stop, when it had one (`Budget.take`)."""
+        if waited is not None:
+            self._emit(
+                step,
+                "budget_wait",
+                duration_ms=self._ms(asked),
+                reserve_usd=round(reserve, 6),
+                reserved_usd=waited.reserved_usd,
+                in_flight=waited.in_flight,
+            )
 
     def _answer(self, step: str) -> None:
         with self._lock:
