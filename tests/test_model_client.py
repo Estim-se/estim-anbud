@@ -172,7 +172,13 @@ def test_a_rejected_schema_is_classified_and_the_message_stays_off_logs() -> Non
 @pytest.mark.parametrize(
     "messages",
     [
-        FakeMessages(mid_stream_error=_status_error(anthropic.OverloadedError, 529, "overloaded")),
+        FakeMessages(  # an overload once the stream is open: HTTP 200, then an error event
+            mid_stream_error=anthropic.APIStatusError(
+                "Overloaded",
+                response=httpx2.Response(200, request=REQUEST),
+                body={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
+            )
+        ),
         FakeMessages(error=anthropic.APIConnectionError(request=REQUEST)),
     ],
 )

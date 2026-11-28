@@ -260,12 +260,10 @@ def test_a_run_refused_or_reaching_no_model_stops_the_exam(data_root: Path, engi
     assert [e for e, _ in runner.calls] == (["granskning"] if engine == "granskning" else ["granskning", "kalkyl"])
 
 
-def test_model_unreachable_is_the_build_lanes_exit_6() -> None:
-    """Until the build lane's constant lands, the exam keeps its own; once it does, the two must agree."""
+def test_model_unreachable_is_the_engines_exit_6() -> None:
     from anbud.granskning import command
 
-    assert exam.MODEL_UNREACHABLE == 6
-    assert getattr(command, "MODEL_UNREACHABLE", 6) == exam.MODEL_UNREACHABLE
+    assert exam.MODEL_UNREACHABLE == command.MODEL_UNREACHABLE == 6
 
 
 def test_an_outage_that_passed_doesn_t_stop_the_exam(data_root: Path) -> None:

@@ -70,6 +70,9 @@ from anbud import notice as notices
 from anbud.config import CONFIG_DIR
 from anbud.evals import baseline, freeze
 from anbud.evals import split_heldout as sh
+from anbud.granskning.command import (
+    MODEL_UNREACHABLE,
+)  # no lens or extraction call answered: `anbud run`, `anbud kalkyl`
 from anbud.stops import ESTIMATE, Stop, granskning_stop, granskning_tiers, kalkyl_stop, kalkyl_tiers, top
 from anbud.store import private_dirs
 
@@ -516,9 +519,6 @@ _GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
 PREFIX_STOP = "anbud run: stopped: the prefix's fixed part"
 PAID_REFUSED = 3  # `anbud run`'s exit code for a run refused or stopped before any paid call
 RUN_HALTED = 5  # `anbud run`'s exit code for a run a limit stopped before it finished
-# `anbud run` and `anbud kalkyl`: no lens or extraction call was answered, by the model or the step cache. The build
-# lane's `granskning.command.MODEL_UNREACHABLE`, defined here until it lands.
-MODEL_UNREACHABLE = 6
 # Kinds of a run's failed calls that every later run would fail the same way (`_breaks`).
 ENVIRONMENTAL = frozenset({"key_missing", "auth", "spend_cap"})
 BASELINE_HALTS = ("hard_stop", "stopped", "timeout")  # the old engine's outcomes that are a limit, not an error

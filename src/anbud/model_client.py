@@ -37,8 +37,9 @@ from anbud.tools import ROLES, own_tools, shared_tools
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # A call that fails on one of these kinds is tried again after each delay in turn (seconds), on top of the SDK's own
-# retry: a 429, a 529 or 5xx (one mid-stream too, which the SDK never retries), a dropped connection, a timeout. Each
-# attempt reserves against the hard stop like any call, so a retry the stop refuses is skipped or halts as usual.
+# retry: a 429, a 529 or 5xx, an overload or API error event inside an open stream (`BODY_KINDS`, which the SDK never
+# retries), a dropped connection, a timeout. Each attempt reserves against the hard stop like any call, so a retry the
+# stop refuses is skipped or halts as usual.
 TRANSIENT = frozenset({"rate_limited", "server", "connection", "timeout"})
 RETRY_DELAYS = (5.0, 20.0)
 KEYCHAIN_SERVICE = "estim-anbud"
@@ -135,6 +136,11 @@ class CallResult:
         return self.cost_usd if self.paid_usd is None else self.paid_usd
 
 
+# An error event inside a stream that opened with HTTP 200 reaches the SDK after the status, so it raises a plain
+# APIStatusError(200): its kind comes from the body's error type. Overload and the API's own errors are transient.
+BODY_KINDS = {"overloaded_error": "server", "api_error": "server", "rate_limit_error": "rate_limited"}
+
+
 def classify(exc: Exception) -> ModelError:
     import anthropic
 
@@ -161,14 +167,23 @@ def classify(exc: Exception) -> ModelError:
             return ModelError(kind, status, request_id, message)
     if isinstance(exc, anthropic.BadRequestError):
         lowered = message.lower()
-        if "usage limit" in lowered:  # a workspace cap arrives as a 400: pause the run, never retry it
-            kind = "spend_cap"
+        if "usage limit" in lowered or "credit balance" in lowered:  # a workspace cap or an empty balance: a 400
+            kind = "spend_cap"  # pause the run, never retry it
         elif "schema" in lowered:
             kind = "schema_rejected"
         else:
             kind = "bad_request"
         return ModelError(kind, status, request_id, message)
+    if (kind := BODY_KINDS.get(_body_error_type(exc))) is not None:  # an error event inside an open stream
+        return ModelError(kind, status, request_id, message)
     return ModelError("status", status, request_id, message)
+
+
+def _body_error_type(exc: Exception) -> str | None:
+    """The API's own error type from the body (`{"type": "error", "error": {"type": ...}}`), when it has one."""
+    body = getattr(exc, "body", None)
+    error = body.get("error") if isinstance(body, dict) else None
+    return error.get("type") if isinstance(error, dict) else None
 
 
 def keychain_key(service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT) -> str:
@@ -270,6 +285,7 @@ class ModelClient:
         self.refuse_roles: set[str] = set()  # roles a paid run refuses from now on, as at the hard stop (`refuse_role`)
         self.retries = 0  # attempts made again after a transient error (`TRANSIENT`); a replay counts the recorded ones
         self.failures: dict[str, int] = {}  # calls that failed for good, after their retries, by error kind
+        self.answered: dict[str, int] = {}  # calls answered, by the model or from the step cache, by step
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -380,6 +396,7 @@ class ModelClient:
             raise RunStopped(f"run {self.run_id} has a stop marker")
         key = self.store.step_key(self.salt, params, step, sample) if self.store is not None else None
         if key is not None and (hit := self._cached(step, model, key)) is not None:
+            self._answer(step)
             return hit
         if self.sdk is None:
             with self._lock:
@@ -387,7 +404,9 @@ class ModelClient:
             raise ReplayMiss("this request isn't in the step cache, and replay never calls a model")
         for retried, delay in enumerate((*RETRY_DELAYS, None)):
             try:
-                return self._send(role, step, params, key, max_tokens, retried)
+                result = self._send(role, step, params, key, max_tokens, retried)
+                self._answer(step)
+                return result
             except ModelError as error:
                 if error.kind not in TRANSIENT or delay is None:
                     self._count(error.kind, 0)
@@ -468,6 +487,18 @@ class ModelClient:
             **blobs,
         )
         return CallResult(message, model, cost, duration, request_id)
+
+    def _answer(self, step: str) -> None:
+        with self._lock:
+            self.answered[step] = self.answered.get(step, 0) + 1
+
+    def unanswered(self, prefix: str) -> bool:
+        """Calls failed for good, of any kind, and no call whose step starts with `prefix` was answered: the run did
+        none of that work (a dead key, an empty balance, the network or the API down past the retries), and must not
+        count as finished. By step, not role: Granskning's checks share a lens role. A run that failed nothing (a stop
+        marker, the hard stop) is left to its own exit."""
+        with self._lock:
+            return bool(self.failures) and not any(s.startswith(prefix) for s in self.answered)
 
     def _count(self, failed: str | None, retries: int) -> None:
         with self._lock:

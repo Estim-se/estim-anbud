@@ -1,9 +1,9 @@
-"""A transient error (a 429, a 529 or 5xx, one mid-stream too, a dropped connection, a timeout) is tried again, after a
-wait, a bounded number of times. Each attempt reserves against the hard stop, so a retry the stop refuses takes the
-budget's degrade path: the lens is marked (budget), never halted. A call that still fails is lost, and the run says
-so: `degraded` in granskning.json (the lenses and the map lost, the attempts made again, the failures by kind), a line
-in the report and on the terminal. Its step record keeps the failure, so a $0 rebuild loses the same work, while a paid
-resume tries the call again. Synthetic tender, fake SDKs, $0; the waits are zeroed (conftest).
+"""A transient error (a 429, a 529 or 5xx, an overload event inside an open stream, a dropped connection, a timeout) is
+tried again, after a wait, a bounded number of times. Each attempt reserves against the hard stop, so a retry the stop
+refuses takes the budget's degrade path: the lens is marked (budget), never halted. A call that still fails is lost, and
+the run says so: `degraded` in granskning.json (the lenses and the map lost, the attempts made again, the failures by
+kind), a line in the report and on the terminal. Its step record keeps the failure, so a $0 rebuild loses the same work,
+while a paid resume tries the call again. Synthetic tender, fake SDKs, $0; the waits are zeroed (conftest).
 
 Each test names the one-line mutation it catches; each was made, seen to fail the test, and reverted."""
 
@@ -33,6 +33,13 @@ REQUEST = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 
 def _overloaded() -> Exception:
     return anthropic.OverloadedError("overloaded", response=httpx2.Response(529, request=REQUEST), body=None)
+
+
+def _overloaded_mid_stream() -> Exception:
+    """What the SDK raises for an overload once a stream is open: the response was already HTTP 200, and the error comes
+    as an event in the stream."""
+    body = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+    return anthropic.APIStatusError("Overloaded", response=httpx2.Response(200, request=REQUEST), body=body)
 
 
 def _rate_limited() -> Exception:
@@ -108,8 +115,8 @@ CLEAN = {"lenses_lost": [], "map_lost": False, "failed_calls": 0, "failures": {}
 @pytest.mark.parametrize("when", [_is_lens, _is_map], ids=["lens", "map"])
 @pytest.mark.parametrize(
     ("error", "mid_stream"),
-    [(_overloaded, False), (_overloaded, True), (_rate_limited, False), (_connection, False)],
-    ids=["529", "529-mid-stream", "429", "connection"],
+    [(_overloaded, False), (_overloaded_mid_stream, True), (_rate_limited, False), (_connection, False)],
+    ids=["529", "overloaded-mid-stream", "429", "connection"],
 )
 def test_a_transient_error_is_tried_again_and_the_work_is_kept(
     tender: Path,  # noqa: F811 - the fixture
@@ -236,7 +243,7 @@ def test_a_retry_the_hard_stop_refuses_marks_the_lens_budget_and_never_halts(
         budgets[0].hard_stop = budgets[0].spent + budgets[0].reserved + 0.0001
 
     monkeypatch.setattr(model_client, "Budget", make)
-    sdk = FlakySDK(_is_lens, _overloaded, mid_stream=True, on_fail=pull_in)
+    sdk = FlakySDK(_is_lens, _overloaded_mid_stream, mid_stream=True, on_fail=pull_in)
     assert _run(monkeypatch, sdk, "t-0001-refused-retry", "--concurrency", "1") == 0
     out = capsys.readouterr().out
     assert sdk.failed == 1 and budgets[0].spent <= budgets[0].hard_stop
