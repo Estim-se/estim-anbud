@@ -16,7 +16,7 @@ from anbud.granskning.corpus import Corpus
 from anbud.kalkyl.catalog import ids as catalog_ids_of
 from anbud.kalkyl.connections import connection_records, demolition_line_ids, note_connections
 from anbud.kalkyl.coverage import uncovered_lines
-from anbud.kalkyl.extract import ChunkResult, extract_all, system_blocks
+from anbud.kalkyl.extract import ChunkResult, chunk_message, extract_all, system_blocks
 from anbud.kalkyl.group_pass import GroupPass, marked_lines, merge_set_asides, read_groups, uncovered_groups
 from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks, not_included_line_ids, other_party_line_ids
 from anbud.kalkyl.match import match_posts
@@ -35,6 +35,7 @@ from anbud.kalkyl.recipe import BoundRecipe
 from anbud.kalkyl.records import Rejected, Uncovered, VerifiedRecord
 from anbud.kalkyl.repetition import Repetition
 from anbud.kalkyl.rooms import with_descriptor
+from anbud.kalkyl.second_reading import SecondReading, read_again
 from anbud.kalkyl.settings import EXTRACT, MATCH, KalkylConfig
 from anbud.kalkyl.tables import Cells
 from anbud.model_client import ModelClient
@@ -60,6 +61,7 @@ class KalkylResult:
     not_included: set[str] = field(default_factory=set)  # lines that say something isn't part of the contract
     connections: list[VerifiedRecord] = field(default_factory=list)  # code's connections to others' equipment
     group_pass: GroupPass | None = None  # the code-group pass, when it ran (`group_pass`)
+    second: SecondReading | None = None  # the leverage lines' second reading, when it ran
 
     @property
     def counted_rows(self) -> set[str]:
@@ -68,8 +70,10 @@ class KalkylResult:
 
     @property
     def complete(self) -> bool:
-        """Every chunk read and answered, and R3 had no failure. Otherwise the calc is marked incomplete."""
-        return all(r.status == "submitted" for r in self.chunk_results) and not self.match_stats.get("error")
+        """Every chunk read and answered, R3 had no failure, and a second reading wasn't halted. Otherwise the calc is
+        marked incomplete."""
+        read = all(r.status == "submitted" for r in self.chunk_results) and not self.match_stats.get("error")
+        return read and (self.second is None or self.second.halted is None)
 
     def object_counts(self) -> dict[str, int | float | None]:
         """Count per object kind, as used."""
@@ -251,6 +255,24 @@ def run_kalkyl(
     price_posts(posts, catalog, repetition)
     note_connections(posts, connections)
     note_not_included(posts, not_included)
+    second = None
+    if kalkyl.second_reading and not halted:
+        second = read_again(
+            client,
+            chunks,
+            results,
+            verified,
+            posts,
+            totals_of(posts).total,
+            kalkyl.second_share,
+            corpus,
+            set(catalog_ids_of(catalog)),
+            system_blocks(catalog, corpus),
+            lambda chunk: chunk_message(chunk, corpus, paths, cells or {}),  # the first turn's message, unchanged
+            kalkyl.roles[EXTRACT],
+            cells,
+            kalkyl.concurrency,
+        )
     return KalkylResult(
         chunks=chunks,
         chunk_results=results,
@@ -277,6 +299,7 @@ def run_kalkyl(
         not_included=not_included,
         connections=connections,
         group_pass=done,
+        second=second,
     )
 
 

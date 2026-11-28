@@ -41,6 +41,8 @@ class KalkylConfig:
     match_batch: int
     roles: dict[str, RoleSettings]
     group_pass: bool = False  # the code-group pass after R2 (`kalkyl.group_pass`)
+    second_reading: bool = False  # read leverage lines again (`kalkyl.second_reading`)
+    second_share: float = 0.05  # a post this share of the sum or more is a leverage post
 
 
 def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
@@ -66,4 +68,6 @@ def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
         match_batch=max(1, int(ma["batch_size"])),
         roles=roles,
         group_pass=bool(raw.get("group_pass", {}).get("enabled", False)),
+        second_reading=bool(raw.get("second_reading", {}).get("enabled", False)),
+        second_share=float(raw.get("second_reading", {}).get("share", 0.05)),
     )
