@@ -275,6 +275,7 @@ def test_a_line_from_before_statuses_is_a_finished_run(data_root: Path) -> None:
     old = json.loads(ledger.read_text())
     del old["status"]
     ledger.write_bytes(canonical(old) + b"\n")  # the one line, as it was written before statuses
+    freeze.head_file(ledger).unlink()  # and a ledger from then has no head beside it
     assert freeze.status_of(old) == "finished"
     later = datetime(2026, 11, 28, tzinfo=UTC)
     again = freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", now=later)

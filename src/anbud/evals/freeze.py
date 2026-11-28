@@ -11,6 +11,9 @@ Layout, outside every repo:
   chain. New lines are `store.canonical` bytes; imported hand-made lines keep their own bytes.
 - Lines are appended under an exclusive lock, after re-verifying the chain, in one write followed by fsync. Nothing
   ever rewrites or reorders a line.
+- The chain can't show lines dropped from the end, so after each append the ledger's head (its line count and the
+  last line's sha256) goes into `<ledger>.head` beside it, and every read refuses a ledger that no longer holds the
+  line its head names. A crash between the two leaves the head one append behind, which still reads.
 - A frozen run's output files become read-only (0o400).
 - Records hold ids, hashes, timestamps and data-root-relative paths of the harness's own folders, never document text,
   model output or a customer's file name. A folder other than the run's own (`freeze run --outputs`), and any file
@@ -39,6 +42,7 @@ from anbud.store import StoreError, canonical, check_run_id, private_dirs
 
 LEDGER = "ledger.jsonl"
 LOCK = "ledger.lock"
+HEAD_SUFFIX = ".head"  # `ledger.jsonl.head`: the head of the ledger beside it
 FREEZE_KINDS = ("freeze", "manual_freeze_v0")
 PLAN_KIND = "preregistration"  # a scoring plan, frozen before any paid exam
 # An exam attempt: written to the sealed ledger before the exam launches a paid run, so a run that never comes back
@@ -155,14 +159,77 @@ def _summary(lines: list[bytes], records: list[dict[str, Any]]) -> LedgerSummary
     return LedgerSummary(len(lines), last, dict(sorted(kinds.items())), tuple(sorted(tenders)))
 
 
+def head_file(ledger: Path) -> Path:
+    return ledger.with_name(ledger.name + HEAD_SUFFIX)
+
+
+def lost_lines(lines: Sequence[bytes], head: dict[str, Any]) -> str | None:
+    """Why a ledger's lines don't hold `head` ({"lines": n, "sha256": its line n's hash}), or None when they do."""
+    try:
+        n, sha = int(head["lines"]), head["sha256"]
+    except (KeyError, TypeError, ValueError):
+        return "its head record is unreadable"
+    if n == 0:
+        return None
+    if len(lines) < n:
+        return f"it has {len(lines)} lines and its head was line {n}: lines were dropped from the end"
+    if _sha(lines[n - 1]) != sha:
+        return f"its line {n} isn't the head line it had"
+    return None
+
+
+def head_of(path: Path, root: Path | None = None) -> dict[str, Any]:
+    """A ledger's head as `lost_lines` reads it: its line count and its last line's sha256."""
+    found = verify(path, root)
+    return {"lines": found.lines, "sha256": found.last_sha256}
+
+
+def check_heads(path: Path, heads: Sequence[dict[str, Any]], root: Path | None = None) -> None:
+    """Refuses a ledger that no longer holds every head in `heads`, heads recorded elsewhere (the exam's own records):
+    the ledger and the head beside it could be lost together."""
+    lines, _ = _read(path, root)
+    for head in heads:
+        if (why := lost_lines(lines, head)) is not None:
+            raise FreezeError(f"the ledger has lost lines since a record named its head: {why}. Restore it first")
+
+
+def _check_head(path: Path, lines: list[bytes], root: Path | None) -> None:
+    head = head_file(path)
+    _check_no_symlinks(head, root)
+    if not head.exists():  # a ledger from before heads were kept, or never appended to by this code
+        return
+    try:
+        found = json.loads(head.read_bytes())
+    except (ValueError, RecursionError):
+        found = None
+    if (why := lost_lines(lines, found if isinstance(found, dict) else {})) is not None:
+        raise FreezeError(f"the ledger has lost lines: {why}. Restore it from its newest copy before any run")
+
+
+def _write_head(ledger: Path, lines: int, last: bytes) -> None:
+    """The ledger's head, replaced in one rename after an fsync, so it is always a whole head."""
+    head = head_file(ledger)
+    staging = head.with_name(f".{head.name}.tmp")
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, canonical({"lines": lines, "sha256": _sha(last)}) + b"\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(staging, head)
+
+
 def _read(path: Path, root: Path | None = None) -> tuple[list[bytes], list[dict[str, Any]]]:
     """The checks a write makes apply to every read too: the answer store opens on what a read finds."""
     _check_no_symlinks(path, root)
     if not path.exists():
+        _check_head(path, [], root)  # a ledger deleted after its head was written has lost every line
         return [], []
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as handle:
-        return _parse(handle.read())
+        lines, records = _parse(handle.read())
+    _check_head(path, lines, root)
+    return lines, records
 
 
 def verify(path: Path, root: Path | None = None) -> LedgerSummary:
@@ -204,8 +271,9 @@ def _locked(ledger: Path, root: Path | None) -> Iterator[None]:
         os.close(fd)
 
 
-def _append(ledger: Path, payload: bytes) -> None:
-    """One write and fsync, so a crash leaves either the whole line or a cut-off last line that verify refuses."""
+def _append(ledger: Path, payload: bytes, before: int) -> None:
+    """One write and fsync, so a crash leaves either the whole line or a cut-off last line that verify refuses. Then
+    the new head (`_write_head`): `before` is the number of lines the ledger had."""
     fd = os.open(ledger, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         written = os.write(fd, payload)
@@ -214,6 +282,8 @@ def _append(ledger: Path, payload: bytes) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+    added = payload[:-1].split(b"\n")
+    _write_head(ledger, before + len(added), added[-1])
 
 
 def import_manual(company_id: str, source: Path, root: Path | None = None) -> int:
@@ -237,12 +307,12 @@ def import_manual(company_id: str, source: Path, root: Path | None = None) -> in
     with _locked(ledger, root):
         existing, _ = _read(ledger, root)
         if not existing:
-            _append(ledger, data)
+            _append(ledger, data, 0)
             return len(lines)
         if existing[: len(lines)] == lines:
             return 0
         if len(existing) < len(lines) and lines[: len(existing)] == existing:
-            _append(ledger, b"".join(line + b"\n" for line in lines[len(existing) :]))
+            _append(ledger, b"".join(line + b"\n" for line in lines[len(existing) :]), len(existing))
             return len(lines) - len(existing)
         raise FreezeError("the ledger already holds other lines; hand-made records can only start a ledger")
 
@@ -514,7 +584,7 @@ def start_run(
                 raise FreezeError(f"already attempted at sealed ledger line {number}; an exam pair is run once")
         if lines:
             record["prev"] = _sha(lines[-1])
-        _append(ledger, canonical(record) + b"\n")
+        _append(ledger, canonical(record) + b"\n", len(lines))
     return {**record, "line_number": len(lines) + 1}
 
 
@@ -609,7 +679,7 @@ def freeze_run(
         if lines:
             record["prev"] = _sha(lines[-1])
         line = canonical(record)
-        _append(ledger, line + b"\n")
+        _append(ledger, line + b"\n", len(lines))
     # The line is written, so the run is frozen whatever happens next; a failure here is reported, never raised.
     failed = _read_only(output_files)
     return {**record, "line_number": len(lines) + 1, "line_sha256": _sha(line), NOT_READ_ONLY: failed}
@@ -670,7 +740,7 @@ def relocate_run(
             "prev": _sha(lines[-1]),
         }
         line = canonical(record)
-        _append(ledger, line + b"\n")
+        _append(ledger, line + b"\n", len(lines))
     return {**record, "line_number": len(lines) + 1, "line_sha256": _sha(line)}
 
 
@@ -707,7 +777,7 @@ def register_plan(
         }
         if lines:
             record["prev"] = _sha(lines[-1])
-        _append(ledger, canonical(record) + b"\n")
+        _append(ledger, canonical(record) + b"\n", len(lines))
     return {**record, "line_number": len(lines) + 1, "new": True}
 
 
