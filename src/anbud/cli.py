@@ -205,6 +205,8 @@ def _kalkyl(args: argparse.Namespace) -> int:
         kalkyl = load_kalkyl_config()
         if args.group_pass:
             kalkyl = replace(kalkyl, group_pass=True)
+        if args.second_reading:
+            kalkyl = replace(kalkyl, second_reading=True)
         if args.dry_run:
             summary = plan(args.company_id, args.tender_id, catalog_name=args.catalog, kalkyl=kalkyl)
         else:
@@ -639,6 +641,11 @@ def main(argv: list[str] | None = None) -> int:
         "--group-pass",
         action="store_true",
         help="after R2, read each uncovered code group of the technical description twice (config/kalkyl.toml)",
+    )
+    kalkyl.add_argument(
+        "--second-reading",
+        action="store_true",
+        help="after R2, read the chunks of the leverage lines once more and ask about any line the readings differ on",
     )
     sub.add_parser("replay", help="replay a stored run at $0 (phase 1)")
     sub.add_parser("guards", help="repo guards: names, document files, licensed text")

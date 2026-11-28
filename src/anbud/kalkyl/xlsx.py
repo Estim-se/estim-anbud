@@ -39,6 +39,7 @@ from anbud.kalkyl.group_pass import (
 )
 from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Line, Post, assumed_posts
 from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered
+from anbud.kalkyl.second_reading import SecondReading
 from anbud.selection import excluded_counts, excluded_label
 
 if TYPE_CHECKING:
@@ -222,6 +223,18 @@ CODE_GROUPS_MISSING = "Kodgrupper utan post eller skäl (se Kodgrupper)"
 NO_CODES = "Inga kodade rubriker (AMA/AF) i tekniska beskrivningen eller AF: inte kontrollerat"
 GROUP_PASS = "Kodgruppsläsning, två läsningar per grupp (se Kodgrupper)"
 
+SECOND_READING = "Andra läsning av rader med hävstång (se Frågor)"
+QUESTION_COLUMNS = [
+    ("Källa (block)", 18),
+    ("Poster", 24),
+    ("Rubrik", 40),
+    ("Text", 60),
+    ("Läsning 1", 50),
+    ("Citat, läsning 1", 50),
+    ("Läsning 2", 50),
+    ("Citat, läsning 2", 50),
+]
+
 
 def _group_pass_value(done: GroupPass) -> str:
     n = done.summary()
@@ -230,6 +243,41 @@ def _group_pass_value(done: GroupPass) -> str:
         f"{n['questions']} frågor"
     )
     return text + (f" (varav {n['not_read']} inte lästa)" if n["not_read"] else "")
+
+
+def _second_reading_value(second: SecondReading) -> str:
+    n = second.summary()
+    text = f"{n['lines']} rader i {n['chunks']} avsnitt: {n['agreed']} överens, {n['questions']} frågor"
+    text += f", {n['unanswered']} lämnade utan svar i andra läsningen" if n["unanswered"] else ""
+    if n["errors"]:
+        why = {"budget": ": budgeten tog slut", "stopped": ": körningen stoppades"}.get(n["halted"] or "", "")
+        text += f" ({n['errors']} avsnitt inte lästa igen{why})"
+    return text
+
+
+def _questions_sheet(
+    ws: Worksheet, result: KalkylResult, corpus: Corpus, catalog: Catalog, status: str, run: str
+) -> None:
+    """The lines two readings differ on, in kind: both readings and their quotes. The calc keeps the first."""
+    assert result.second is not None
+    _header(ws, catalog, status, run, QUESTION_COLUMNS)
+    for r, q in enumerate(result.second.questions, FIRST_ROW):
+        block = corpus.blocks.get(q.block_id)
+        values = [
+            q.block_id,
+            ", ".join(q.post_ids),
+            " > ".join(result.paths.get(q.block_id, ())),
+            block.text if block else None,
+            q.first.label,
+            " | ".join(q.first.quotes),
+            q.second.label,
+            " | ".join(q.second.quotes),
+        ]
+        for col, value in enumerate(values, 1):
+            if value:
+                _put(ws, r, col, value)
+        for col in (4, 5, 6, 7, 8):
+            ws.cell(row=r, column=col).alignment = Alignment(wrap_text=True, vertical="top")
 
 
 def _pct(part: Decimal, whole: Decimal) -> str:
@@ -372,6 +420,7 @@ def _overview(
         (CODE_GROUPS, _code_groups_value(codes), None),
         (CODE_GROUPS_MISSING, len(codes.missing), None, "koder och block, aldrig rubrikernas ord"),
         *([(GROUP_PASS, _group_pass_value(result.group_pass), None)] if result.group_pass is not None else []),
+        *([(SECOND_READING, _second_reading_value(result.second), None)] if result.second is not None else []),
         (OTHER_DISCIPLINE, excluded_label(corpus), None, "sökbara; räknas inte i Ej omhändertaget"),
         (BOUNDARY_LINES, excluded_counts(corpus)["boundary_lines"], None),
         ("varav bortvalda med skäl (se Bortvalt med skäl)", c["lines_not_handled"] - c["lines_unresolved"], None),
@@ -546,6 +595,8 @@ def write_workbook(result: KalkylResult, corpus: Corpus, catalog: Catalog, meta:
     _uncovered_sheet(wb.create_sheet("Ej omhändertaget"), result, unresolved, corpus, catalog, status, run)
     _uncovered_sheet(wb.create_sheet("Bortvalt med skäl"), result, reasoned, corpus, catalog, status, run)
     _code_groups_sheet(wb.create_sheet("Kodgrupper"), codes, catalog, status, run, result.group_pass)
+    if result.second is not None:  # only when it ran: a run without it writes the same workbook as before
+        _questions_sheet(wb.create_sheet("Frågor"), result, corpus, catalog, status, run)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), rows

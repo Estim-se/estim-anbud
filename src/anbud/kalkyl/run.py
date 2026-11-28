@@ -157,6 +157,17 @@ def result_json(result: KalkylResult) -> bytes:
                 for g in result.group_pass.groups
             ],
         }
+    if result.second is not None:  # only when it ran, like the group pass
+        body["second_reading"] = {
+            "summary": result.second.summary(),
+            "lines": result.second.lines,
+            "chunks": result.second.chunks,
+            "errors": result.second.errors,
+            "questions": [
+                {"block_id": q.block_id, "posts": q.post_ids, "first": q.first.kinds, "second": q.second.kinds}
+                for q in result.second.questions
+            ],
+        }
     return json.dumps(body, ensure_ascii=False, indent=1, default=_decimal).encode()
 
 
@@ -286,6 +297,7 @@ def run_dev_tender(
         "selection": selection.summary(),
         "code_groups": code_coverage(result, corpus).summary(),
         **({"group_pass": result.group_pass.summary(result.posts)} if result.group_pass is not None else {}),
+        **({"second_reading": result.second.summary()} if result.second is not None else {}),
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
         "stop": {**stop.summary(), "cost_usd_est_high": estimate["cost_usd_est_high"], "margin": kalkyl.margin},
@@ -390,6 +402,11 @@ def _estimate(
         tokens = READINGS * chars / CHARS_PER_TOKEN
         pass_usd = (calls * prefix_tokens * price.cache_read + tokens * price.input + calls * high * price.output) / 1e6
         extra = {"group_pass_calls_max": calls, "group_pass_cost_usd_est_high": round(pass_usd, 2)}
+    if kalkyl.second_reading:
+        # At most every chunk holds a leverage line: one more first turn each, its prefix read from the cache
+        n = len(chunks)
+        again = (n * prefix_tokens * price.cache_read + sum(chunk_tokens) * price.input + n * high * price.output) / 1e6
+        extra |= {"second_reading_calls_max": n, "second_reading_cost_usd_est_high": round(again, 2)}
     return {
         "chunks": len(chunks),
         "quantity_lines": sum(len(c.quantity_ids) for c in chunks),
@@ -402,6 +419,11 @@ def _estimate(
         "prefix_tokens_est": prefix_tokens,
         "chunk_tokens_est_max": max(chunk_tokens, default=0),
         "cost_usd_est_low": round(cost(low, 0.1), 2),
-        "cost_usd_est_high": round(cost(high, 0.5) + extra.get("group_pass_cost_usd_est_high", 0), 2),
+        "cost_usd_est_high": round(
+            cost(high, 0.5)
+            + extra.get("group_pass_cost_usd_est_high", 0)
+            + extra.get("second_reading_cost_usd_est_high", 0),
+            2,
+        ),
         **extra,
     }

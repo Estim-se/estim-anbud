@@ -1,5 +1,5 @@
 # Kalkyl in shadow (#73 R2 and R3). Never raise a cap without the founder's approval.
-# Models: providers.toml [roles] kalkyl_extract and kalkyl_match. The run's hard stop: budgets.toml [kalkyl].
+# Models: providers.toml [roles] kalkyl_extract and kalkyl_match. The run's hard stop: budgets.toml [[kalkyl_stops]].
 
 [catalog]
 default = "estim-default" # ~/estim-anbud-data/catalogs/<name>.json
@@ -17,6 +17,10 @@ concurrency = 4
 
 [group_pass] # one turn per code group of the technical description nothing covers after R2, read twice (`group_pass`)
 enabled = false # off: a rebuild of a run made without it stays a complete $0 replay; `anbud kalkyl --group-pass` turns it on
+
+[second_reading] # leverage lines read again: a fresh sample of their chunk's first turn (`kalkyl.second_reading`)
+enabled = false # off until a paid measurement; `anbud kalkyl --second-reading` turns it on for one run
+share = 0.05 # a post this share of the sum or more is read again, as is every post multiplied by an object count
 
 [match] # R3: posts R2 left without a usable catalog item, a constrained choice among catalog ids
 effort = "medium"
