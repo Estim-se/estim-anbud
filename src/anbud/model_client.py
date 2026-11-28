@@ -37,8 +37,9 @@ from anbud.tools import ROLES, own_tools, shared_tools
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # A call that fails on one of these kinds is tried again after each delay in turn (seconds), on top of the SDK's own
-# retry: a 429, a 529 or 5xx (one mid-stream too, which the SDK never retries), a dropped connection, a timeout. Each
-# attempt reserves against the hard stop like any call, so a retry the stop refuses is skipped or halts as usual.
+# retry: a 429, a 529 or 5xx, an overload or API error event inside an open stream (`BODY_KINDS`, which the SDK never
+# retries), a dropped connection, a timeout. Each attempt reserves against the hard stop like any call, so a retry the
+# stop refuses is skipped or halts as usual.
 TRANSIENT = frozenset({"rate_limited", "server", "connection", "timeout"})
 RETRY_DELAYS = (5.0, 20.0)
 KEYCHAIN_SERVICE = "estim-anbud"
@@ -135,6 +136,11 @@ class CallResult:
         return self.cost_usd if self.paid_usd is None else self.paid_usd
 
 
+# An error event inside a stream that opened with HTTP 200 reaches the SDK after the status, so it raises a plain
+# APIStatusError(200): its kind comes from the body's error type. Overload and the API's own errors are transient.
+BODY_KINDS = {"overloaded_error": "server", "api_error": "server", "rate_limit_error": "rate_limited"}
+
+
 def classify(exc: Exception) -> ModelError:
     import anthropic
 
@@ -168,7 +174,16 @@ def classify(exc: Exception) -> ModelError:
         else:
             kind = "bad_request"
         return ModelError(kind, status, request_id, message)
+    if (kind := BODY_KINDS.get(_body_error_type(exc))) is not None:  # an error event inside an open stream
+        return ModelError(kind, status, request_id, message)
     return ModelError("status", status, request_id, message)
+
+
+def _body_error_type(exc: Exception) -> str | None:
+    """The API's own error type from the body (`{"type": "error", "error": {"type": ...}}`), when it has one."""
+    body = getattr(exc, "body", None)
+    error = body.get("error") if isinstance(body, dict) else None
+    return error.get("type") if isinstance(error, dict) else None
 
 
 def keychain_key(service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT) -> str:
