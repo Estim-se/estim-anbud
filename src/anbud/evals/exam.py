@@ -406,6 +406,8 @@ def _breaks(one: EngineRun) -> str | None:
         return "a run reached no model"
     if one.unreachable:
         return "a run had none of its calls answered"
+    if APP_UNREADY in (one.failures or {}):
+        return "a run's app or matched settings failed"
     kinds = sorted(ENVIRONMENTAL & set(one.failures or {}))
     return f"the API refused a run's calls ({', '.join(kinds)})" if kinds else None
 
@@ -529,6 +531,7 @@ PAID_REFUSED = 3  # `anbud run`'s exit code for a run refused or stopped before 
 RUN_HALTED = 5  # `anbud run`'s exit code for a run a limit stopped before it finished
 # Kinds of a run's failed calls that every later run would fail the same way (`_breaks`).
 ENVIRONMENTAL = frozenset({"key_missing", "auth", "spend_cap"})
+APP_UNREADY = "app_unready"  # the old engine's app export or matched settings failed after its started line
 # A run finished: exit 0, or FINISHED_NOT_FROZEN (its own freeze failed). The sealed freeze below hashes the same
 # outputs and makes them read-only itself, and refuses a finished run missing an output it always writes
 # (`EngineRun.required`), so a 7 never skips the exam's own checks.
@@ -701,6 +704,24 @@ class Engines:
             self._app_root = baseline.export_app(self.app, self._app_sha, self.root)
         return self._app_root
 
+    def pin_app(self) -> str:
+        """Resolves the app ref and exports that commit (`_app_export`), once, before a paid exam puts anything on
+        record: a moved ref, a missing node_modules or a git failure then stops it with nothing started. Returns the
+        commit, which both splits run the old engine on."""
+        self._app_export()
+        assert self._app_sha is not None
+        return self._app_sha
+
+    def baseline_ready(self, vroot: Path) -> str | None:
+        """$0, before an old-engine run's started line: why it can't start, or None. Its app is exported and its
+        matched settings can be read from the variant's catalog."""
+        try:
+            self._app_export()
+            baseline.matched_basis(vroot)
+        except baseline.BaselineError as exc:
+            return f"a run's app or matched settings aren't ready: {exc}"
+        return None
+
     def baseline(
         self, vroot: Path, company_id: str, tender_id: str, variant: str, run_id: str, run_dir: Path, *, dry_run: bool
     ) -> EngineRun:
@@ -708,8 +729,11 @@ class Engines:
         from anbud.granskning import provenance
         from anbud.model_client import KeyMissing, keychain_key
 
-        app_root = self._app_export()
-        settings = baseline.matched_basis(vroot)
+        try:  # `baseline_ready` checked both before the started line; a failure now stops the exam (`_breaks`)
+            app_root = self._app_export()
+            settings = baseline.matched_basis(vroot)
+        except baseline.BaselineError:
+            return EngineRun("baseline", variant, run_id, None, False, 0.0, failures={APP_UNREADY: 1})
         tender = paths.dev_tender_dir(company_id, tender_id, vroot)
         files = [
             tender / "inbox" / line.split("  ", 1)[1] for line in (tender / "inbox.sha256").read_text().splitlines()
@@ -846,6 +870,7 @@ class Report:
     dry_runs_ok: dict[str, int] = field(default_factory=dict)
     dry_runs: dict[str, int] = field(default_factory=dict)
     paid: bool = False
+    app_commit: str | None = None  # the app commit a paid pass runs the old engine on, pinned for both splits
     plan: dict[str, Any] | None = None
     runs_ok: dict[str, int] = field(default_factory=dict)  # finished runs, by engine
     runs_halted: dict[str, int] = field(default_factory=dict)  # stopped by a limit, by engine
@@ -1151,6 +1176,14 @@ def run_exam(
     # v3.1): a pair with an attempt on record is never run again, and every run is put on record before it starts.
     assert budget_usd is not None
     launch_sha = launch_sha or runner.launch_sha()  # `run_both` passes the commit it checked before either split
+    if "baseline" in engines:  # `run_both` pinned it already: the same commit, exported once
+        try:
+            report.app_commit = runner.pin_app()
+        except baseline.BaselineError as exc:
+            raise _stop(f"the app can't be exported: {exc}") from None
+        for v in sorted({v for planned in plans.values() for v in planned}):  # each input's matched settings
+            if (broken := runner.baseline_ready(variant_root(company_id, kind, v, root))) is not None:
+                raise _stop(broken)
     try:
         attempts = freeze.exam_attempts(freeze.records(freeze.ledger_file(company_id, True, root), root))
     except freeze.FreezeError as exc:
@@ -1187,6 +1220,8 @@ def run_exam(
             # checkout, no key, a refused key, the API out of reach) loses its pair for good. Each is checked at $0
             # before its started line is written.
             if (broken := runner.gate(launch_sha)) is not None:
+                raise _stop(broken)
+            if engine == "baseline" and (broken := runner.baseline_ready(roots[variant])) is not None:
                 raise _stop(broken)
             try:
                 freeze.start_run(company_id, run_id, tender_id=t, exam={**fields, "cap_usd": cap}, root=root)
@@ -1680,6 +1715,11 @@ def run_both(
         launch = gate.launch_sha()
         if (broken := gate.gate(launch)) is not None:
             raise _stop(broken)
+        if "baseline" in engines:  # one app commit for both splits, exported before anything is on record
+            try:
+                app_ref = gate.pin_app()
+            except baseline.BaselineError as exc:
+                raise _stop(f"the app can't be exported: {exc}") from None
     reports = [
         run_exam(
             company_id,
