@@ -7,7 +7,7 @@ import argparse
 import hashlib
 import json
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -281,6 +281,75 @@ def test_a_line_from_before_statuses_is_a_finished_run(data_root: Path) -> None:
     assert again["line_number"] == 1 and verify(ledger).lines == 1  # the same freeze: a no-op
     with pytest.raises(FreezeError, match="already frozen at ledger line 1"):
         freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", status="halted")
+
+
+def _exam_line(
+    run: str,
+    status: str | None,
+    at: str,
+    engine: str = "granskning",
+    variant: str = "granskning",
+    tender: str = "co-002/t-0002",
+) -> dict[str, Any]:
+    line: dict[str, Any] = {
+        "kind": "freeze",
+        "tender": tender,
+        "run_id": run,
+        "frozen_at": at,
+        "exam": {"engine": engine, "variant": variant},
+    }
+    if status is not None:
+        line["status"] = status
+    return line
+
+
+CUTOFF = datetime(2026, 12, 8, 12, tzinfo=UTC)
+T = "co-002/t-0002"
+
+
+def test_the_scored_prediction_is_the_last_finished_run_before_the_cut_off() -> None:
+    records = [
+        {"kind": "preregistration", "file": "scoring-plan-v3.md"},
+        _exam_line("r1", "finished", "2026-12-01T01:00:00+00:00"),
+        _exam_line("r2", "finished", "2026-12-01T02:00:00+00:00"),
+        _exam_line("r3", "finished", "2026-12-09T00:00:00+00:00"),  # after the cut-off: late, never scored
+        _exam_line("k1", "finished", "2026-12-01T05:00:00+00:00", engine="kalkyl", variant="kalkyl"),
+        _exam_line("b1", "finished", "2026-12-01T06:00:00+00:00", engine="baseline", variant="kalkyl"),
+        _exam_line("o1", "finished", "2026-12-01T07:00:00+00:00", tender="co-002/t-0003"),
+    ]
+    pick = freeze.scored_prediction
+    assert pick(records, T, "granskning", "granskning", CUTOFF)["run_id"] == "r2"
+    assert pick(records, T, "granskning", "granskning", datetime(2026, 12, 1, 2, tzinfo=UTC))["run_id"] == "r1"
+    assert pick(records, T, "kalkyl", "kalkyl", CUTOFF)["run_id"] == "k1"
+    assert pick(records, T, "baseline", "kalkyl", CUTOFF)["run_id"] == "b1"
+    assert pick(records, T, "baseline", "granskning", CUTOFF) is None  # an input it never ran on
+    with pytest.raises(FreezeError, match="time zone"):
+        pick(records, T, "granskning", "granskning", datetime(2026, 12, 8))
+
+
+def test_a_later_halted_or_failed_run_never_replaces_an_earlier_finished_one() -> None:
+    """A scorer that ignored the status would pick the last line, r3 or r4."""
+    records = [
+        _exam_line("r1", "finished", "2026-12-01T01:00:00+00:00"),
+        _exam_line("r2", "halted", "2026-12-01T02:00:00+00:00"),
+        _exam_line("r3", "failed", "2026-12-01T03:00:00+00:00"),
+        _exam_line("r4", "halted", "2026-12-01T04:00:00+00:00"),
+    ]
+    assert freeze.scored_prediction(records, T, "granskning", "granskning", CUTOFF)["run_id"] == "r1"
+    assert freeze.scored_prediction(records[1:], T, "granskning", "granskning", CUTOFF) is None  # no prediction
+
+
+def test_a_line_written_before_statuses_existed_counts_as_finished_and_only_then() -> None:
+    before = (freeze.STATUSES_SINCE - timedelta(seconds=1)).isoformat()
+    since = freeze.STATUSES_SINCE.isoformat()
+    assert freeze.STATUSES_SINCE == datetime(2026, 11, 28, 11, 57, 37, tzinfo=UTC)  # #43 merged as 4662705
+    old = [_exam_line("r1", None, before)]
+    assert freeze.scored_prediction(old, T, "granskning", "granskning", CUTOFF)["run_id"] == "r1"
+    # Without a status after statuses existed, the line came from an older harness: it is never the prediction, and
+    # a finished line before it stays the one scored.
+    late = [_exam_line("r1", "finished", before), _exam_line("r2", None, since)]
+    assert freeze.scored_prediction(late, T, "granskning", "granskning", CUTOFF)["run_id"] == "r1"
+    assert freeze.scored_prediction(late[1:], T, "granskning", "granskning", CUTOFF) is None
 
 
 def test_a_sealed_freeze_uses_the_sealed_ledger(data_root: Path) -> None:
