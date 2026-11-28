@@ -276,6 +276,7 @@ def test_a_budget_stop_leaves_the_rest_unread_and_the_calc_incomplete(tender: Pa
     tiny = KalkylConfig(**{**vars(load_kalkyl_config()), "stops": (Tier("S", 0.0001, 0.0001),)})
     summary = _run(fake_sdk(), kalkyl=tiny)
     assert not summary["complete"] and summary["chunk_status"] == {"not_run": 2}
+    assert summary["halted"] >= 1 and not summary["frozen"]  # stopped by a limit: the exam freezes it as halted
     assert summary["lines_not_handled"] == summary["quantity_lines"] + summary["scope_lines"]
     wb = openpyxl.load_workbook(tender / "kalkyl" / "kalkyl-test" / "kalkyl.xlsx")
     assert "OFULLSTÄNDIG" in wb["Kalkyl"]["A2"].value
@@ -293,7 +294,7 @@ def test_a_finished_run_and_its_rebuild_leave_no_writable_entry_in_either_folder
     runs = data_root_of(tender) / "co-001" / "runs"
     paid = _run(fake_sdk())
     out, record = tender / "kalkyl" / "kalkyl-test", runs / "kalkyl-test"
-    assert paid["frozen"] and paid["freeze_failures"] == 0
+    assert paid["frozen"] and paid["freeze_failures"] == 0 and paid["halted"] == 0
     assert (out / "summary.json").is_file() and (record / "events.jsonl").is_file()
     assert not _writable(out, record)
     assert json.loads((out / "summary.json").read_text())["frozen"] is True
@@ -382,6 +383,9 @@ def test_the_cli_runs_with_a_fake_sdk(tender: Path, monkeypatch: pytest.MonkeyPa
     out = capsys.readouterr().out
     assert "posts_priced: 4" in out and "sk-test-value" not in out
     assert (tender / "kalkyl" / "kalkyl-cli" / "kalkyl.xlsx").exists()
+    from anbud.evals import exam  # the exam reads how the run ended from these two lines
+
+    assert exam._KALKYL_FROZEN.search(out) and exam._KALKYL_HALTED.search(out).group(1) == "0"
 
 
 def test_good_answers_cover_the_synthetic_tender() -> None:

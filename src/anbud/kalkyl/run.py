@@ -272,6 +272,7 @@ def run_dev_tender(
         "stop": {**stop.summary(), "cost_usd_est_high": estimate["cost_usd_est_high"], "margin": kalkyl.margin},
         "persist_failures": client.persist_failures,
         "replay_misses": client.replay_misses,
+        "halted": client.halted,  # calls refused by a limit: the hard stop, the spend cap or a stop marker
         "output": str(out),
     }
     finished = result.complete and not client.replay_misses and not client.persist_failures and not cards.failed
