@@ -197,6 +197,10 @@ class TenderCoverage(_Model):
     search_only_core: list[str] = Field(
         default_factory=list, description="Of those, the AF or the contract: with any, the review is partial"
     )
+    lenses_lost: list[str] = Field(
+        default_factory=list, description="Lenses that ended on an error, after its retries: their flags are missing"
+    )
+    map_lost: bool = False  # the map failed, after its retries: the lenses ran without it
     verifier_selected: int = 0  # flags chosen for the verifier
     verifier_verified: int = 0  # of them, with a verdict
     not_verified_budget: int = 0  # of them, refused at the hard stop: with any, the report says verified N of M

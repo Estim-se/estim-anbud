@@ -93,6 +93,7 @@ SEARCH_ONLY_P1 = "Prioritet 1 granskad via sökning, inte i sin helhet"
 PARTIAL = "Partiell granskning: AF eller kontrakt via sökning"
 PARTIAL_BUDGET = "Partiell granskning: linser som inte kördes klart (budget)"
 VERIFIED = "Verifierade flaggor"
+LOST = "Partiell granskning: fel som kvarstod efter omförsök"
 STOP = "Kostnadsstopp (nivå efter storlek)"
 
 
@@ -111,6 +112,12 @@ def _budget_lenses(cov: TenderCoverage) -> str:
     """The lenses the hard stop refused, each with how far it got; empty when none was."""
     how = {"not_run": "inte körd", "stopped": "avbruten"}
     return ", ".join(f"{lc.lens_id} ({how[lc.budget]})" for lc in cov.lenses if lc.budget)
+
+
+def _lost(cov: TenderCoverage) -> str:
+    """The map and the lenses an error took, after the retries; empty when none was."""
+    parts = (["kartan (linserna kördes utan den)"] if cov.map_lost else []) + [f"{x} (fel)" for x in cov.lenses_lost]
+    return ", ".join(parts)
 
 
 def _verified(cov: TenderCoverage) -> str:
@@ -326,6 +333,11 @@ def render_html(report: Report) -> str:
             "kördes klart. Kostnadsstoppet nåddes innan de andra hann köras klart, så granskningen är partiell. "
             f"{_e(lenses)}</p>"
         )
+    if lost := _lost(cov):
+        parts.append(
+            f"<p><strong>{LOST}</strong>: {_e(lost)}. Ett fel kvarstod efter omförsöken, så granskningen är partiell: "
+            "det som de skulle ha hittat saknas.</p>"
+        )
     if cov.not_verified_budget:
         parts.append(
             f"<p><strong>{VERIFIED}</strong>: {_e(_verified(cov))}. Kostnadsstoppet nåddes innan resten hann "
@@ -522,6 +534,7 @@ def build_workbook(
         *([(PARTIAL, ", ".join(report.coverage.search_only_core))] if report.coverage.search_only_core else []),
         *([(PARTIAL_BUDGET, lenses)] if (lenses := _budget_lenses(report.coverage)) else []),
         *([(VERIFIED, _verified(report.coverage))] if report.coverage.not_verified_budget else []),
+        *([(LOST, lost)] if (lost := _lost(report.coverage)) else []),
         ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
         (STOP, report.stop or "Okänt"),
         ("Täckning", report.coverage.note),

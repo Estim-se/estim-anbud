@@ -148,8 +148,8 @@ class RunStore:
             return None
         try:
             record = json.loads(path.read_text())
-            if record.get("refused"):
-                return record  # a request the hard stop refused: no bodies, the record is the answer
+            if record.get("refused") or record.get("failed"):
+                return record  # a request the hard stop refused, or one that failed: no bodies, the record is it
             self.get_blob(record["request"])
             self.get_blob(record["response"])  # an entry is only good if both bodies are intact
         except (OSError, ValueError, KeyError, TypeError, StoreError):

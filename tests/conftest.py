@@ -54,6 +54,14 @@ def _never_the_real_data_root(tmp_path_factory: pytest.TempPathFactory) -> objec
     patch.undo()
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient error is still tried again, as many times as in a real run, but without the wait."""
+    from anbud import model_client
+
+    monkeypatch.setattr(model_client, "RETRY_DELAYS", tuple(0.0 for _ in model_client.RETRY_DELAYS))
+
+
 @pytest.fixture
 def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "data"

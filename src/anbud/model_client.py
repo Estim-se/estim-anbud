@@ -36,6 +36,11 @@ from anbud.store import RunStore, canonical
 from anbud.tools import ROLES, own_tools, shared_tools
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# A call that fails on one of these kinds is tried again after each delay in turn (seconds), on top of the SDK's own
+# retry: a 429, a 529 or 5xx (one mid-stream too, which the SDK never retries), a dropped connection, a timeout. Each
+# attempt reserves against the hard stop like any call, so a retry the stop refuses is skipped or halts as usual.
+TRANSIENT = frozenset({"rate_limited", "server", "connection", "timeout"})
+RETRY_DELAYS = (5.0, 20.0)
 KEYCHAIN_SERVICE = "estim-anbud"
 KEYCHAIN_ACCOUNT = "anbud-dev"
 
@@ -216,6 +221,8 @@ class ModelClient:
         self.degrade_roles = degrade_roles
         self.budget_refused = 0  # calls of `degrade_roles` the hard stop refused: the run goes on without them
         self.refuse_roles: set[str] = set()  # roles a paid run refuses from now on, as at the hard stop (`refuse_role`)
+        self.retries = 0  # attempts made again after a transient error (`TRANSIENT`); a replay counts the recorded ones
+        self.failures: dict[str, int] = {}  # calls that failed for good, after their retries, by error kind
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -279,8 +286,17 @@ class ModelClient:
             return None
         if record.get("refused"):  # the hard stop refused this request when it was first made
             if self.sdk is None:
+                self._count(None, record.get("retries", 0))
                 self._refuse(step, None, "the hard stop refused this call when it was made")  # a replay refuses it too
             return None  # a paid run tries it again
+        if record.get("failed"):  # the request failed when it was first made, its retries too
+            if self.sdk is None:  # a replay fails it the same way, so it loses the same work
+                self._count(record["failed"], record.get("retries", 0))
+                self._emit(step, "error", cost_usd=0.0)
+                raise ModelError(record["failed"], None, None, "this call failed when it was made")
+            return None
+        if self.sdk is None:
+            self._count(None, record.get("retries", 0))
         import anthropic
 
         message = anthropic.types.Message.model_validate_json(self.store.get_blob(record["response"]))
@@ -321,8 +337,29 @@ class ModelClient:
             with self._lock:
                 self.replay_misses += 1
             raise ReplayMiss("this request isn't in the step cache, and replay never calls a model")
+        for retried, delay in enumerate((*RETRY_DELAYS, None)):
+            try:
+                return self._send(role, step, params, key, max_tokens, retried)
+            except ModelError as error:
+                if error.kind not in TRANSIENT or delay is None:
+                    self._count(error.kind, 0)
+                    self._record_failure(key, error, retried)
+                    raise
+            self._count(None, 1)
+            time.sleep(delay)
+            if self.store is not None and self.store.stop_requested(self.run_id):
+                self._halt()
+                raise RunStopped(f"run {self.run_id} has a stop marker")
+        raise AssertionError("unreachable")
+
+    def _send(
+        self, role: str, step: str, params: dict[str, Any], key: str | None, max_tokens: int, retried: int = 0
+    ) -> CallResult:
+        """One attempt: the token count, the reservation, the stream, the settle, the step record and the event.
+        `retried`: the attempts before this one, kept in the step record so a replay counts them too."""
+        model = params["model"]
         if role in self.refuse_roles and role in self.degrade_roles:
-            self._refuse(step, key, f"{role} calls stopped at the hard stop")
+            self._refuse(step, key, f"{role} calls stopped at the hard stop", retried)
         price = self.config.price_for(model)
         count_params = {k: v for k, v in params.items() if k != "max_tokens"}
         try:
@@ -333,7 +370,7 @@ class ModelClient:
             reserved = self.budget.reserve(price.max_cost(input_tokens, max_tokens))
         except BudgetExceeded as exc:
             if role in self.degrade_roles:
-                self._refuse(step, key, str(exc))
+                self._refuse(step, key, str(exc), retried)
             self._halt()
             raise
         start = self.clock()
@@ -364,6 +401,8 @@ class ModelClient:
                 }
                 # Only a finished stream reaches here, so only complete responses are cached.
                 record = {"request": blobs["request_blob"], "response": blobs["blob"], "model": model}
+                if retried:
+                    record["retries"] = retried
                 self.store.step_put(key, {**record, "request_id": request_id, "cost_usd": cost})
             except OSError:  # the paid response still goes back to the caller, and the cost into the event
                 self.persist_failures += 1
@@ -382,6 +421,23 @@ class ModelClient:
         )
         return CallResult(message, model, cost, duration, request_id)
 
+    def _count(self, failed: str | None, retries: int) -> None:
+        with self._lock:
+            self.retries += retries
+            if failed is not None:
+                self.failures[failed] = self.failures.get(failed, 0) + 1
+
+    def _record_failure(self, key: str | None, error: ModelError, retried: int) -> None:
+        """A call that failed for good, recorded under its step key so a $0 rebuild fails it too and loses the same
+        work; a paid resume tries it again. Not the spend cap: it halts the run, and a halted run is resumed, never
+        rebuilt."""
+        if self.store is None or key is None or error.kind == "spend_cap":
+            return
+        try:
+            self.store.step_put(key, {"failed": error.kind, **({"retries": retried} if retried else {})})
+        except OSError:
+            self.persist_failures += 1
+
     def _failed(self, exc: Exception) -> ModelError:
         """The mapped error; the workspace's spend cap halts the run like its own hard stop."""
         error = self._mapped(exc)
@@ -399,14 +455,14 @@ class ModelClient:
         with self._lock:
             self.refuse_roles.add(role)
 
-    def _refuse(self, step: str, key: str | None, why: str) -> NoReturn:
+    def _refuse(self, step: str, key: str | None, why: str, retried: int = 0) -> NoReturn:
         """A call of a degrade role refused at the hard stop: counted, logged and recorded under its step key, so a
         rebuild refuses the same request, then raised. Never a halt: the caller goes on without it."""
         with self._lock:
             self.budget_refused += 1
         if self.store is not None and key is not None:
             try:
-                self.store.step_put(key, {"refused": "budget"})
+                self.store.step_put(key, {"refused": "budget", **({"retries": retried} if retried else {})})
             except OSError:
                 self.persist_failures += 1
         self._emit(step, "error", cost_usd=0.0)
