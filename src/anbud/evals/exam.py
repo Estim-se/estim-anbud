@@ -29,9 +29,9 @@ Per tender of the split status asked for:
    - **The budget** covers both splits and every pass: a pass counts what earlier ones charged, from the sealed
      ledger, refuses to start when the runs left can't fit, and starts no run that could take the spend past it.
    - **Each run is frozen** into the sealed ledger with the variant it used, its settings, what it was charged,
-     Granskning's `budget` section (what the hard stop cost it), whether it came after the tender's deadline and how
-     it ended (`EngineRun.status`): finished, halted by a limit, or failed. Only a finished run can be a scored
-     prediction.
+     for Granskning what the hard stop and errors cost it (`degraded_summary`), whether it came after the tender's
+     deadline and how it ended (`EngineRun.status`): finished, halted by a limit, or failed. Only a finished run can
+     be a scored prediction.
 
 For prospective tenders it prints the nearest deadline of the open ones, in days, and warns about every tender whose
 deadline has passed: a run after the deadline isn't a prospective prediction any more.
@@ -352,7 +352,7 @@ class EngineRun:
     settings: dict[str, Any] | None = None
     halted: bool = False  # stopped by a limit: its hard stop, the spend cap, a stop marker or the timeout
     budget: dict[str, Any] | None = None  # Granskning: what the hard stop cost the run (its summary's `budget`)
-    lost: dict[str, Any] | None = None  # Granskning: work an error cost it (its summary's `degraded`), when given
+    lost: dict[str, Any] | None = None  # Granskning: what errors cost it after their retries (its `degraded`)
 
     @property
     def status(self) -> str:
@@ -364,20 +364,53 @@ class EngineRun:
         return is_degraded(self.budget, self.lost)
 
 
+def _section(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def is_degraded(budget: Any, lost: Any) -> bool:
     """Whether a run finished with less than a full review: the hard stop refused calls, kept a lens from running or
-    finishing, or left flags unverified (`budget`), or an error cost it a lens or the map (`lost`)."""
-    b = budget if isinstance(budget, dict) else {}
-    verifier = b.get("verifier") if isinstance(b.get("verifier"), dict) else {}
-    lost_any = isinstance(lost, dict) and any(bool(v) for v in lost.values())
+    finishing, or left flags unverified (`budget`), or an error cost it a lens, the map or any call for good after its
+    retries (`lost`). A retry that recovered costs nothing."""
+    b, d = _section(budget), _section(lost)
     return bool(
         b.get("refused_calls")
         or b.get("partial")
         or b.get("lenses_not_run")
         or b.get("lenses_stopped")
-        or verifier.get("not_verified_budget")
-        or lost_any
+        or _section(b.get("verifier")).get("not_verified_budget")
+        or d.get("lenses_lost")
+        or d.get("map_lost")
+        or d.get("failed_calls")
     )
+
+
+def _n(value: Any) -> int:
+    return len(value) if isinstance(value, list | tuple) else int(value) if isinstance(value, int | float) else 0
+
+
+def degraded_summary(budget: Any, lost: Any) -> dict[str, Any] | None:
+    """The freeze line's compact account of what a Granskning run lost (`is_degraded`), in counts: the run record it
+    hashes keeps both sections whole. None when the run's summary has neither."""
+    if budget is None and lost is None:
+        return None
+    b, d = _section(budget), _section(lost)
+    verifier = _section(b.get("verifier"))
+    return {
+        "any": is_degraded(budget, lost),
+        "partial": bool(b.get("partial")),
+        "refused_calls": _n(b.get("refused_calls")),
+        "lenses_not_run": _n(b.get("lenses_not_run")),
+        "lenses_stopped": _n(b.get("lenses_stopped")),
+        "lenses_lost": _n(d.get("lenses_lost")),
+        "map_lost": bool(d.get("map_lost")),
+        "verifier_selected": _n(verifier.get("selected")),
+        "verifier_verified": _n(verifier.get("verified")),
+        "not_verified_budget": _n(verifier.get("not_verified_budget")),
+        "retries": _n(d.get("retries")),
+        "failed_calls": _n(d.get("failed_calls")),
+        "failures": {str(k): _n(v) for k, v in sorted(_section(d.get("failures")).items())},
+    }
 
 
 def _summary_sections(record_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -998,8 +1031,7 @@ def run_exam(
                     "settings": one.settings,
                     "plan": report.plan,
                     "charged_usd": round(charged, 4),
-                    **({"budget": one.budget} if one.budget is not None else {}),
-                    **({"degraded": one.lost} if one.lost is not None else {}),
+                    **({"degraded": less} if (less := degraded_summary(one.budget, one.lost)) else {}),
                 }
             }
             try:
@@ -1175,7 +1207,7 @@ def paid_summary(company_id: str, root: Path | None = None) -> dict[str, Any]:
         status = freeze.status_of(line) if line is not None else NEVER_FROZEN
         ended.setdefault(status, Counter())[engine] += 1
         exam = (line or {}).get("exam") or {}
-        degraded += status == freeze.FINISHED and is_degraded(exam.get("budget"), exam.get("degraded"))
+        degraded += status == freeze.FINISHED and bool(_section(exam.get("degraded")).get("any"))
     return {
         "tenders": len({tender for tender, _, _ in attempts}),
         "attempts": sum(len(found) for found in attempts.values()),

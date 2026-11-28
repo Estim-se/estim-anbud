@@ -197,10 +197,10 @@ FULL = {**DEGRADED, "refused_calls": 0, "lenses_not_run": [], "lenses_stopped": 
         "verifier": {"selected": 12, "verified": 12, "not_verified_budget": 0}}  # fmt: skip
 
 
-def test_a_degraded_run_is_frozen_finished_with_its_budget_and_one_is_counted_only_over_both_splits(
+def test_a_degraded_run_is_frozen_finished_with_its_summary_and_one_is_counted_only_over_both_splits(
     data_root: Path,
 ) -> None:
-    """Mutations: dropping the `budget` field from the freeze line's `exam`, or showing the split's degraded count
+    """Mutations: dropping the `degraded` field from the freeze line's `exam`, or showing the split's degraded count
     from 1 (`>= 1`), makes it fail."""
     sealed_store(data_root)
     register(data_root)
@@ -209,8 +209,10 @@ def test_a_degraded_run_is_frozen_finished_with_its_budget_and_one_is_counted_on
     report = _pass(FakeEngines(COSTS, budgets=budgets), 200.0, say=lines.append)
     reviews = {r["tender"]: r for r in _freezes() if r["exam"]["engine"] == "granskning"}
     assert reviews["co-002/t-0002"]["status"] == "finished"
-    assert reviews["co-002/t-0002"]["exam"]["budget"] == DEGRADED  # partial and the verifier counts on the line
-    assert reviews["co-002/t-0003"]["exam"]["budget"] == FULL
+    less = reviews["co-002/t-0002"]["exam"]["degraded"]  # partial and the verifier counts on the line, in counts
+    assert less["any"] and less["partial"] and less["lenses_not_run"] == less["lenses_stopped"] == 1
+    assert (less["verifier_selected"], less["verifier_verified"], less["not_verified_budget"]) == (12, 9, 3)
+    assert reviews["co-002/t-0003"]["exam"]["degraded"]["any"] is False
     assert report.runs_degraded == {"granskning": 1}
     runs = next(line for line in lines if line.startswith("runs: "))
     assert "less than a full review" not in runs  # one degraded run: counted only in the total over both splits
@@ -242,10 +244,31 @@ def test_granskning_s_reported_spend_is_charged_whatever_its_exit(
     vroot = data_root / "vroot"
     record = paths.company_dir("co-002", vroot) / "runs" / "r1"
     record.mkdir(parents=True)
-    (record / "granskning.json").write_text(json.dumps({"budget": DEGRADED}))
+    (record / "granskning.json").write_text(json.dumps({"budget": DEGRADED, "degraded": LOST}))
     engines = exam.Engines(data_root / "logs", data_root / "app", "main", data_root)
     done = subprocess.CompletedProcess(["anbud"], code, stdout, "")
     engines._anbud = lambda *_: done  # type: ignore[method-assign]
     one = engines.granskning(vroot, "co-002", "t-0002", "r1")
     assert one.cost_usd == charged and one.ok is (code == 0)
-    assert one.budget == DEGRADED and one.degraded
+    assert one.budget == DEGRADED and one.lost == LOST and one.degraded
+
+
+LOST = {"lenses_lost": ["l3"], "map_lost": False, "retries": 2, "failed_calls": 1, "failures": {"server": 1}}
+
+
+@pytest.mark.parametrize(
+    ("budget", "lost", "degraded"),
+    [
+        (FULL, {**LOST, "lenses_lost": [], "failed_calls": 0, "failures": {}}, False),  # retries that recovered
+        (FULL, {**LOST, "failed_calls": 0, "failures": {}}, True),  # a lens lost to an error
+        (FULL, {**LOST, "lenses_lost": [], "map_lost": True, "failed_calls": 0, "failures": {}}, True),
+        (FULL, {**LOST, "lenses_lost": []}, True),  # a call lost for good: a page card's tile, a verdict
+        (DEGRADED, None, True),
+        (None, None, False),
+    ],
+)
+def test_a_run_is_degraded_by_lost_work_never_by_a_retry_that_recovered(budget, lost, degraded) -> None:  # type: ignore[no-untyped-def]
+    """Mutation: adding `or d.get("retries")` to `is_degraded` makes the first case fail."""
+    assert exam.is_degraded(budget, lost) is degraded
+    summary = exam.degraded_summary(budget, lost)
+    assert summary is None if budget is None and lost is None else summary["any"] is degraded
