@@ -53,6 +53,9 @@ READ_STEP = "kalkyl.extract."  # every R2 reading call's step starts so (`extrac
 CHARS_PER_TOKEN = 3.0  # Swedish text with block markup; conservative, so the estimate errs high
 OUTPUT_TOKENS_PER_CHUNK = (3000, 8000)  # records plus adaptive thinking at medium effort, low and high
 CARD_USD_PER_TILE = 0.03  # an R1 card that has to be read (plan section 9.1: 10 tiles about $0.17), rounded up
+# What every finished run writes into its outputs folder (`run`); cards_masking.json only when a card was masked. An
+# exam's sealed freeze refuses a finished run without one of them (`exam.EngineRun.required`).
+REQUIRED_OUTPUTS = ("kalkyl.xlsx", "posts.json", "result.json", SELECTION_FILE, "summary.json")
 
 
 class KalkylError(RuntimeError):

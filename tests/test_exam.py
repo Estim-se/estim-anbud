@@ -418,10 +418,13 @@ def test_a_run_that_leaves_no_folder_is_counted_and_not_frozen(data_root: Path) 
         ("granskning", 0, {}, "finished"),
         ("granskning", cli_command.RUN_HALTED, {}, "halted"),
         ("granskning", 1, {}, "failed"),
+        ("granskning", cli_command.FINISHED_NOT_FROZEN, {}, "finished"),  # its own freeze failed; the sealed one won't
         ("kalkyl", 0, {"frozen": True, "halted": 0}, "finished"),
         ("kalkyl", 0, {"frozen": False, "halted": 2}, "halted"),  # a limit stopped it: its calc is incomplete
         ("kalkyl", 0, {"frozen": False, "halted": 0}, "failed"),
         ("kalkyl", 3, {}, "failed"),
+        ("kalkyl", cli_command.FINISHED_NOT_FROZEN, {"frozen": True, "halted": 0}, "finished"),
+        ("kalkyl", cli_command.FINISHED_NOT_FROZEN, {"frozen": False, "halted": 0}, "failed"),
     ],
 )
 def test_each_engine_s_exit_says_whether_it_finished_halted_or_failed(
@@ -432,6 +435,7 @@ def test_each_engine_s_exit_says_whether_it_finished_halted_or_failed(
     monkeypatch.setattr(runner, "_anbud", lambda vroot, args, log: subprocess.CompletedProcess(args, code, stdout, ""))
     one = getattr(runner, engine)(tmp_path, "co-002", "t-0002", "r1")
     assert one.status == status and exam.RUN_HALTED == cli_command.RUN_HALTED
+    assert exam.FINISHED_NOT_FROZEN == cli_command.FINISHED_NOT_FROZEN
     assert (
         set(exam.BASELINE_HALTS) == {"hard_stop", "stopped", "timeout"} and "hard_stop" in baseline.EXIT_CODES.values()
     )

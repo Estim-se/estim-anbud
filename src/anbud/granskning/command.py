@@ -29,6 +29,10 @@ RUN_HALTED = 5
 # nothing was reviewed. Never frozen; resume the run id once the cause is fixed. `anbud kalkyl` exits with it too when
 # calls failed and no reading call was answered.
 MODEL_UNREACHABLE = 6
+# The run finished, but its own freeze didn't: no ledger line, or outputs that couldn't all be made read-only. The work
+# is complete: the operator can finish the freeze by hand (`anbud freeze run`), and an exam's sealed freeze hashes and
+# locks it itself, so the exam counts it as finished (`exam.Engines`). `anbud kalkyl` exits with it too.
+FINISHED_NOT_FROZEN = 7
 LENS_STEP = "lens:"  # every lens call's step starts so (`loop.run_lens`); the checks' steps don't
 
 
@@ -310,7 +314,7 @@ def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_d
     """Hash a finished paid dev run into the freeze ledger, so it is provably blind before any answer arrives. A
     replay, a dry run or a fixture freezes nothing, and run_command only calls this for a run that finished: a run
     with failed store writes, a replay miss or a stop or cap exits non-zero before it. A run that can't be frozen
-    exits non-zero."""
+    exits FINISHED_NOT_FROZEN."""
     if kind != "dev" or args.dry_run or (args.replay and getattr(args, "base_run", None) is None):
         return 0
     from anbud.evals.freeze import FreezeError, freeze_run, read_only_warning
@@ -321,19 +325,19 @@ def freeze_after_run(args: argparse.Namespace, kind: str, run_id: str, outputs_d
         )
     except FreezeError as exc:
         print(f"anbud run: not frozen: {exc}", file=sys.stderr)
-        return 1
+        return FINISHED_NOT_FROZEN
     except Exception as exc:  # the message may hold a path, so only the type is shown
         print(f"anbud run: not frozen: {type(exc).__name__}", file=sys.stderr)
-        return 1
+        return FINISHED_NOT_FROZEN
     print(f"frozen: ledger line {frozen['line_number']}, {frozen['line_sha256'][:12]}")
     if (warning := read_only_warning(frozen)) is not None:
         print(f"anbud run: {warning}", file=sys.stderr)
-        return 1
+        return FINISHED_NOT_FROZEN
     failed = freeze_tree(outputs_dir) + freeze_tree(record_dir)  # the folders too, so nothing can be added
     if failed:
         reasons = ", ".join(sorted(set(failed)))
         print(f"anbud run: frozen, but {len(failed)} entries could not be made read-only ({reasons})", file=sys.stderr)
-        return 1
+        return FINISHED_NOT_FROZEN
     return 0
 
 

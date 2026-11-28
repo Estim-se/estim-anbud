@@ -157,6 +157,18 @@ class PipelineResult:
     checks: ChecksResult | None = None
 
 
+# What every finished run writes into its outputs folder, by posix path inside it (`run`, `write_reports`). An exam's
+# sealed freeze refuses a finished run without one of them (`exam.EngineRun.required`).
+REQUIRED_OUTPUTS = (
+    "flags.json",
+    "inputs.json",
+    "items.json",
+    "kronor.json",
+    "report/granskning.html",
+    "report/granskning.xlsx",
+)
+
+
 def _write(store: RunStore, path: Path, value: Any) -> None:
     store.write_file(path, json.dumps(value, ensure_ascii=False, indent=1).encode() + b"\n")
 

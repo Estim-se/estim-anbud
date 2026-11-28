@@ -477,7 +477,7 @@ def test_a_rebuild_needs_a_stored_base_run_and_its_own_run_id(tender: Path) -> N
         _run(None, base_run="kalkyl-test")
 
 
-def test_the_cli_exits_1_when_a_finished_run_cant_be_made_read_only(
+def test_the_cli_exits_7_when_a_finished_run_cant_be_made_read_only(
     tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _ledger(sh.DEV)
@@ -488,7 +488,7 @@ def test_the_cli_exits_1_when_a_finished_run_cant_be_made_read_only(
     monkeypatch.setattr(model_client, "keychain_key", lambda **_: "")
     monkeypatch.setattr(frozen, "_chmod", lambda path, mode: ["PermissionError"])
     args = ["kalkyl", "co-001", "t-0001", "--catalog", "synthetic", "--replay", "--base-run", "kalkyl-base"]
-    assert cli.main([*args, "--run-id", "kalkyl-r1"]) == 1
+    assert cli.main([*args, "--run-id", "kalkyl-r1"]) == cli.FINISHED_NOT_FROZEN  # finished; only the freeze failed
     assert "could not be made read-only" in capsys.readouterr().err
 
 
