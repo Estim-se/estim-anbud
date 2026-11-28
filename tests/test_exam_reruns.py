@@ -162,15 +162,15 @@ ONE_LEFT = {"t-0003": "manifest", "t-0004": "manifest"}  # of three prospective 
 
 
 def test_the_budget_refusal_names_no_figure_for_the_one_prepared_tender(data_root: Path) -> None:
-    """Audit exam #3. Mutation: adding `({report.estimate_total:.2f})` to `_refusal`'s message makes it fail."""
+    """Audit exam #3, and test_exam_counts_both: the refusal names no figure but the budget. Mutation: adding
+    `+ f" (${report.estimate_total:.2f})"` to the refusal where it's raised makes it fail."""
     sealed_store(data_root)
     register(data_root)
     with pytest.raises(exam.ExamError) as info:
         _pass(FakeEngines(COSTS, stops=ONE_LEFT), 0.5)
     message = str(info.value)
     assert "above the budget ($0.50)" in message
-    assert not re.search(r"\$\d", message.split("above the budget")[0]), message
-    assert "both splits" not in message  # the total covers one tender too, so it isn't shown
+    assert re.findall(r"\$\d[\d,.]*", message) == ["$0.50"], message
 
 
 def test_a_paid_pass_with_one_prepared_tender_prints_no_figure_of_its_runs(data_root: Path) -> None:

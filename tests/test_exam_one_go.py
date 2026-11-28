@@ -129,11 +129,12 @@ def test_the_budget_check_counts_the_other_split_s_runs_left_before_anything_sta
 def test_a_paid_split_alone_is_refused_and_the_exam_s_exit_says_nothing_of_its_runs(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Mutation: `if False:` for the CLI's refusal of a paid split alone makes it fail."""
+    """Mutation: `if False:` for the CLI's refusal of a split alone makes it fail (and test_exam_counts_both's
+    test of a split alone at $0)."""
     monkeypatch.setattr(cli, "held_out_refusal", lambda: None)
     for kind in ("prospective", "heldout"):
         assert cli.main(["eval", kind, "co-002", "--paid", "--budget", "10"]) == cli.REFUSED
-        assert "a paid exam runs both splits in one invocation" in capsys.readouterr().err
+        assert "the exam runs both splits in one invocation" in capsys.readouterr().err
     kept = exam.Report(kind="prospective", prep_stops={"security_marking": 1}, runs_failed={"kalkyl": 2})
     retried = exam.Report(kind="heldout", prep_stops={"read_error": 1})
     monkeypatch.setattr(exam, "run_both", lambda *a, **kw: [kept, exam.Report(kind="heldout")])
