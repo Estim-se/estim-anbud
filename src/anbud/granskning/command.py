@@ -391,9 +391,17 @@ def dry_run(
                 f"{len(plan.boundary_dropped)} lines past the cap"
             )
         else:
+            # P1 fits on its own, but with the other documents' outlines and the other trades' lines it may not
+            demoted = (
+                f"; yet {len(plan.p1_search_only)} priority-1 documents become search-only, "
+                f"{len(plan.core_search_only)} of them the core's, to make room for the other documents' outlines and "
+                "the other trades' lines"
+                if plan.p1_search_only
+                else ""
+            )
             print(
-                f"  priority 1 fits ({plan.p0 + plan.p1 + plan.cards} tokens with its cards at most); planned prefix "
-                f"{plan.total} tokens before the cards, {len(plan.search_only)} documents search-only, "
+                f"  priority 1 fits ({plan.p0 + plan.p1 + plan.cards} tokens with its cards at most){demoted}; planned "
+                f"prefix {plan.total} tokens before the cards, {len(plan.search_only)} documents search-only, "
                 f"{len(plan.boundary_dropped)} lines past the cap"
             )
     print(
