@@ -67,7 +67,9 @@ def _eval(args: argparse.Namespace) -> int:
     except Exception as exc:  # the message may hold a path or a name, so only the type is shown
         print(f"anbud eval {args.kind}: stopped: {type(exc).__name__}", file=sys.stderr)
         return REFUSED
-    print(f"estimate id: {exam.estimate_digest(report)}")
+    digest = exam.estimate_digest(report)
+    if digest is not None:
+        print(f"estimate id: {digest}")
     failed = sum(report.runs_failed.values()) + report.prep_failed
     return 1 if failed else 0
 
