@@ -21,9 +21,9 @@ from anbud import config as config_module
 from anbud.evals import split_heldout as sh
 from anbud.granskning import provenance
 from anbud.granskning.budget import (
-    DOC_CHARS,
     SEARCH_ONLY_CORE,
     SEARCH_ONLY_P1,
+    TAG_CHARS,
     PrefixBudget,
     PrefixPlan,
     _card_tokens_each,
@@ -220,7 +220,9 @@ def test_the_card_bound_counts_only_cards_that_can_reach_priority_1(tmp_path: Pa
     corpus, _ = load_selected(prep)
     tile = next(iter(corpus.tiles.values()))
     plan = plan_prefix(corpus, [], BUDGET, corpus.tiles.values())
-    assert priorities(corpus)[DOC_RIT] == 3 and plan.cards == _card_tokens_each(tile) + int(DOC_CHARS / 1.6)
+    assert priorities(corpus)[DOC_RIT] == 3 and plan.cards == _card_tokens_each(tile) + int(
+        (TAG_CHARS + len(DOC_RIT) + len("Underlag 7.pdf")) / 1.6
+    )
     assert plan.summary()["p1_card_tokens_max"] == plan.cards
     assert "p1_card_tokens_max" not in plan_prefix(corpus, [], BUDGET).summary()  # a plan after the cards: unchanged
 
@@ -320,11 +322,36 @@ def _rename(prep: Path, names: dict[str, str]) -> None:
 
 
 TB_EL = "E-63-1-002 Teknisk beskrivning el.pdf"
+# One more paragraph each for the electrical description and the AF (synthetic). Without them, demoting either saves
+# less than its search-only marks and the drawing's search-only form cost: priority 1 couldn't be over the budget with
+# the AF in full, and the plan made before the cards couldn't demote the AF without stopping.
+EL_TEXT = (
+    "Belysning i allmänna utrymmen styrs med närvarogivare och ljussensor, med en eftertid som kan ställas per zon. "
+    "Armaturerna är LED och märks med sin beteckning från elplanen. Nödbelysning och vägledande markeringar utförs i "
+    "samtliga trapphus och i garaget, provas före överlämnandet och redovisas med provningsprotokoll. Uttag för "
+    "städning placeras vid varje trapplan och i varje förråd."
+)
+AF_TEXT = (
+    "Byggmöten hålls varannan vecka på arbetsplatsen. Entreprenören deltar med sin arbetsledare och redovisar tidplan, "
+    "bemanning och avvikelser. Ändrings- och tilläggsarbeten anmäls skriftligt innan de påbörjas och förs in i en "
+    "gemensam förteckning som stäms av på varje möte."
+)
+
+
+def _add_paragraph(prep: Path, doc_id: str, block_id: str, text: str, page: int) -> None:
+    """A paragraph after the document's last block."""
+    blocks = (prep / "blocks.jsonl").read_text().splitlines()
+    last = max(n for n, line in enumerate(blocks) if json.loads(line)["doc_id"] == doc_id)
+    added = {"id": block_id, "doc_id": doc_id, "kind": "paragraph", "text": text, "page": page, "line": 2}
+    blocks.insert(last + 1, json.dumps(added, ensure_ascii=False))
+    (prep / "blocks.jsonl").write_text("\n".join(blocks) + "\n")
 
 
 def _p1_tender(tender: Path) -> PrefixPlan:
     """The synthetic tender with its electrical description as priority 1 beside the AF, and the drawing numbered."""
     _rename(tender / "prep", {DOC_EL: TB_EL, DOC_RIT: "E-63-1-001 Elplan.pdf"})
+    _add_paragraph(tender / "prep", DOC_EL, "bbbbbb-000005", EL_TEXT, 2)
+    _add_paragraph(tender / "prep", DOC_AF, "aaaaaa-000005", AF_TEXT, 2)
     corpus, _ = load_selected(tender / "prep")
     assert priorities(corpus) == {DOC_AF: 1, DOC_EL: 1, DOC_RIT: 2}
     return plan_prefix(corpus, load_calc(tender / "calc"), BUDGET, corpus.tiles.values())
@@ -333,6 +360,8 @@ def _p1_tender(tender: Path) -> PrefixPlan:
 def test_a_priority_1_over_the_budget_is_reviewed_through_search_instead_of_stopping(
     tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The priority-1 rung end to end. Mutation: `note = ""` in `lens_message`, and the lenses aren't told which
+    priority-1 documents are search-only."""
     full = _p1_tender(tender)
     _budget(monkeypatch, full.p0 + full.p1 - 1)  # the AF fits, all of priority 1 doesn't
     sdk = ScriptedSDK(pipeline_script)
