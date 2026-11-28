@@ -258,7 +258,11 @@ def plan_prefix(
         core=core,
         core_cards=core_cards,
     )
-    least = {d: min(sizes[d], outline.get(d, 0)) for d in sizes}
+    # The least a document comes to: its outline, when that is smaller than its text. A document with cards still to
+    # come is counted at its outline whatever its text is now: the cards add text, never an outline line, so once they
+    # are in its least can rise to its outline (a bookmarked scan whose only text is a page stamp), never above it.
+    tiled = {t.doc_id for t in cards_for}
+    least = {d: outline.get(d, 0) if d in tiled else min(sizes[d], outline.get(d, 0)) for d in sizes}
     # A document whose only text is still to come from its cards has no block yet: once they are in, it is in the
     # prefix, at least as its <doc> lines and outline. Counted now, so the cards can't move the floor.
     pending = {t.doc_id for t in cards_for if t.doc_id not in sizes and t.doc_id not in corpus.excluded}
