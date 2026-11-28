@@ -310,7 +310,7 @@ def test_the_stop_list_comes_from_merge_stop_errors() -> None:
 
 def test_checks_skip_after_a_stop_error_or_with_only_selected_lenses(data_root: Path) -> None:
     for result, reason in [
-        (_granskning(lens_error="BudgetExceeded"), "BudgetExceeded"),
+        (_granskning(lens_error="BudgetExceeded"), "kostnadsstoppet nåddes under linserna"),  # the rest to verify
         (_granskning(error="PrefixDrift"), "PrefixDrift"),
     ]:
         checks, run_dir, sdk = _checks(data_root, result)

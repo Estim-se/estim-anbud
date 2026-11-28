@@ -80,6 +80,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     from anbud.granskning.lenses import load_lenses
     from anbud.granskning.pipeline import run_pipeline
     from anbud.granskning.prefix import estimate_tokens, system_blocks
+    from anbud.granskning.run import DEGRADE_ROLES
     from anbud.granskning.settings import load_settings
     from anbud.model_client import Budget, KeyMissing, ModelClient, keychain_key, make_sdk_client
     from anbud.prep.tender import IntakeStop
@@ -175,7 +176,16 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     # The dry run's tier is the most the run may spend; the prefix the map's first call measures can only lower it.
     ceiling = granskning_stop(config.budgets, estimate_tokens(system_blocks(corpus, calc)), ESTIMATE)
     budget = Budget(ceiling.usd)
-    client = ModelClient(config, sdk, budget, run_id=run_id, company_id=args.company_id, store=store, salt=salt)
+    client = ModelClient(
+        config,
+        sdk,
+        budget,
+        run_id=run_id,
+        company_id=args.company_id,
+        store=store,
+        salt=salt,
+        degrade_roles=DEGRADE_ROLES,
+    )
     counts = f"{len(corpus.blocks)} blocks, {len(corpus.tiles)} tiles, {len(calc)} calc posts, {len(lenses)} lenses"
     print(f"run {run_id}: {counts}")
     try:
@@ -215,7 +225,17 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
     verdicts: dict[str, int] = {}
     for outcome in result.verifier.outcomes.values():
         verdicts[outcome.status] = verdicts.get(outcome.status, 0) + 1
-    print(f"  verifier: {len(result.verifier.outcomes)} flags {verdicts}, ${result.verifier.cost_usd:.2f}")
+    cov = result.finished.report.coverage
+    print(
+        f"  verifier: {len(result.verifier.outcomes)} flags {verdicts}, verified {cov.verifier_verified} of "
+        f"{cov.verifier_selected}, ${result.verifier.cost_usd:.2f}"
+    )
+    if client.budget_refused:
+        skipped = [lc.lens_id for lc in cov.lenses if lc.budget]
+        print(
+            f"  hard stop reached: {client.budget_refused} calls refused; lenses not finished: "
+            f"{', '.join(skipped) or 'none'}; {cov.not_verified_budget} flags not verified (budget)"
+        )
     for name, check in (result.checks.summary() if result.checks else {}).items():
         print(f"  {name}: {check['status']}, {check['flags']} flags, {check['turns']} turns, ${check['cost_usd']:.2f}")
     ranked = result.finished.ranked

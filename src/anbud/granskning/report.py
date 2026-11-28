@@ -41,6 +41,7 @@ VERIFICATION = {
     "verified": "Verifierad",
     "sample": "Stickprov under gränsen",
     "failed": "Verifieringen gav inget svar",
+    "budget": "Ej verifierad (budget)",
     "not_selected": "Ej verifierad",
 }
 PLACEMENTS = {
@@ -90,6 +91,8 @@ OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
 SEARCH_ONLY = "Endast sökbara (prefixbudget)"
 SEARCH_ONLY_P1 = "Prioritet 1 granskad via sökning, inte i sin helhet"
 PARTIAL = "Partiell granskning: AF eller kontrakt via sökning"
+PARTIAL_BUDGET = "Partiell granskning: linser som inte kördes klart (budget)"
+VERIFIED = "Verifierade flaggor"
 STOP = "Kostnadsstopp (nivå efter storlek)"
 
 
@@ -102,6 +105,16 @@ def _where(block: Block, names: dict[str, str]) -> str:
     if block.row is not None:
         parts.append(f"rad {block.row}")
     return ", ".join(parts)
+
+
+def _budget_lenses(cov: TenderCoverage) -> str:
+    """The lenses the hard stop refused, each with how far it got; empty when none was."""
+    how = {"not_run": "inte körd", "stopped": "avbruten"}
+    return ", ".join(f"{lc.lens_id} ({how[lc.budget]})" for lc in cov.lenses if lc.budget)
+
+
+def _verified(cov: TenderCoverage) -> str:
+    return f"{cov.verifier_verified} av {cov.verifier_selected}, {cov.not_verified_budget} ej verifierade (budget)"
 
 
 def build_report(
@@ -306,6 +319,18 @@ def render_html(report: Report) -> str:
             "i sin helhet i prefixet, så hela granskningen är partiell: villkor som bara står i dem kan ha missats. "
             f"{_e(', '.join(cov.search_only_core))}</p>"
         )
+    if lenses := _budget_lenses(cov):
+        ran = sum(not lc.budget for lc in cov.lenses)
+        parts.append(
+            f"<p><strong>{PARTIAL_BUDGET}</strong>: {ran} av {len(cov.lenses)} linser "
+            "kördes klart. Kostnadsstoppet nåddes innan de andra hann köras klart, så granskningen är partiell. "
+            f"{_e(lenses)}</p>"
+        )
+    if cov.not_verified_budget:
+        parts.append(
+            f"<p><strong>{VERIFIED}</strong>: {_e(_verified(cov))}. Kostnadsstoppet nåddes innan resten hann "
+            "verifieras; de visas som ej verifierade.</p>"
+        )
     if cov.other_discipline:
         parts.append(
             f"<p>{OTHER_DISCIPLINE}: {_e(cov.other_discipline)}. Sökbara för hänvisningar; "
@@ -495,6 +520,8 @@ def build_workbook(
             else []
         ),
         *([(PARTIAL, ", ".join(report.coverage.search_only_core))] if report.coverage.search_only_core else []),
+        *([(PARTIAL_BUDGET, lenses)] if (lenses := _budget_lenses(report.coverage)) else []),
+        *([(VERIFIED, _verified(report.coverage))] if report.coverage.not_verified_budget else []),
         ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
         (STOP, report.stop or "Okänt"),
         ("Täckning", report.coverage.note),

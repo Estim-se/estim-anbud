@@ -27,7 +27,7 @@ class Kronor(_Model):
     reason: str | None = Field(default=None, description="Why it couldn't be priced")
 
 
-Verification = Literal["verified", "sample", "failed", "not_selected"]
+Verification = Literal["verified", "sample", "failed", "budget", "not_selected"]  # budget: the hard stop came first
 Placement = Literal["shown", "shown_unpriced", "generic", "minor", "refuted", "covered", "capped", "zero"]
 
 

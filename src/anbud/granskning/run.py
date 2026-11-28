@@ -32,6 +32,9 @@ from anbud.store import canonical
 DEFAULT_CONCURRENCY = 3
 # A map that fails with one of these stops the run before the lenses: they would fail the same way.
 FATAL_ERRORS = ("RunStopped", "BudgetExceeded", "spend_cap", "ReplayMiss")
+# The roles whose call the hard stop refuses is skipped, not a halt (`ModelClient.degrade_roles`): the lenses, the
+# checks (on a lens role), the merge and the verifier. Before them, a refused card or map call still halts the run.
+DEGRADE_ROLES = frozenset({"lens", "lens_generic_scope", "merge", "verifier"})
 
 
 @dataclass(frozen=True)

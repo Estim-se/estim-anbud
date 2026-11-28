@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -79,6 +79,9 @@ def _keep_catalog_id(corrected: MoneyBasis, own: list[MoneyBasis]) -> MoneyBasis
 
 def score(item: Item, settings: Settings, action_rates: dict[str, float] | None = None) -> float:
     return ranking_kronor(item.kronor, settings) * factor(item, settings, action_rates)
+
+
+BUDGET = "BudgetExceeded"  # the error of a lens loop the hard stop refused (`run.DEGRADE_ROLES`)
 
 
 @dataclass
@@ -170,6 +173,9 @@ class LensCoverage(_Model):
     refused_calls: int = 0
     failed_calls: int = 0
     not_checked: list[str] = Field(default_factory=list)
+    budget: Literal["not_run", "stopped"] | None = Field(
+        default=None, description="The hard stop refused the lens's call: before its first turn, or after some"
+    )
 
 
 class TenderCoverage(_Model):
@@ -191,6 +197,9 @@ class TenderCoverage(_Model):
     search_only_core: list[str] = Field(
         default_factory=list, description="Of those, the AF or the contract: with any, the review is partial"
     )
+    verifier_selected: int = 0  # flags chosen for the verifier
+    verifier_verified: int = 0  # of them, with a verdict
+    not_verified_budget: int = 0  # of them, refused at the hard stop: with any, the report says verified N of M
     lenses: list[LensCoverage] = Field(default_factory=list)
     note: str = NOT_ALL_CLEAR
 
@@ -276,9 +285,16 @@ def lens_coverage(result: LensResult, corpus: Corpus, names: dict[str, str] | No
         not_checked.append("Ritningar eller skannade sidor som linsen inte tittade på: " + ", ".join(unseen))
     if not searches:
         not_checked.append("Linsen sökte inte i underlaget.")
+    budget = None
+    if result.error == BUDGET:
+        budget = "not_run" if result.turns == 0 else "stopped"
+        not_checked.append(
+            "Kostnadsstoppet nåddes: linsen kördes inte." if budget == "not_run" else "Kostnadsstoppet avbröt linsen."
+        )
     return LensCoverage(
         lens_id=result.lens_id,
         status=result.status,
+        budget=budget,
         generic=result.generic,
         turns=result.turns,
         cost_usd=result.cost_usd,

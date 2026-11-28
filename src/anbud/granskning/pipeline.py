@@ -31,13 +31,14 @@ from anbud.granskning.merge import STOP_ERRORS
 from anbud.granskning.outlet_recipe import RecipeError, load_recipe
 from anbud.granskning.page_cards import Cards, read_cards
 from anbud.granskning.prefix import system_blocks
+from anbud.granskning.rank import BUDGET, TenderCoverage
 from anbud.granskning.report import write_reports
 from anbud.granskning.run import FATAL_ERRORS, GranskningResult, run_granskning
 from anbud.granskning.settings import Settings, load_settings
 from anbud.granskning.taxonomy import CLAIM_TYPES
 from anbud.granskning.toolbox import Toolbox
 from anbud.granskning.validate import flag_validator
-from anbud.granskning.verify import VerdictValidator, VerifierLoop
+from anbud.granskning.verify import NotVerified, VerdictValidator, VerifierLoop
 from anbud.model_client import ModelClient, ModelError
 from anbud.models import Verdict
 from anbud.prep.tender import IntakeStop
@@ -133,6 +134,9 @@ def verifier_loop(
         )
         if runs is not None:
             runs.outcomes[step] = outcome
+        if not accepted and outcome.error == "BudgetExceeded":
+            client.refuse_role("verifier")  # the next reservation won't fit either: stop verifying
+            raise NotVerified(step)
         return accepted[0] if accepted else None
 
     return loop
@@ -210,6 +214,8 @@ def _checks(
     stop = stopped_by(result)
     if not enabled:
         checks = not_run("bara utvalda linser kördes (--lens); lägg till --checks för att köra kontrollerna")
+    elif stop == BUDGET:  # a lens didn't fit: what is left goes to the verifier, for the flags the lenses found
+        checks = not_run("kostnadsstoppet nåddes under linserna; det som fanns kvar gick till verifieringen")
     elif stop is not None:
         checks = not_run(f"körningen hade redan stoppats ({stop})")
     else:
@@ -229,6 +235,28 @@ def _checks(
     except (OSError, ValueError, StoreError):
         client.persist_failures += 1
     return checks
+
+
+def _record_budget(client: ModelClient, store: RunStore, summary_file: str, cov: TenderCoverage) -> None:
+    """Adds to the run summary what the hard stop cost the run: the calls it refused, the lenses it kept from running
+    or finishing, and how many of the verifier's flags got a verdict. A run with any of them finished, degraded."""
+    summary_path = store.run_dir(client.run_id) / summary_file
+    try:
+        summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+        summary["budget"] = {
+            "refused_calls": client.budget_refused,
+            "lenses_not_run": [lc.lens_id for lc in cov.lenses if lc.budget == "not_run"],
+            "lenses_stopped": [lc.lens_id for lc in cov.lenses if lc.budget == "stopped"],
+            "partial": any(lc.budget for lc in cov.lenses),
+            "verifier": {
+                "selected": cov.verifier_selected,
+                "verified": cov.verifier_verified,
+                "not_verified_budget": cov.not_verified_budget,
+            },
+        }
+        store.write_file(summary_path, canonical(summary))
+    except (OSError, ValueError, StoreError):
+        client.persist_failures += 1
 
 
 def run_pipeline(
@@ -316,6 +344,7 @@ def run_pipeline(
         check_results=checked.lens_results(client.config.model_for(CHECK_ROLE)),
         checks=checked.report,
     )
+    _record_budget(client, store, summary_file, finished.report.coverage)
     cost = client.budget.spent - spent_before  # every call this pipeline made, merge and failed calls included
     stop = prefix_label(result.stop) if result.stop is not None else None
     finished.report = finished.report.model_copy(update={"cost_usd": round(cost, 4), "stop": stop})
