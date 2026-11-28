@@ -4,6 +4,7 @@ its dry run gave, and the tier each run picked is in its run record and its repo
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -147,7 +148,8 @@ def test_the_measured_prefix_at_a_bound_picks_the_lower_tier_and_the_record_and_
         about["Kostnadsstopp (nivå efter storlek)"] == label and f"Kostnadsstopp (nivå efter storlek): {label}." in page
     )
     out = capsys.readouterr().out
-    assert "hard stop: tier S, $20.00, from the measured prefix" in out and "of $20.00)" in out
+    assert "hard stop: tier S, $20.00, from the measured prefix" in out
+    assert re.search(r"^budget spent \$[\d.]+ of \$20\.00$", out, re.M)
 
 
 def test_a_measured_prefix_above_the_estimates_tier_never_raises_the_stop(
@@ -157,7 +159,7 @@ def test_a_measured_prefix_above_the_estimates_tier_never_raises_the_stop(
     assert summary["stop"]["tier"] == "L" and summary["stop"]["tier_usd"] == 45.0
     assert summary["stop"]["hard_stop_usd"] == 30.0  # the M tier the run opened with
     assert about["Kostnadsstopp (nivå efter storlek)"].endswith("; högst 30 USD, nivån körningen startade med")
-    assert "of $30.00)" in capsys.readouterr().out
+    assert re.search(r"^budget spent \$[\d.]+ of \$30\.00$", capsys.readouterr().out, re.M)
 
 
 # --- Kalkyl: the dry run's tier is the run's ------------------------------------------------------------------------
