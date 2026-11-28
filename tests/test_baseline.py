@@ -184,8 +184,8 @@ globalThis.fetch = async () => new Response(sse, { status: 200, headers: {
 """
 
 
-def stubbed(tmp_path: Path, calls: int, hard_stop: float) -> tuple[int, list[dict]]:
-    (tmp_path / "stub.mjs").write_text(STUB)
+def stubbed(tmp_path: Path, calls: int, hard_stop: float, stub: str = STUB) -> tuple[int, list[dict]]:
+    (tmp_path / "stub.mjs").write_text(stub)
     (tmp_path / "engine.mjs").write_text(ENGINE.replace("readdirSync(folder).length", "0"))
     log = tmp_path / "calls.jsonl"
     env = {
@@ -222,6 +222,42 @@ def test_each_call_is_logged_with_ids_usage_and_the_harness_price(tmp_path: Path
         }
     start = next(r for r in records if r["event"] == "start")
     assert not any(n.startswith("ANBUD_BASELINE_") for n in start["env_names"])  # removed before the engine loads
+
+
+ERRORS_STUB = """
+const errors = [
+  [400, { type: 'error', error: { type: 'invalid_request_error', message: 'credit balance too low SECRET-1' } }],
+  [401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key SECRET-2' } }],
+  [400, { type: 'error', error: { type: 'invalid_request_error', message: 'messages: SECRET-3' } }],
+  [529, { type: 'error', error: { type: 'Overloaded Error; SECRET-4', message: 'SECRET-5' } }],
+  [500, 'not json SECRET-6'],
+];
+let n = 0;
+globalThis.fetch = async () => {
+  const [status, body] = errors[n++ % errors.length];
+  return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: {
+    'content-type': 'application/json', 'request-id': `req_${n}` } });
+};
+"""
+
+
+@needs_bun
+def test_an_error_response_is_logged_with_its_kind_and_never_its_message(tmp_path: Path) -> None:
+    """The exam's breaker reads the kind (`exam._baseline_failures`): a credit 400 is `credit_balance`, else the API's
+    own error type when it is one plain word. Mutation: `return null;` for the credit-balance branch of the preload's
+    `errorKind` makes it fail."""
+    code, records = stubbed(tmp_path, calls=5, hard_stop=5.0, stub=ERRORS_STUB)
+    assert code == 0
+    calls = [r for r in records if r["event"] == "call"]
+    assert [(c["status"], c["error_kind"]) for c in calls] == [
+        (400, "credit_balance"),
+        (401, "authentication_error"),
+        (400, "invalid_request_error"),
+        (529, None),
+        (500, None),
+    ]
+    assert all(c["cost_usd"] == 0 for c in calls)  # an error response is not billed
+    assert "SECRET" not in (tmp_path / "calls.jsonl").read_text()
 
 
 @needs_bun

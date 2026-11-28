@@ -236,6 +236,7 @@ def test_price_splits_cache_writes_and_bounds_the_worst_case() -> None:
     assert price.max_cost(1000, 64) >= price.cost(worst)
 
 
+@pytest.mark.real_client_parts
 def test_the_key_comes_from_the_keychain_and_is_never_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -294,6 +295,7 @@ def test_compile_check_reports_a_rejected_schema(monkeypatch, capsys: pytest.Cap
     assert "too complex" in capsys.readouterr().out
 
 
+@pytest.mark.real_client_parts
 def test_the_sdk_retries_once_and_uses_the_configured_base_url() -> None:
     client = model_client.make_sdk_client(load_config(), "sk-test-value")
     assert client.max_retries == 1

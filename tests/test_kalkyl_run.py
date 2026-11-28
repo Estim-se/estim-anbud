@@ -517,3 +517,18 @@ def test_the_cli_rebuild_replay_needs_no_key_and_exits_4_on_a_miss(
     run_dev_tender("co-001", "t-0001", sdk=fake_sdk(), catalog_name="synthetic", run_id="stopped", kalkyl=tiny)
     assert cli.main([*args[:-1], "stopped", "--run-id", "kalkyl-r3"]) == cli.REPLAY_INCOMPLETE
     assert "replay incomplete" in capsys.readouterr().err
+
+
+def test_the_summary_counts_calls_that_failed_for_good_by_kind(tender: Path) -> None:
+    """The exam's breaker reads it (`exam.Engines.kalkyl`): a refused key fails every later run the same way.
+    Mutation: dropping `failures` from the summary makes it fail."""
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    def refused(params: dict) -> Any:
+        raise anthropic.AuthenticationError(
+            "invalid x-api-key", response=httpx2.Response(401, request=request), body=None
+        )
+
+    summary = _run(fake_sdk(refused))
+    assert set(summary["failures"]) == {"auth"} and summary["failures"]["auth"] >= 1
+    assert _run(fake_sdk())["failures"] == {}

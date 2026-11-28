@@ -39,3 +39,4 @@ select = ["E", "F", "W", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["real_client_parts: tests `keychain_key` or `make_sdk_client` itself; `security` faked, no request sent"]
