@@ -43,6 +43,7 @@ TRANSIENT = frozenset({"rate_limited", "server", "connection", "timeout"})
 RETRY_DELAYS = (5.0, 20.0)
 KEYCHAIN_SERVICE = "estim-anbud"
 KEYCHAIN_ACCOUNT = "anbud-dev"
+KEYCHAIN_TIMEOUT_S = 10.0  # the `security` read; a locked Keychain or a prompt fails fast instead of hanging
 
 
 class BudgetExceeded(RuntimeError):
@@ -171,15 +172,24 @@ def classify(exc: Exception) -> ModelError:
 
 
 def keychain_key(service: str = KEYCHAIN_SERVICE, account: str = KEYCHAIN_ACCOUNT) -> str:
-    """The model key, read at run time. Never print, log or store the return value."""
+    """The model key, read at run time. Never print, log or store the return value. A locked Keychain or one waiting
+    at a prompt fails after `KEYCHAIN_TIMEOUT_S` instead of hanging the run's start."""
     if sys.platform != "darwin":
         raise KeyMissing("the model key is read from the macOS Keychain, which isn't available here")
-    proc = subprocess.run(
-        ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=KEYCHAIN_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:  # `from None`: the expired call holds what the child printed
+        raise KeyMissing(
+            f"the Keychain read timed out after {KEYCHAIN_TIMEOUT_S:g} s (locked, or waiting at a prompt)"
+        ) from None
+    except OSError as exc:
+        raise KeyMissing(f"the Keychain can't be read ({type(exc).__name__})") from None
     key = proc.stdout.strip()
     if proc.returncode != 0 or not key:
         raise KeyMissing(f"no Keychain entry for service {service}, account {account}")
