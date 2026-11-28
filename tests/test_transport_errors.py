@@ -194,6 +194,7 @@ def test_a_transport_error_mid_stream_is_a_model_error_with_the_whole_reservatio
     assert client.budget.reserved == pytest.approx(0) and client.halted == 0
 
 
-def test_any_other_error_is_still_a_bug_and_raised() -> None:
-    with pytest.raises(ValueError):
-        ModelClient._mapped(ValueError("a bug"))
+def test_any_other_error_from_the_sdk_call_is_a_stream_failure() -> None:
+    """Only `_send`'s SDK calls reach `_mapped`; anything else they raise is a failed call (test_sdk_stream_errors)."""
+    error = ModelClient._mapped(ValueError("from the SDK"))
+    assert (error.kind, error.message) == ("stream", "ValueError")
