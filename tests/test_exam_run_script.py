@@ -100,10 +100,8 @@ def test_start_refuses_when_the_preflight_fails_and_starts_nothing(tmp_path: Pat
     )
     assert done.returncode == 2 and "preflight failed; nothing started" in done.stderr
     lines = done.stdout.splitlines()
-    assert [x.split(" ")[1] for x in lines if x.startswith("preflight: ") and "FAILED" in x][:2] == [
-        "checkout",
-        "commit",
-    ]
+    failed = {x.split(" ")[1] for x in lines if x.startswith("preflight: ") and "FAILED" in x}
+    assert {"checkout", "commit"} <= failed  # power and key too, where there's no pmset or Keychain (CI)
     assert lines[-1].startswith("preflight: ") and lines[-1].endswith(" failed")
     assert not (data_root / "predictions" / "co-002" / "exam-runs").exists()
 
