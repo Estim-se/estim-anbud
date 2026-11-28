@@ -115,3 +115,22 @@ def test_the_wrapper_keeps_the_line_among_its_status_lines() -> None:
     script = (ROOT / "scripts" / "exam-run.sh").read_text()
     (pattern,) = re.findall(r"^STATUS_LINES='(.+)'$", script, re.M)
     assert re.match(pattern, "size checks, tenders that may reach their hard stop, over ...")
+
+
+def test_the_line_depends_on_no_fact_of_one_split(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """As for the paid total (test_exam_total_one_split): a count over both splits can't depend on a fact of one
+    split's tenders, such as prospective deadlines, or it would hold a count of that split."""
+    from test_exam_total_one_split import OPEN, PAST, _store
+
+    lines: dict[str, str] = {}
+    for name, deadlines in (("past", PAST), ("open", OPEN)):
+        root = tmp_path / name
+        root.mkdir()
+        monkeypatch.setenv("ANBUD_DATA_ROOT", str(root))
+        _store(root, deadlines)
+        register(root)
+        said: list[str] = []
+        runner = FakeEngines(COSTS, tiles=TILES, highs=HIGHS, pages=PAGES)
+        exam.run_both("co-002", runner=runner, now=NOW, local_now=LOCAL_NOW, say=said.append)
+        lines[name] = _size_line(said)
+    assert lines["past"] == lines["open"]
