@@ -27,6 +27,16 @@ from openpyxl.worksheet.worksheet import Worksheet
 from anbud.granskning.catalog import Catalog
 from anbud.kalkyl.code_groups import SECTIONS, TECHNICAL, CodeCoverage
 from anbud.kalkyl.code_groups import for_result as code_coverage
+from anbud.kalkyl.group_pass import (
+    AF_NOT_READ,
+    NO_WORK,
+    NOT_READ,
+    OUTCOME_LABELS,
+    READ_IN,
+    RECORDS,
+    GroupPass,
+    GroupResult,
+)
 from anbud.kalkyl.price import OBJECT_LABELS, SCOPE_LABELS, Line, Post, assumed_posts
 from anbud.kalkyl.records import SET_ASIDE_LABELS, Uncovered
 from anbud.selection import excluded_counts, excluded_label
@@ -210,6 +220,16 @@ BOUNDARY_LINES = "Rader i andra discipliners handlingar som rör elarbetena (lä
 CODE_GROUPS = "Kodgrupper (AMA/AF) i tekniska beskrivningen och AF"
 CODE_GROUPS_MISSING = "Kodgrupper utan post eller skäl (se Kodgrupper)"
 NO_CODES = "Inga kodade rubriker (AMA/AF) i tekniska beskrivningen eller AF: inte kontrollerat"
+GROUP_PASS = "Kodgruppsläsning, två läsningar per grupp (se Kodgrupper)"
+
+
+def _group_pass_value(done: GroupPass) -> str:
+    n = done.summary()
+    text = (
+        f"{n['groups']} grupper: {n['to_records']} till poster, {n['no_priced_work']} inget prissatt arbete, "
+        f"{n['questions']} frågor"
+    )
+    return text + (f" (varav {n['not_read']} inte lästa)" if n["not_read"] else "")
 
 
 def _pct(part: Decimal, whole: Decimal) -> str:
@@ -253,6 +273,12 @@ def _code_groups_value(codes: CodeCoverage) -> str:
     return "; ".join(parts)
 
 
+GROUP_PASS_COLUMNS = [("Kodgruppsläsning", 34), ("Läsning 1", 60), ("Läsning 2", 60)]
+MISSING_STATUS = "Ingen post och inget bortval med skäl"
+GROUP_PASS_STATUS = {
+    RECORDS: "Post från kodgruppsläsningen",
+    NO_WORK: "Bortval med skäl från kodgruppsläsningen",
+}
 CODE_GROUP_COLUMNS = [
     ("Kod", 12),
     ("Del", 20),
@@ -267,18 +293,33 @@ CODE_GROUP_COLUMNS = [
 ]
 
 
-def _code_groups_sheet(ws: Worksheet, codes: CodeCoverage, catalog: Catalog, status: str, run: str) -> None:
-    """The topmost code groups with neither a post nor a reason: technical description first, then AF."""
-    _header(ws, catalog, status, run, CODE_GROUP_COLUMNS)
-    if not codes.missing:
+def _code_groups_sheet(
+    ws: Worksheet, codes: CodeCoverage, catalog: Catalog, status: str, run: str, done: GroupPass | None = None
+) -> None:
+    """The topmost code groups with neither a post nor a reason: technical description first, then AF. When the
+    code-group pass ran, its groups come first, each with what it decided and both readings."""
+    read = done.by_code() if done is not None else {}
+    _header(ws, catalog, status, run, CODE_GROUP_COLUMNS + (GROUP_PASS_COLUMNS if done is not None else []))
+    rest = [g for g in codes.missing if g.code not in read]
+    if not rest and not read:
         _put(
             ws, FIRST_ROW, 1, NO_CODES if not codes.codes else "Alla kodgrupper har en post eller ett bortval med skäl."
         )
         return
-    order = sorted(codes.missing, key=lambda g: g.section != TECHNICAL)  # stable: reading order within each part
-    for r, g in enumerate(order, FIRST_ROW):
+    order = [*read.values(), *sorted(rest, key=lambda g: g.section != TECHNICAL)]  # stable: reading order in each part
+    for r, item in enumerate(order, FIRST_ROW):
+        g = item.group if isinstance(item, GroupResult) else item
         values = [g.code, SECTIONS[g.section], g.codes, g.doc_id, g.block_id, g.page, g.blocks, g.lines, g.open_lines]
-        for col, value in enumerate([*values, "Ingen post och inget bortval med skäl"], 1):
+        if isinstance(item, GroupResult):
+            outcome = OUTCOME_LABELS[item.outcome] if item.read else item.readings[-1].label
+            labels = [x.label for x in item.readings]
+            values += [GROUP_PASS_STATUS.get(item.outcome, MISSING_STATUS), outcome, *labels]
+        elif g.section != TECHNICAL:
+            values += [MISSING_STATUS, *([AF_NOT_READ] if read else [])]
+        else:
+            within = next((x.group.code for x in read.values() if g.block_id in x.chunk.block_ids), None)
+            values += [MISSING_STATUS, *([READ_IN.format(code=within) if within else NOT_READ] if read else [])]
+        for col, value in enumerate(values, 1):
             if value is not None:
                 _put(ws, r, col, value)
 
@@ -330,6 +371,7 @@ def _overview(
         ("varav ej omhändertagna (se Ej omhändertaget)", c["lines_unresolved"], None),
         (CODE_GROUPS, _code_groups_value(codes), None),
         (CODE_GROUPS_MISSING, len(codes.missing), None, "koder och block, aldrig rubrikernas ord"),
+        *([(GROUP_PASS, _group_pass_value(result.group_pass), None)] if result.group_pass is not None else []),
         (OTHER_DISCIPLINE, excluded_label(corpus), None, "sökbara; räknas inte i Ej omhändertaget"),
         (BOUNDARY_LINES, excluded_counts(corpus)["boundary_lines"], None),
         ("varav bortvalda med skäl (se Bortvalt med skäl)", c["lines_not_handled"] - c["lines_unresolved"], None),
@@ -503,7 +545,7 @@ def write_workbook(result: KalkylResult, corpus: Corpus, catalog: Catalog, meta:
     reasoned = sorted((u for u in result.uncovered if not u.unresolved), key=lambda u: u.set_aside_kind or "")
     _uncovered_sheet(wb.create_sheet("Ej omhändertaget"), result, unresolved, corpus, catalog, status, run)
     _uncovered_sheet(wb.create_sheet("Bortvalt med skäl"), result, reasoned, corpus, catalog, status, run)
-    _code_groups_sheet(wb.create_sheet("Kodgrupper"), codes, catalog, status, run)
+    _code_groups_sheet(wb.create_sheet("Kodgrupper"), codes, catalog, status, run, result.group_pass)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), rows

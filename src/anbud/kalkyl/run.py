@@ -32,6 +32,8 @@ from anbud.granskning.pipeline import add_cards
 from anbud.kalkyl.catalog import CatalogError, load, prompt_lines
 from anbud.kalkyl.code_groups import for_result as code_coverage
 from anbud.kalkyl.extract import BRIEF, chunk_message, outline_text
+from anbud.kalkyl.group_pass import READINGS
+from anbud.kalkyl.group_pass import bound as group_bound
 from anbud.kalkyl.lines import heading_paths, make_chunks
 from anbud.kalkyl.pipeline import KalkylResult, run_kalkyl
 from anbud.kalkyl.price import calc_posts
@@ -139,6 +141,22 @@ def result_json(result: KalkylResult) -> bytes:
             for r in result.chunk_results
         ],
     }
+    if result.group_pass is not None:  # only when it ran: a run without it writes the same bytes as before
+        body["group_pass"] = {
+            "summary": result.group_pass.summary(result.posts),
+            "groups": [
+                {
+                    "code": g.group.code,
+                    "chunk": g.chunk.id,
+                    "blocks": len(g.chunk.block_ids),
+                    "outcome": g.outcome,
+                    "readings": [r.outcome for r in g.readings],
+                    "records": len(g.records),
+                    "set_aside": sum(len(s.block_ids) for s in g.set_aside),
+                }
+                for g in result.group_pass.groups
+            ],
+        }
     return json.dumps(body, ensure_ascii=False, indent=1, default=_decimal).encode()
 
 
@@ -267,6 +285,7 @@ def run_dev_tender(
         "repetition": repetition.label if repetition else None,
         "selection": selection.summary(),
         "code_groups": code_coverage(result, corpus).summary(),
+        **({"group_pass": result.group_pass.summary(result.posts)} if result.group_pass is not None else {}),
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
         "stop": {**stop.summary(), "cost_usd_est_high": estimate["cost_usd_est_high"], "margin": kalkyl.margin},
@@ -282,12 +301,19 @@ def run_dev_tender(
     return summary
 
 
-def plan(company_id: str, tender_id: str, *, catalog_name: str | None = None, root: Path | None = None) -> dict:
+def plan(
+    company_id: str,
+    tender_id: str,
+    *,
+    catalog_name: str | None = None,
+    root: Path | None = None,
+    kalkyl: KalkylConfig | None = None,
+) -> dict:
     """The $0 dry run: what a run would send, in counts, a cost range from config prices and the hard stop's tier the
     run will pick from it. No model is called, no key is read and nothing is written. Cards already stored or in an
     earlier run's cache are counted in, and their blocks are chunked as the run will chunk them."""
     config = load_config()
-    kalkyl = load_kalkyl_config()
+    kalkyl = kalkyl or load_kalkyl_config()
     prep_dir = paths.dev_tender_dir(company_id, tender_id, root) / "prep"
     corpus, selection = load_corpus(prep_dir)
     cells = load_cells(prep_dir / CELLS_FILE)
@@ -356,6 +382,13 @@ def _estimate(
         return (write + reads + inputs + outputs + repairs + r3 + cards) / 1_000_000
 
     low, high = OUTPUT_TOKENS_PER_CHUNK
+    extra: dict[str, Any] = {}
+    if kalkyl.group_pass:
+        groups, chars = group_bound(corpus, heads, cells)
+        calls = READINGS * groups
+        tokens = READINGS * chars / CHARS_PER_TOKEN
+        pass_usd = (calls * prefix_tokens * price.cache_read + tokens * price.input + calls * high * price.output) / 1e6
+        extra = {"group_pass_calls_max": calls, "group_pass_cost_usd_est_high": round(pass_usd, 2)}
     return {
         "chunks": len(chunks),
         "quantity_lines": sum(len(c.quantity_ids) for c in chunks),
@@ -368,5 +401,6 @@ def _estimate(
         "prefix_tokens_est": prefix_tokens,
         "chunk_tokens_est_max": max(chunk_tokens, default=0),
         "cost_usd_est_low": round(cost(low, 0.1), 2),
-        "cost_usd_est_high": round(cost(high, 0.5), 2),
+        "cost_usd_est_high": round(cost(high, 0.5) + extra.get("group_pass_cost_usd_est_high", 0), 2),
+        **extra,
     }

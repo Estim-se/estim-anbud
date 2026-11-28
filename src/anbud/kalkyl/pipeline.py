@@ -13,9 +13,11 @@ from typing import Any
 from anbud.granskning.catalog import Catalog
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
+from anbud.kalkyl.catalog import ids as catalog_ids_of
 from anbud.kalkyl.connections import connection_records, demolition_line_ids, note_connections
 from anbud.kalkyl.coverage import uncovered_lines
-from anbud.kalkyl.extract import ChunkResult, extract_all
+from anbud.kalkyl.extract import ChunkResult, extract_all, system_blocks
+from anbud.kalkyl.group_pass import GroupPass, marked_lines, merge_set_asides, read_groups, uncovered_groups
 from anbud.kalkyl.lines import Chunk, heading_paths, make_chunks, not_included_line_ids, other_party_line_ids
 from anbud.kalkyl.match import match_posts
 from anbud.kalkyl.object_list import ObjectList, choose, read_lists
@@ -57,6 +59,7 @@ class KalkylResult:
     object_lists: list[ObjectList] = field(default_factory=list)  # sheets that are object lists by the app's rule
     not_included: set[str] = field(default_factory=set)  # lines that say something isn't part of the contract
     connections: list[VerifiedRecord] = field(default_factory=list)  # code's connections to others' equipment
+    group_pass: GroupPass | None = None  # the code-group pass, when it ran (`group_pass`)
 
     @property
     def counted_rows(self) -> set[str]:
@@ -211,18 +214,42 @@ def run_kalkyl(
         counted=frozenset(_counted(lists)),
     )
     verified, filled = with_room_descriptors(verified_records(results), corpus)
-    connections = connection_records(results, verified, corpus, catalog)
+    not_included = not_included_line_ids(corpus, paths)
+    other_party = other_party_line_ids(corpus, paths)
+    demolition = demolition_line_ids(corpus)
+    halted = any(r.status == "not_run" for r in results)
+    done: GroupPass | None = None
+    agreed: list[ChunkResult] = []
+    if kalkyl.group_pass and not halted:
+        before = uncovered_lines(chunks, results, verified, _counted(lists), not_included, other_party, demolition)
+        lines = marked_lines(chunks)
+        done = read_groups(
+            client,
+            uncovered_groups(corpus, verified, before, set(lines)),
+            lines,
+            corpus,
+            set(catalog_ids_of(catalog)),
+            system_blocks(catalog, corpus),
+            paths,
+            kalkyl.roles[EXTRACT],
+            cells,
+            kalkyl.concurrency,
+        )
+        merge_set_asides(results, chunks, done)
+        agreed = done.chunk_results()
+        added, more = with_room_descriptors(verified_records(agreed), corpus)
+        verified, filled = verified + added, filled + more
+        halted = done.halted is not None
+    connections = connection_records([*results, *agreed], verified, corpus, catalog)
     objects = count_objects([*verified, *connections], recipe, lists)
     derived = common_spaces(verified, objects) if common_spaces else []
     posts = build_posts([*verified, *connections], objects, catalog, recipe, derived)
-    halted = any(r.status == "not_run" for r in results)
     if halted:
         stats: dict[str, Any] = {"sent": 0, "matched": 0, "none": 0, "refused": 0, "calls": 0, "error": "halted"}
     else:
         stats = match_posts(client, posts, catalog, kalkyl.roles[MATCH], kalkyl.match_batch)
     price_posts(posts, catalog, repetition)
     note_connections(posts, connections)
-    not_included = not_included_line_ids(corpus, paths)
     note_not_included(posts, not_included)
     return KalkylResult(
         chunks=chunks,
@@ -237,8 +264,8 @@ def run_kalkyl(
             verified,
             _counted(lists),
             not_included,
-            other_party_line_ids(corpus, paths),
-            demolition_line_ids(corpus),
+            other_party,
+            demolition,
         ),
         totals=totals_of(posts),
         match_stats=stats,
@@ -249,6 +276,7 @@ def run_kalkyl(
         object_lists=lists,
         not_included=not_included,
         connections=connections,
+        group_pass=done,
     )
 
 

@@ -15,6 +15,9 @@ max_turns = 2 # the submission, then one repair turn or one nudge
 follow_up = true # then one more turn, only for marked lines the answer left unresolved
 concurrency = 4
 
+[group_pass] # one turn per code group of the technical description nothing covers after R2, read twice (`group_pass`)
+enabled = false # off: a rebuild of a run made without it stays a complete $0 replay; `anbud kalkyl --group-pass` turns it on
+
 [match] # R3: posts R2 left without a usable catalog item, a constrained choice among catalog ids
 effort = "medium"
 max_tokens = 8000
