@@ -337,8 +337,19 @@ def dry_run(
             f"  prefix budget {plan.budget} tokens: fixed {plan.p0}, priority 1 {plan.p1}, priority 2 {plan.p2}, "
             f"priority 3 {plan.p3}, other trades' lines {plan.boundary}; priority 1's page cards at most {plan.cards}"
         )
-        if not plan.p1_fits:
-            print("  priority 1 does not fit: a paid run stops before any model call")
+        if plan.stops:
+            print(
+                "  priority 1 does not fit: a paid run stops before any model call (the fixed part and the core, "
+                f"the AF and the contract, {plan.p0 + plan.core + plan.core_cards} tokens with their cards at most)"
+            )
+        elif not plan.p1_fits:
+            print(
+                f"  priority 1 does not fit in full ({plan.p0 + plan.p1 + plan.cards} tokens with its cards at most); "
+                f"its core, the AF and the contract, fits ({plan.p0 + plan.core + plan.core_cards} tokens): "
+                f"{len(plan.p1_search_only)} priority-1 documents become search-only; planned prefix {plan.total} "
+                f"tokens before the cards, {len(plan.search_only)} documents search-only in all, "
+                f"{len(plan.boundary_dropped)} lines past the cap"
+            )
         else:
             print(
                 f"  priority 1 fits ({plan.p0 + plan.p1 + plan.cards} tokens with its cards at most); planned prefix "

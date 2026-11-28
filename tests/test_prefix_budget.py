@@ -9,9 +9,11 @@ import time
 from pathlib import Path
 
 import pytest
-from granskning_fakes import DOC_AF, DOC_RIT, ScriptedSDK, png_bytes, reply, write_prep
+from granskning_fakes import DOC_AF, DOC_EL, DOC_RIT, ScriptedSDK, first_text, png_bytes, reply, write_prep
 from large_tender import DOCS, EL_LINE, TOTAL_PAGES, doc_id, write_large_prep
+from openpyxl import load_workbook
 from test_granskning_pipeline import CLEAN, _calc, _catalog
+from test_granskning_pipeline import script as pipeline_script
 from test_runguard import ledger_with
 
 from anbud import cli, model_client
@@ -20,11 +22,14 @@ from anbud.evals import split_heldout as sh
 from anbud.granskning import provenance
 from anbud.granskning.budget import (
     DOC_CHARS,
+    SEARCH_ONLY_P1,
     PrefixBudget,
     PrefixOverBudget,
+    PrefixPlan,
     _card_tokens_each,
     apply_plan,
     fit_prefix,
+    p1_search_only,
     plan_prefix,
     priorities,
 )
@@ -209,3 +214,112 @@ def test_the_card_bound_counts_only_cards_that_can_reach_priority_1(tmp_path: Pa
     corpus, _ = load_selected(prep)
     assert plan_prefix(corpus, [], BUDGET, corpus.tiles.values()).cards == _card_tokens_each(tile)
     assert _card_tokens_each(tile) * 1.6 > len(BIG_CARD)  # the bound holds the invented dense page
+
+
+# --- A priority 1 over the budget: demoted to search, except the core (the AF and the contract) -----------------------
+
+
+def test_over_the_budget_priority_1_beyond_the_core_becomes_search_only_largest_first(large) -> None:
+    _, selected, _ = large
+    full = plan_prefix(selected, [], BUDGET)
+    budget = PrefixBudget(100_000, 0.10)  # holds the core, not the rest of priority 1
+    plan = plan_prefix(selected, [], budget)
+    assert not plan.p1_fits and not plan.stops and full.core == plan.core
+    p1 = [NAMES[d] for d in plan.p1_search_only]
+    assert p1 == ["E-63-1-001 Teknisk beskrivning el.pdf", "Rambeskrivning.pdf"]  # the largest first
+    assert plan.search_only[-2:] == plan.p1_search_only  # after every priority 2 and 3 document
+    kept = {NAMES[d] for d, level in priorities(selected).items() if level == 1 and d not in plan.search_only}
+    assert kept == {"AF.pdf", "Kontraktsförslag.pdf", "Tidplan.pdf"}  # the core, and a small time plan
+    assert plan.total <= budget.tokens
+    summary = plan.summary()
+    assert summary["p1_search_only"] == plan.p1_search_only and summary["stops"] is False
+
+    applied = apply_plan(selected, plan)  # nothing is lost: every block stays readable, and the reason says priority 1
+    assert p1_search_only(applied) == sorted(plan.p1_search_only, key=list(applied.search_only).index)
+    assert set(applied.blocks) == set(selected.blocks) and applied.all_order == selected.all_order
+    el = BY_NAME["E-63-1-001 Teknisk beskrivning el.pdf"]
+    out = Toolbox(applied, []).run("read_blocks", {"ids": [f"{el[:6]}-000002"]})
+    assert out.error is None and f"{el[:6]}-000002" in out.content
+    assert f'search_only="{SEARCH_ONLY_P1}"' in corpus_text(applied)
+    names = coverage([], applied).search_only_priority_1
+    assert names == ["E-63-1-001 Teknisk beskrivning el.pdf (60 s.)", "Rambeskrivning.pdf (20 s.)"]
+
+
+def test_the_exam_counts_priority_1_read_through_search_and_no_stop(tmp_path: Path) -> None:
+    from anbud.evals import exam
+
+    prep = write_large_prep(tmp_path / "large" / "prep")
+    sizes = exam.selection_sizes(prep, tmp_path / "large" / "calc", {"prefix": {"budget_tokens": 100_000}})
+    assert sizes is not None and sizes["p1_fits"] is False and sizes["stops"] is False and sizes["p1_search_only"] == 2
+
+
+def _rename(prep: Path, names: dict[str, str]) -> None:
+    docs = json.loads((prep / "documents.json").read_text())
+    for d in docs:
+        if d["doc_id"] in names:
+            d["paths"] = [f"inbox/{names[d['doc_id']]}"]
+    (prep / "documents.json").write_text(json.dumps(docs))
+
+
+TB_EL = "E-63-1-002 Teknisk beskrivning el.pdf"
+
+
+def _p1_tender(tender: Path) -> PrefixPlan:
+    """The synthetic tender with its electrical description as priority 1 beside the AF, and the drawing numbered."""
+    _rename(tender / "prep", {DOC_EL: TB_EL, DOC_RIT: "E-63-1-001 Elplan.pdf"})
+    corpus, _ = load_selected(tender / "prep")
+    assert priorities(corpus) == {DOC_AF: 1, DOC_EL: 1, DOC_RIT: 2}
+    return plan_prefix(corpus, load_calc(tender / "calc"), BUDGET, corpus.tiles.values())
+
+
+def test_a_priority_1_over_the_budget_is_reviewed_through_search_instead_of_stopping(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    full = _p1_tender(tender)
+    _budget(monkeypatch, full.p0 + full.p1 - 1)  # the AF fits, all of priority 1 doesn't
+    sdk = ScriptedSDK(pipeline_script)
+    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
+    monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-p1"]) == 0
+    assert "documents search-only (1 of priority 1)" in capsys.readouterr().out
+
+    record = json.loads((RunStore("co-001").run_dir("t-0001-p1") / "granskning.json").read_text())
+    plan = next(v for k, v in record.items() if isinstance(v, dict) and "p1_search_only" in v)
+    assert plan["p1_search_only"] == [DOC_EL] and plan["stops"] is False and plan["p1_fits"] is False
+    lens_calls = [first_text(p) for p in sdk.sent if "review lens `" in str(p["messages"][0]["content"])]
+    assert lens_calls and all("<search_only_priority_1>" in text and DOC_EL in text for text in lens_calls)
+    report = tender / "runs" / "t-0001-p1" / "report"
+    assert "Prioritet 1 granskad via sökning" in (report / "granskning.html").read_text(encoding="utf-8")
+    about = {r[0].value: r[1].value for r in load_workbook(report / "granskning.xlsx")["Om rapporten"].iter_rows()}
+    assert about["Prioritet 1 granskad via sökning, inte i sin helhet"] == f"{TB_EL} (3 s.)"
+
+
+def test_when_the_core_alone_is_over_the_budget_the_run_still_stops_before_any_call(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    full = _p1_tender(tender)
+    _budget(monkeypatch, full.p0 + full.core - 1)
+    sdk = ScriptedSDK(lambda params: pytest.fail("no model call may be made"))
+    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
+    monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-core"]) != 0
+    assert sdk.sent == []
+    assert "the AF and the contract" in capsys.readouterr().err
+
+    assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
+    assert "priority 1 does not fit: a paid run stops before any model call" in capsys.readouterr().out
+    _budget(monkeypatch, full.p0 + full.p1 - 1)
+    assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "priority 1 does not fit in full" in out and "1 priority-1 documents become search-only" in out
+
+
+def test_a_lens_message_is_unchanged_when_nothing_of_priority_1_is_demoted() -> None:
+    from anbud.granskning.lenses import load_lenses
+    from anbud.granskning.run import LensCaps, lens_message
+
+    lens = load_lenses()[0]
+    caps = LensCaps(10, 2.0)
+    assert lens_message(lens, None, caps) == lens_message(lens, None, caps, [])
+    assert "search_only_priority_1" not in lens_message(lens, None, caps)
+    assert "<search_only_priority_1>" in lens_message(lens, None, caps, ["aaaaaaaaaaaa"])

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from anbud.granskning.budget import p1_search_only
 from anbud.granskning.contracts import CalcPost, LensResult
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.lenses import Lens
@@ -55,7 +56,18 @@ def _map_summary(tender_map: TenderMap | None) -> str:
     return defuse(canonical(summary).decode())
 
 
-def lens_message(lens: Lens, tender_map: TenderMap | None, caps: LensCaps) -> str:
+SEARCH_ONLY_P1_NOTE = """\
+<search_only_priority_1>
+These priority-1 documents were too large for the prefix in full: {ids}. The document list marks them search_only, \
+and the corpus holds only their outline. Where your checklist relies on their text, reach it with search_blocks and \
+read_blocks, and never report something as missing from the tender only because it isn't in the prefix.
+</search_only_priority_1>"""
+
+
+def lens_message(lens: Lens, tender_map: TenderMap | None, caps: LensCaps, p1_search_only: Sequence[str] = ()) -> str:
+    """The lens's first message. When the prefix plan demoted priority-1 documents (`budget.SEARCH_ONLY_P1`), it
+    names them, so a lens that relies on their text searches for it; otherwise the message is as it always was."""
+    note = "\n" + SEARCH_ONLY_P1_NOTE.format(ids=", ".join(p1_search_only)) if p1_search_only else ""
     focus: list[str] = []
     if tender_map is not None:
         for plan in tender_map.lenses:
@@ -80,7 +92,7 @@ your way, and check anything you rely on against the blocks.
 </tender_map>
 <focus_questions>
 {questions}
-</focus_questions>"""
+</focus_questions>{note}"""
 
 
 @dataclass
@@ -192,7 +204,7 @@ def run_granskning(
                 lens_id=lens.id,
                 role=lens.role,
                 system=system,
-                first_message=lens_message(lens, mapped.tender_map, caps),
+                first_message=lens_message(lens, mapped.tender_map, caps, p1_search_only(corpus)),
                 toolbox=toolbox,
                 max_turns=caps.max_turns,
                 max_usd=caps.max_usd,
