@@ -25,6 +25,11 @@ from anbud.frozen import freeze_tree, is_frozen
 PAID_REFUSED = 3
 REPLAY_INCOMPLETE = 4
 RUN_HALTED = 5
+# Calls failed for good and no lens call was answered, by the model or the step cache, whatever happened to the map:
+# nothing was reviewed. Never frozen; resume the run id once the cause is fixed. `anbud kalkyl` exits with it too when
+# calls failed and no reading call was answered.
+MODEL_UNREACHABLE = 6
+LENS_STEP = "lens:"  # every lens call's step starts so (`loop.run_lens`); the checks' steps don't
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -265,6 +270,14 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
                 file=sys.stderr,
             )
             return REPLAY_INCOMPLETE
+        if client.unanswered(LENS_STEP):
+            kinds = ", ".join(f"{k} {n}" for k, n in sorted(client.failures.items()))
+            print(
+                f"anbud run: no lens call was answered (calls failed for good: {kinds}); not frozen. Check the key, "
+                "the credit balance, the network and the API's status, then resume it with the same --run-id",
+                file=sys.stderr,
+            )
+            return MODEL_UNREACHABLE
         if client.halted:
             print(
                 f"anbud run: stopped before it finished ({client.halted} calls refused); not frozen. "

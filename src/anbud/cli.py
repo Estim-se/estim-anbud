@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from anbud.granskning.command import MODEL_UNREACHABLE
 from anbud.runguard import RunRefused, check_run_allowed, held_out_refusal
 
 NOT_BUILT = 2
@@ -243,6 +244,14 @@ def _kalkyl(args: argparse.Namespace) -> int:
         misses = summary["replay_misses"]
         print(f"anbud kalkyl: replay incomplete: {misses} calls not in the step cache", file=sys.stderr)
         return REPLAY_INCOMPLETE
+    if summary.get("unanswered"):
+        kinds = ", ".join(f"{k} {n}" for k, n in summary.get("failures", {}).items())
+        print(
+            f"anbud kalkyl: no reading call was answered (calls failed for good: {kinds}); not frozen. Check the key, "
+            "the credit balance, the network and the API's status, then resume it with the same --run-id",
+            file=sys.stderr,
+        )
+        return MODEL_UNREACHABLE
     if summary.get("freeze_failures"):
         print(f"anbud kalkyl: {summary['freeze_failures']} entries could not be made read-only", file=sys.stderr)
         return 1
