@@ -184,7 +184,7 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             return PAID_REFUSED
     # The dry run's tier is the most the run may spend; the prefix the map's first call measures can only lower it.
     ceiling = granskning_stop(config.budgets, estimate_tokens(system_blocks(corpus, calc)), ESTIMATE)
-    budget = Budget(ceiling.usd)
+    budget = Budget(ceiling.usd, wait=True)  # a call waits for room while others are in flight (`Budget`)
     client = ModelClient(
         config,
         sdk,

@@ -44,13 +44,18 @@ from anbud.kalkyl.settings import EXTRACT, MATCH, KalkylConfig, load_kalkyl_conf
 from anbud.kalkyl.tables import load_cells
 from anbud.kalkyl.xlsx import write_workbook
 from anbud.model_client import Budget, ModelClient
+from anbud.models import Event
 from anbud.prep.tender import CELLS_FILE, IntakeStop
 from anbud.selection import OVERRIDE_FILE, SELECTION_FILE, Selection, SelectionError, load_selected
 from anbud.stops import estimate_label, kalkyl_stop
 from anbud.store import RunStore, canonical
 
 READ_STEP = "kalkyl.extract."  # every R2 reading call's step starts so (`extract.extract_chunk`)
-CHARS_PER_TOKEN = 3.0  # Swedish text with block markup; conservative, so the estimate errs high
+# Fitted on the dev tender's paid reading calls (171 first turns): 1.50-2.23 characters per token in a chunk message,
+# 2.24-2.30 in the cached prefix. The smallest, rounded down, so the estimate errs high on every call measured, and a
+# run's tier is never picked too low for its size. Each run summary records chars and tokens (`tokens`) to fit again.
+CHARS_PER_TOKEN = 1.4
+TOOLS_TOKENS = 4000  # the extraction tools in the cached prefix: about 3,600 measured, rounded up
 OUTPUT_TOKENS_PER_CHUNK = (3000, 8000)  # records plus adaptive thinking at medium effort, low and high
 CARD_USD_PER_TILE = 0.03  # an R1 card that has to be read (plan section 9.1: 10 tiles about $0.17), rounded up
 # What every finished run writes into its outputs folder (`run`); cards_masking.json only when a card was masked. An
@@ -254,7 +259,7 @@ def run_dev_tender(
     cells = load_cells(tender / "prep" / CELLS_FILE)
     estimate = _estimate(config, kalkyl, corpus, cells, catalog, store, company_id, tender_id)
     stop = kalkyl_stop(kalkyl.stops, estimate["cost_usd_est_high"], kalkyl.margin)  # before any paid call
-    budget = Budget(stop.usd)
+    budget = Budget(stop.usd, wait=True)  # a call waits for room while others are in flight (`Budget`)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
     corpus, cards = with_cards(client, store, corpus, tender_id)
     try:
@@ -293,6 +298,7 @@ def run_dev_tender(
         **result.counts(),
         "cost_usd": round(budget.spent, 4),
         "stop": {**stop.summary(), "cost_usd_est_high": estimate["cost_usd_est_high"], "margin": kalkyl.margin},
+        "tokens": token_counts(store.events(run_id), chunk_chars(corpus, kalkyl, cells), estimate["prefix_chars"]),
         "persist_failures": client.persist_failures,
         "replay_misses": client.replay_misses,
         "halted": client.halted,  # calls refused by a limit: the hard stop, the spend cap or a stop marker
@@ -306,6 +312,32 @@ def run_dev_tender(
     if finished:  # returned, not written: summary.json is read-only from here
         summary["freeze_failures"] = len(freeze_tree(out) + freeze_tree(store.run_dir(run_id)))
     return summary
+
+
+def chunk_chars(corpus: Corpus, kalkyl: KalkylConfig, cells: Any) -> dict[str, int]:
+    """Each chunk's message length in characters, as the reading call sends it, by chunk id."""
+    heads = heading_paths(corpus)
+    chunks = make_chunks(corpus, kalkyl.chunk_max_chars, kalkyl.chunk_max_quantity_lines)
+    return {c.id: len(chunk_message(c, corpus, heads, cells)) for c in chunks}
+
+
+def token_counts(events: list[Event], chars: dict[str, int], prefix_chars: int) -> dict[str, Any]:
+    """Characters and tokens to fit CHARS_PER_TOKEN again, counts only: each paid first reading turn's chunk message
+    against its uncached input tokens, and the prefix against the most tokens a call cached (the tools included)."""
+    first: dict[str, Event] = {}
+    for event in events:
+        if event.kind == "model_call" and event.step.startswith(READ_STEP):
+            first.setdefault(event.step, event)  # a repair or follow-up turn shares its chunk's step
+    measured = [(chars[c], e.input_tokens or 0) for s, e in first.items() if (c := s[len(READ_STEP) :]) in chars]
+    cached = max(((e.cache_read_tokens or 0) + (e.cache_write_tokens or 0) for e in first.values()), default=0)
+    return {
+        "chars_per_token": CHARS_PER_TOKEN,
+        "prefix_chars": prefix_chars,
+        "prefix_tokens_measured": cached or None,
+        "chunks_measured": len(measured),
+        "chunk_chars": sum(c for c, _ in measured),
+        "chunk_tokens_measured": sum(t for _, t in measured),
+    }
 
 
 def plan(
@@ -371,7 +403,8 @@ def _estimate(
     chunks = make_chunks(corpus, kalkyl.chunk_max_chars, kalkyl.chunk_max_quantity_lines)
     heads = heading_paths(corpus)
     catalog_chars = len(prompt_lines(catalog)) if catalog else 0
-    prefix_tokens = int((len(BRIEF) + catalog_chars + len(outline_text(corpus))) / CHARS_PER_TOKEN) + 3000  # + tools
+    prefix_chars = len(BRIEF) + catalog_chars + len(outline_text(corpus))
+    prefix_tokens = int(prefix_chars / CHARS_PER_TOKEN) + TOOLS_TOKENS
     chunk_tokens = [int(len(chunk_message(c, corpus, heads, cells)) / CHARS_PER_TOKEN) for c in chunks]
     price = config.price_for(config.model_for(EXTRACT))
     match = kalkyl.roles[MATCH]
@@ -405,6 +438,7 @@ def _estimate(
         "cards_stored": sources["stored"],
         "cards_from_earlier_run": sources["earlier_run"],
         "cards_to_read": sources["read"],
+        "prefix_chars": prefix_chars,
         "prefix_tokens_est": prefix_tokens,
         "chunk_tokens_est_max": max(chunk_tokens, default=0),
         "cost_usd_est_low": round(cost(low, 0.1), 2),

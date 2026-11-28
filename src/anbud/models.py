@@ -120,7 +120,7 @@ class Event(_Model):
     run_id: str
     company_id: str
     step: str
-    kind: Literal["start", "model_call", "cache_hit", "tool_call", "result", "error", "end"]
+    kind: Literal["start", "model_call", "cache_hit", "tool_call", "result", "error", "end", "budget_wait"]
     at: datetime
     duration_ms: int | None = None
     input_tokens: int | None = None
@@ -131,6 +131,10 @@ class Event(_Model):
     blob: str | None = Field(default=None, description="Content hash of the stored response")
     request_blob: str | None = Field(default=None, description="Content hash of the stored request")
     size_bytes: int | None = None
+    # A `budget_wait`: the call's own reservation, and what was reserved and in flight when it began to wait.
+    reserve_usd: float | None = None
+    reserved_usd: float | None = None
+    in_flight: int | None = None
 
 
 MoneyBasis.model_rebuild()
