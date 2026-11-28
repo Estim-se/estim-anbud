@@ -39,7 +39,9 @@
 set -euo pipefail
 
 MIN_FREE_GB=${MIN_FREE_GB:-10}
-STATUS_LINES='^(anbud eval|anbud: |quarantine:|prep:|deadlines:|dry runs:|scoring plan:|paid exam|both splits|estimate:|estimate id:|warning:)'
+# The exam's own status lines. Each split prints only its header, the prospective deadlines and the scoring plan; every
+# other count is one total over both splits, printed once after both (`both splits`, `dry runs, both splits`).
+STATUS_LINES='^(anbud eval|anbud: |deadlines:|dry runs, both splits|scoring plan:|paid exam|both splits|estimate:|estimate id:|warning:)'
 
 die() {
   echo "exam-run: $*" >&2

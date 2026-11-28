@@ -129,7 +129,7 @@ def test_a_dry_exam_quarantines_prepares_estimates_and_prints_aggregates_only(
     assert set(report.estimate_usd) == {"granskning", "kalkyl", "baseline"} and report.estimate_unknown == 0
     assert 0 < report.estimate_total <= report.worst_case_usd
     assert report.baseline_runs == 5 and report.dry_runs_ok == {"baseline": 5}
-    assert "dry runs: baseline 5 of 5 reached the first model call" in printed
+    assert "dry runs, both splits: baseline 5 of 5 reached the first model call" in printed
     assert report.prefix_tokens["runs"] == 3 and 0 < report.prefix_tokens["median"] <= report.prefix_tokens["max"]
     assert report.prefix_tokens["over_context"] == report.prefix_tokens["over_large"] == 0
     assert "granskning prefix after the selection, before the prefix budget (dry-run estimate" in printed
@@ -137,7 +137,7 @@ def test_a_dry_exam_quarantines_prepares_estimates_and_prints_aggregates_only(
     # One total over both splits; only this split has been examined, with three prepared tenders.
     assert report.combined["tenders"] == 3 and report.combined["by_split"] == {"prospective": 3}
     assert report.combined["selection"]["tenders"] == 3 and report.combined["selection"]["would_stop"] == 0
-    assert "both splits, one total over 3 prepared tenders (prospective 3): " in printed
+    assert "both splits, one total over 3 prepared tenders: " in printed
     assert "prefix budget 450,000 tokens: 0 of 3 tenders would stop" in printed
 
     # Deadlines: one open in 12 days, one passed (warned), one unknown.
@@ -448,7 +448,9 @@ def test_prep_stops_are_counted_by_category_and_prefix_sizes_summarised(data_roo
     report = exam.run_exam("co-002", "prospective", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
     printed = "\n".join(lines)
     assert report.prepared == 2 and report.prep_failed == 1 and report.prep_stops == {"security_marking": 1}
-    assert "prep: 2 prepared, 1 stopped (security_marking 1)" in lines
+    assert "; prep: 2 prepared, 1 stopped (security_marking 1; 1 of them kept, not read again by a later pass)" in (
+        printed
+    )
     assert report.prefix_tokens["median"] == 725_000 and report.prefix_tokens["max"] == 1_200_000
     assert report.prefix_tokens["over_context"] == 1 and report.prefix_tokens["over_large"] == 2
     assert (
@@ -579,7 +581,7 @@ def test_a_security_marking_stop_is_kept_and_the_tender_never_read_again(
     assert sorted(runner.prepped) == ["t-0003", "t-0003", "t-0004", "t-0004"]
     assert again.prepared == 2 and again.prep_stops == {"security_marking": 1} and again.prep_stops_kept == 1
     assert again.quarantined == first.quarantined == 3 and again.held == first.held
-    assert "1 stopped (security_marking 1; 1 kept from an earlier pass, not read again)" in "\n".join(lines)
+    assert "1 stopped (security_marking 1; 1 of them kept, not read again by a later pass)" in "\n".join(lines)
 
 
 def test_any_other_prep_stop_is_retried_on_the_next_pass(data_root: Path) -> None:
@@ -595,48 +597,28 @@ def test_any_other_prep_stop_is_retried_on_the_next_pass(data_root: Path) -> Non
 
 
 def test_no_figure_for_a_group_of_fewer_than_two_tenders(data_root: Path) -> None:
-    """The held-out split here is one tender: its passes print counts of tenders only, and sizes and estimates appear
-    only as one total over both splits once at least two tenders are prepared."""
+    """The held-out split here is one tender. Its pass prints its tender count only: every count, size and estimate is
+    one total over both splits, printed once, after both splits (test_exam_counts_both)."""
     sealed_store(data_root)
     runner = FakeEngines({"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0})
-
-    ids: list[str | None] = []
-
-    def exam_pass(kind: str, now: datetime) -> list[str]:
-        lines: list[str] = []
-        report = exam.run_exam("co-002", kind, runner=runner, now=now, local_now=LOCAL_NOW, say=lines.append)
-        ids.append(exam.estimate_digest(report))
-        return lines
-
-    alone = [
-        "anbud eval heldout: 1 tenders; fewer than 2, so counts of tenders only",
-        "prep: 1 prepared, 0 stopped",
-        "dry runs: baseline all reached the first model call",
+    lines: list[str] = []
+    reports = exam.run_both("co-002", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
+    held_out = lines.index("anbud eval heldout: 1 tenders; counts are over both splits")
+    assert lines[held_out + 1].startswith("both splits, 4 tenders: answer keys held in ")  # nothing of its own between
+    assert lines[held_out + 1].endswith("; prep: 4 prepared, 0 stopped")
+    assert lines[held_out + 2] == "dry runs, both splits: baseline 7 of 7 reached the first model call"
+    assert [x for x in lines if x.startswith("both splits, one total")] == [
+        "both splits, one total over 4 prepared tenders: 8 documents (skipped by type: none), 200 pages (granskning "
+        "input)"
     ]
-    assert exam_pass("heldout", NOW) == [*alone, "both splits: fewer than 2 prepared tenders, so no sizes or estimates"]
-
-    prospective = exam_pass("prospective", NOW)
-    assert "prep: 3 prepared, 0 stopped" in prospective  # three tenders: the split's own lines carry figures
-    combined = [
-        line for line in prospective if line.startswith(("both splits", "granskning prefix", "hard-stop", "estimate"))
-    ]
-    assert combined[0] == (
-        "both splits, one total over 4 prepared tenders (heldout 1, prospective 3): 8 documents "
-        "(skipped by type: none), 200 pages (granskning input)"
-    )
     # Per tender: Granskning 10,000 tokens ($0.975), Kalkyl $1.50, the old engine 50 pages per input ($1.65); four
     # tenders, seven old-engine inputs (the folder delivery has one).
-    assert combined[-1] == (
+    assert lines[-1] == (
         "estimate: $21.45 (baseline $11.55, granskning $3.90, kalkyl $6.00; 7 old-engine runs); "
         "worst case $162.00 (every hard stop: baseline $70.00, granskning $80.00, kalkyl $12.00)"
     )
-
-    again = exam_pass("heldout", datetime(2026, 12, 1, 10, 0, tzinfo=UTC))
-    assert again[:3] == alone and again[3:] == combined  # the same total, from each split's last pass
-    assert not any("$" in line or "pages" in line or "held in" in line for line in again[:3])
-    # The estimate id is a hash of that one total too: none for the held-out tender alone, then the same from both
-    # splits, so it never tells whether the held-out tender's own estimate changed.
-    assert ids[0] is None and ids[1] is not None and ids[2] == ids[1]
+    # The estimate id is a hash of that one total, the same from either split's report.
+    assert len({exam.estimate_digest(r) for r in reports}) == 1 and exam.estimate_digest(reports[-1]) is not None
 
 
 def test_the_cli_prints_an_estimate_id_only_for_a_total_of_two_or_more(
@@ -644,14 +626,14 @@ def test_the_cli_prints_an_estimate_id_only_for_a_total_of_two_or_more(
 ) -> None:
     monkeypatch.setattr(cli, "held_out_refusal", lambda: None)
     one = exam.Report(kind="heldout", tenders=1, combined={"tenders": 1, "estimate_usd": {"kalkyl": 3.0}})
-    monkeypatch.setattr(exam, "run_exam", lambda *a, **kw: one)
-    assert cli.main(["eval", "heldout", "co-002"]) == 0
+    monkeypatch.setattr(exam, "run_both", lambda *a, **kw: [exam.Report(kind="prospective"), one])
+    assert cli.main(["eval", "exam", "co-002"]) == 0
     assert "estimate id" not in capsys.readouterr().out
     one.combined = {"tenders": 2, "estimate_usd": {"kalkyl": 3.0}, "worst_usd": 6.0}
-    assert cli.main(["eval", "heldout", "co-002"]) == 0
+    assert cli.main(["eval", "exam", "co-002"]) == 0
     assert f"estimate id: {exam.estimate_digest(one)}" in capsys.readouterr().out
     one.estimate_usd = {"kalkyl": 1.0}  # the split's own estimate doesn't enter the id
-    assert cli.main(["eval", "heldout", "co-002"]) == 0
+    assert cli.main(["eval", "exam", "co-002"]) == 0
     assert f"estimate id: {exam.estimate_digest(one)}" in capsys.readouterr().out
     assert exam.estimate_digest(one) == exam.estimate_digest(exam.Report(kind="prospective", combined=one.combined))
 

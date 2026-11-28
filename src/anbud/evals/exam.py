@@ -1,5 +1,8 @@
-"""`anbud eval heldout|prospective|exam <co>`: the exam on sealed tenders. Aggregates only. `exam` runs both splits
-in one invocation, prospective then held-out (`run_both`), and is the only way to run the paid exam.
+"""`anbud eval exam <co>`: the exam on sealed tenders. Aggregates only. It runs both splits in one invocation,
+prospective then held-out (`run_both`), at $0 or paid; a split alone is refused. Each split's pass prints its tender
+count, the prospective deadlines and the scoring plan. Every other count (quarantine, prep, dry runs, sizes, the
+estimate) is one total over both splits, printed once, after both: the held-out split is one tender, so a count of
+its own would be that tender's, and a total printed after one split would hold the other's figures from its last pass.
 
 It runs only where `runguard.held_out_refusal()` allows: a person at a terminal, or the eval lane
 (`ANBUD_EVAL_LANE=1`). Everything it writes stays under `sealed/`. Nothing it prints names a tender, a file or a
@@ -81,6 +84,7 @@ VARIANT_LABELS = {
 CHILD_ENV_DROP = ("ANBUD_EVAL_LANE", "ANBUD_DATA_ROOT")
 MIN_GROUP = 2  # no figure for a group of fewer tenders
 KEPT_STOPS = ("security_marking",)  # prep stops a later pass doesn't retry; the tender isn't read again
+PREPARED = "prepared"  # a tender record's `prep` when its last pass prepared it; else the category of its stop
 
 
 class ExamError(RuntimeError):
@@ -213,6 +217,10 @@ def kept_stop(company_id: str, kind: str, tender_id: str, root: Path | None = No
 
 def keep_stop(company_id: str, kind: str, tender_id: str, record: dict[str, Any], stop: str, root: Path | None) -> None:
     record["prep_stop"] = stop
+    _write_record(company_id, kind, tender_id, record, root)
+
+
+def _write_record(company_id: str, kind: str, tender_id: str, record: dict[str, Any], root: Path | None) -> None:
     intake._write_private(_record_path(company_id, kind, tender_id, root), json.dumps(record, indent=1, sort_keys=True))
 
 
@@ -774,10 +782,17 @@ def run_exam(
     local_now: datetime | None = None,
     root: Path | None = None,
     say: Callable[[str], None] = print,
+    say_total: bool = True,
 ) -> Report:
-    """The exam. `say` gets aggregate lines only. Raises ExamError before anything is unpacked when it can't start."""
+    """The exam. `say` gets aggregate lines only. Raises ExamError before anything is unpacked when it can't start.
+    With `say_total` false the total over both splits isn't printed: `run_both` prints it once, after both splits."""
     if kind not in KINDS:
         raise ExamError("the exam is heldout or prospective")
+    try:  # the errors meant to be shown come before any tender is read; the CLI shows only the type of any other
+        paths.check_company_id(company_id)
+        cfg, stops = exam_config(), hard_stops()
+    except (ValueError, KeyError, OSError) as exc:
+        raise ExamError(f"the exam can't start: {exc}" if isinstance(exc, ValueError) else type(exc).__name__) from None
     if paid and (budget_usd is None or budget_usd <= 0):
         raise ExamError("a paid exam needs --budget, in USD")
     unknown = set(engines) - set(ENGINES)
@@ -805,8 +820,6 @@ def run_exam(
     stamp = _stamp(now)
     logs = exam / "logs" / stamp
     runner = runner or Engines(logs, app, app_ref, root)
-    cfg = exam_config()
-    stops = hard_stops()
     found = {t: deadline_of(company_id, t, root) for t in tenders}
     if kind == "prospective":
         report.deadlines = deadlines(found, local_now)
@@ -815,6 +828,7 @@ def run_exam(
     # 1-2. Quarantine and prep.
     records: dict[str, dict[str, Any]] = {}
     ready: list[str] = []
+    prep_of: dict[str, str] = {}  # tender -> PREPARED or the category of its prep stop
     for t in tenders:
         kept = kept_stop(company_id, kind, t, root)
         record = kept or quarantine(company_id, kind, t, root)
@@ -838,6 +852,7 @@ def run_exam(
                 keep_stop(company_id, kind, t, record, stop, root)
         if stop is not None:
             report.prep_stops[stop] = report.prep_stops.get(stop, 0) + 1
+        prep_of[t] = PREPARED if stop is None else stop
         ok = stop is None
         report.prepared += ok
         report.prep_failed += not ok
@@ -938,16 +953,13 @@ def run_exam(
     report.estimate_usd = {k: round(v, 2) for k, v in sorted(estimate.items())}
     report.worst_case_usd = round(report.worst_case_usd, 2)
     report.prefix_tokens = prefix_stats(prefixes, int(cfg["context_tokens"]), int(cfg["large_prefix_tokens"]))
-    for t in tenders:  # each tender's record holds the sizes of its last pass, and none once prep stops
-        record = dict(records[t])
+    for t in tenders:  # each tender's record holds its last pass: its prep outcome, and its sizes once prepared
+        record = {k: v for k, v in records[t].items() if k not in ("sizes", "dry_runs")}
+        record["prep"] = prep_of[t]
         if t in sizes:
             record["sizes"] = sizes[t]
-        elif "sizes" not in record:
-            continue
-        else:
-            del record["sizes"]
         records[t] = record
-        intake._write_private(_record_path(company_id, kind, t, root), json.dumps(record, indent=1, sort_keys=True))
+        _write_record(company_id, kind, t, record, root)
     report.combined = combine(company_id, status, root)
 
     # The old engine's dry run on each input: the plumbing works, and nothing is sent.
@@ -966,8 +978,13 @@ def run_exam(
                 )
                 report.dry_runs["baseline"] = report.dry_runs.get("baseline", 0) + 1
                 report.dry_runs_ok["baseline"] = report.dry_runs_ok.get("baseline", 0) + one.ok
+                ok, total = records[t].setdefault("dry_runs", {}).get("baseline", [0, 0])
+                records[t]["dry_runs"]["baseline"] = [ok + one.ok, total + 1]
+            if plans[t]:
+                _write_record(company_id, kind, t, records[t], root)
+        report.combined = combine(company_id, status, root)
         _write_exam(exam, stamp, report, records, [])
-        _say(report, say)
+        _say(report, say, say_total)
         return report
 
     # 4. Paid runs, within the budget. The budget is the whole exam's, over both splits and every pass: what earlier
@@ -982,7 +999,7 @@ def run_exam(
     left = sum(usd for (t, e, v), usd in run_estimates.items() if (f"{company_id}/{t}", e, v) not in attempts)
     left = round(left + _owed_elsewhere(company_id, kind, status, attempts, root), 2)
     if report.spent_before_usd + left > budget_usd:
-        raise ExamError(_refusal(report, budget_usd))
+        raise ExamError(_refusal(company_id, budget_usd))
     runs: list[EngineRun] = []
     done: set[tuple[str, str, str]] = set()  # pairs with an attempt on record, or nothing to run (prefix budget)
     todos: dict[str, list[tuple[str, str]]] = {}
@@ -1069,7 +1086,7 @@ def run_exam(
     report.owed += sum(n for stop, n in report.prep_stops.items() if stop not in KEPT_STOPS)
     report.combined["paid"] = paid_summary(company_id, root)
     _write_exam(exam, stamp, report, records, runs)
-    _say(report, say)
+    _say(report, say, say_total)
     return report
 
 
@@ -1111,6 +1128,7 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
     last exam pass prepared it, from the sealed tender records. Never per tender or per split; `tenders` and
     `by_split` are counts of tenders."""
     found: list[dict[str, Any]] = []
+    every: list[dict[str, Any]] = []  # every tender's record, prepared or not
     by_split: Counter[str] = Counter()
     for kind, split in KINDS.items():
         for t in sorted(x for x, s in status.items() if s == split):
@@ -1121,11 +1139,15 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
                 record = json.loads(path.read_text(encoding="utf-8"))
             except ValueError:
                 continue
-            one = record.get("sizes") if isinstance(record, dict) else None
+            if not isinstance(record, dict):
+                continue
+            every.append(record)
+            one = record.get("sizes")
             if isinstance(one, dict):
                 found.append(one)
                 by_split[kind] += 1
     out: dict[str, Any] = {"tenders": len(found), "by_split": dict(sorted(by_split.items()))}
+    out["records"] = _record_counts(every)
     if not found:
         return out
     cfg = exam_config()
@@ -1261,16 +1283,41 @@ def _owed_elsewhere(
     return total
 
 
-def _refusal(report: Report, budget_usd: float) -> str:
-    """Why a paid pass won't start, with no figure of the split's own: for a split with one prepared tender that would
-    be the tender's estimate, and next to the total over both splits it gives the other split's by subtraction."""
-    c = report.combined
-    total = (
-        f"; the estimate over both splits is ${sum(c['estimate_usd'].values()):.2f}, worst case ${c['worst_usd']:.2f}"
-        if int(c.get("tenders") or 0) >= MIN_GROUP and "estimate_usd" in c
-        else ""
+def _refusal(company_id: str, budget_usd: float) -> str:
+    """Why a paid pass won't start, with no figure but the budget. A split's own estimate would be the held-out
+    tender's; and the total over both splits isn't known yet when the prospective pass refuses: it would hold the
+    held-out tender's figures from its last pass, and the difference from the next total would be that tender's
+    change. The invocation without --paid prints the total."""
+    return (
+        f"the runs left, with what earlier passes charged, are above the budget (${budget_usd:.2f}); "
+        f"`anbud eval exam {company_id}` without --paid prints the estimate and the worst case over both splits"
     )
-    return f"the runs left, with what earlier passes charged, are above the budget (${budget_usd:.2f}){total}"
+
+
+def _record_counts(every: list[dict[str, Any]]) -> dict[str, Any]:
+    """Quarantine, prep and the old engine's dry runs, one total over every tender record of both splits."""
+    held: Counter[str] = Counter()
+    stops: Counter[str] = Counter()
+    dry: dict[str, list[int]] = {}
+    for record in every:
+        held.update({str(k): int(n) for k, n in (record.get("held") or {}).items()})
+        prep = record.get("prep") or (record.get("prep_stop") or (PREPARED if "sizes" in record else "unknown"))
+        if prep != PREPARED:
+            stops[str(prep)] += 1
+        for engine, pair in (record.get("dry_runs") or {}).items() if prep == PREPARED else ():
+            ok, total = dry.setdefault(engine, [0, 0])
+            dry[engine] = [ok + int(pair[0]), total + int(pair[1])]
+    return {
+        "tenders": len(every),
+        "held_tenders": sum(bool(record.get("held")) for record in every),
+        "held": dict(sorted(held.items())),
+        "amendments_to_kalkyl": sum(int(record.get("amendments_to_kalkyl") or 0) for record in every),
+        "same_input": sum(bool(record.get("same_input")) for record in every),
+        "prepared": len(every) - sum(stops.values()),
+        "stops": dict(sorted(stops.items())),
+        "kept": sum(bool(record.get("prep_stop") in KEPT_STOPS) for record in every),
+        "dry_runs": {k: v for k, v in sorted(dry.items())},
+    }
 
 
 def _write_exam(
@@ -1291,38 +1338,26 @@ def _counts(values: dict[str, int]) -> str:
     return ", ".join(f"{k} {v}" for k, v in sorted(values.items())) or "none"
 
 
-def _say(r: Report, say: Callable[[str], None]) -> None:
-    """Aggregates only, and no figure for a group of fewer than `MIN_GROUP` tenders."""
-    small = r.tenders < MIN_GROUP
-    say(f"anbud eval {r.kind}: {r.tenders} tenders" + ("; fewer than 2, so counts of tenders only" if small else ""))
-    if not small:
-        say(
-            f"quarantine: answer keys held in {r.held_tenders} of {r.quarantined} ({_counts(r.held)}); "
-            f"{r.amendments_to_kalkyl} amendments given to Kalkyl; {r.same_input} tenders with one input for both"
-        )
-    kept = f"; {r.prep_stops_kept} kept from an earlier pass, not read again" if r.prep_stops_kept else ""
-    stops = f" ({_counts(r.prep_stops)}{kept})" if r.prep_stops else ""
-    say(f"prep: {r.prepared} prepared, {r.prep_failed} stopped{stops}")
+def _say(r: Report, say: Callable[[str], None], say_total: bool = True) -> None:
+    """Per split, only what no tender's outcome changes: the split's tender count (from the split ledger), the
+    prospective deadlines (public) and the scoring plan. Quarantine, prep, the dry runs, sizes and the estimate are
+    counted over both splits only (`_say_combined`): the held-out split is one tender, so a count of its own is that
+    tender's, and a split's own count beside the total gives the other's by subtraction. A paid pass prints no figure
+    of its runs either; the invocation that completes the exam prints their one total (`run_both`)."""
+    say(f"anbud eval {r.kind}: {r.tenders} tenders; counts are over both splits")
     if r.deadlines is not None:
         d = r.deadlines
-        if small:
+        if r.tenders < MIN_GROUP:
             say(f"deadlines: {d.open} open; {d.passed} passed; {d.unknown} unknown")
         else:
             nearest = f"nearest open deadline in {d.nearest_days} days" if d.nearest_days is not None else "none open"
             say(f"deadlines: {d.open} open, {nearest}; {d.passed} passed; {d.unknown} unknown")
         if d.passed:
             say(f"warning: {d.passed} tenders are past their deadline; a run now comes after it")
-    for engine in sorted(r.dry_runs):
-        ok, total = r.dry_runs_ok.get(engine, 0), r.dry_runs[engine]
-        if small:
-            say(f"dry runs: {engine} {'all' if ok == total else 'not all'} reached the first model call")
-        else:
-            say(f"dry runs: {engine} {ok} of {total} reached the first model call")
     if r.plan is not None:
         say(f"scoring plan: ledger line {r.plan['line']}, sha256 {r.plan['sha256'][:12]}")
-    # A paid pass prints no figure of its runs: the held-out split runs last, so any figure printed before the exam is
-    # complete, beside the total printed once it is, would give the held-out runs by subtraction (`run_both`).
-    _say_combined(r.combined, say)
+    if say_total:
+        _say_combined(r.combined, say, dry_runs=not r.paid)
 
 
 def _say_paid(p: dict[str, Any], say: Callable[[str], None]) -> None:
@@ -1380,9 +1415,16 @@ def run_both(
             local_now=local_now,
             root=root,
             say=say,
+            say_total=False,
         )
         for kind in ORDER
     ]
+    # One total over both splits, after both: a total printed after the first split would hold the other's figures
+    # from its last pass, and the difference from this one would be that split's change.
+    total = combine(company_id, sh.load_ledger(paths.ledger_path(company_id, root)).status, root)
+    for report in reports:
+        report.combined = {**total, **({"paid": report.combined["paid"]} if "paid" in report.combined else {})}
+    _say_combined(total, say, dry_runs=not paid)
     if paid:
         if tuple(sorted(engines)) == tuple(sorted(ENGINES)) and not any(r.owed for r in reports):
             _say_paid(paid_summary(company_id, root), say)
@@ -1394,14 +1436,27 @@ def run_both(
     return reports
 
 
-def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
-    """The total over both splits, or a note when fewer than `MIN_GROUP` tenders have sizes."""
+def _say_combined(c: dict[str, Any], say: Callable[[str], None], dry_runs: bool = True) -> None:
+    """The total over both splits, or a note when fewer than `MIN_GROUP` tenders have a record or sizes. No count in
+    it is per split."""
+    q = c.get("records") or {}
+    if q.get("tenders", 0) < MIN_GROUP:
+        say("both splits: fewer than 2 tenders examined, so no counts")
+        return
+    kept = f"; {q['kept']} of them kept, not read again by a later pass" if q["kept"] else ""
+    stops = f" ({_counts(q['stops'])}{kept})" if q["stops"] else ""
+    say(
+        f"both splits, {q['tenders']} tenders: answer keys held in {q['held_tenders']} ({_counts(q['held'])}); "
+        f"{q['amendments_to_kalkyl']} amendments given to Kalkyl; {q['same_input']} with one input for both; "
+        f"prep: {q['prepared']} prepared, {sum(q['stops'].values())} stopped{stops}"
+    )
+    for engine, (ok, total) in (q.get("dry_runs") or {}).items() if dry_runs else ():
+        say(f"dry runs, both splits: {engine} {ok} of {total} reached the first model call")
     if c.get("tenders", 0) < MIN_GROUP:
         say("both splits: fewer than 2 prepared tenders, so no sizes or estimates")
         return
-    splits = ", ".join(f"{k} {v}" for k, v in c["by_split"].items())
     say(
-        f"both splits, one total over {c['tenders']} prepared tenders ({splits}): {c['documents']} documents "
+        f"both splits, one total over {c['tenders']} prepared tenders: {c['documents']} documents "
         f"(skipped by type: {_counts(c['skipped_by_type'])}), {c['pages']} pages (granskning input)"
     )
     p = c.get("prefix") or {}
