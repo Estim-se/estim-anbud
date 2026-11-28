@@ -38,9 +38,9 @@ from anbud.tools import ROLES, own_tools, shared_tools
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # A call that fails on one of these kinds is tried again after each delay in turn (seconds), on top of the SDK's own
 # retry: a 429, a 529 or 5xx, an overload or API error event inside an open stream (`BODY_KINDS`, which the SDK never
-# retries), a dropped connection, a timeout. Each attempt reserves against the hard stop like any call, so a retry the
-# stop refuses is skipped or halts as usual.
-TRANSIENT = frozenset({"rate_limited", "server", "connection", "timeout"})
+# retries), a dropped connection, a timeout, any other failure inside the SDK's call (`stream`). Each attempt reserves
+# against the hard stop like any call, so a retry the stop refuses is skipped or halts as usual.
+TRANSIENT = frozenset({"rate_limited", "server", "connection", "timeout", "stream"})
 RETRY_DELAYS = (5.0, 20.0)
 KEYCHAIN_SERVICE = "estim-anbud"
 KEYCHAIN_ACCOUNT = "anbud-dev"
@@ -431,7 +431,7 @@ class ModelClient:
         count_params = {k: v for k, v in params.items() if k != "max_tokens"}
         try:
             input_tokens = self.sdk.messages.count_tokens(**count_params).input_tokens
-        except Exception as exc:  # noqa: BLE001 - mapped to ModelError below; any other failure is a bug and re-raised
+        except Exception as exc:  # noqa: BLE001 - the SDK's call only: mapped to ModelError (`_mapped`)
             raise self._failed(exc) from exc
         try:
             reserved = self.budget.reserve(price.max_cost(input_tokens, max_tokens))
@@ -561,7 +561,8 @@ class ModelClient:
     @staticmethod
     def _mapped(exc: Exception) -> ModelError:
         """The SDK's errors, and a transport error it lets through: a stream that drops after it opened (a protocol,
-        read or write error, a read timeout) surfaces as httpx's own error, not the SDK's. Anything else is a bug."""
+        read or write error, a read timeout) surfaces as httpx's own error, not the SDK's. Any other exception from
+        the SDK's call is `stream`."""
         import anthropic
         import httpx2
 
@@ -571,4 +572,8 @@ class ModelClient:
             return ModelError("timeout", None, None, type(exc).__name__)
         if isinstance(exc, httpx2.TransportError):
             return ModelError("connection", None, None, type(exc).__name__)
-        raise exc
+        # Anything else the SDK's count or stream raised: a malformed event's JSON, a body that won't decode, a stream
+        # that ended before its message started, the SDK's own ValueError, RuntimeError or AssertionError. The call
+        # failed, not the harness: it is tried again and, if it still fails, recorded like any failed call, so the
+        # step is lost, never the run, and a $0 rebuild loses the same work. Only `_send`'s SDK calls get here.
+        return ModelError("stream", None, None, type(exc).__name__)
