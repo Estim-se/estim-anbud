@@ -41,6 +41,11 @@ LEDGER = "ledger.jsonl"
 LOCK = "ledger.lock"
 FREEZE_KINDS = ("freeze", "manual_freeze_v0")
 PLAN_KIND = "preregistration"  # a scoring plan, frozen before any paid exam
+# How a frozen run ended. Only a finished run can be a scored prediction; a halted one (stopped by a limit: its hard
+# stop, the spend cap, a stop marker or a timeout) and a failed one (stopped by an error) are frozen so that every
+# attempt is on record. A freeze line without a status was written before statuses and is a finished run.
+FINISHED, HALTED, FAILED = "finished", "halted", "failed"
+RUN_STATUSES = (FINISHED, HALTED, FAILED)
 HASHED_REPO_DIRS = ("config", "schemas", "lenses")
 PREP_FILES = ("blocks.jsonl", "documents.json", "summary.json")
 # The names the harness itself gives files and folders in a run; anything else may be a customer's name.
@@ -220,6 +225,8 @@ def import_manual(company_id: str, source: Path, root: Path | None = None) -> in
 
 
 def is_frozen(company_id: str, tender_id: str, sealed: bool = False, root: Path | None = None) -> bool:
+    """Whether any run of the tender is frozen, whatever its status. A tender whose only runs halted still takes its
+    answers, so that it can be scored as having no prediction rather than not at all."""
     key = f"{_company(company_id)}/{_tender(tender_id)}"
     _, records = _read(ledger_file(company_id, sealed, root), root)
     return any(r.get("tender") == key and r.get("kind") in FREEZE_KINDS for r in records)
@@ -360,24 +367,30 @@ def _inputs(
 
 
 def _own(
-    company_id: str, tender_id: str | None, run_id: str, outputs: Path, record_dir: Path, root: Path | None
+    company_id: str, tender_id: str | None, run_id: str, outputs: Path | None, record_dir: Path, root: Path | None
 ) -> tuple[bool, bool]:
     """Whether the outputs and the run record are in the harness's own folders for this run (paths built from ids
     only), so the ledger may name them in clear: a Granskning run's, or an old-engine baseline run's."""
     own_outputs = own_record = False
     if tender_id is not None:
         baseline = paths.baseline_dir(company_id, tender_id, root) / run_id
-        own_outputs = _is(outputs, paths.dev_tender_dir(company_id, tender_id, root) / "runs" / run_id) or _is(
-            outputs, baseline / "outputs"
+        own_outputs = outputs is not None and (
+            _is(outputs, paths.dev_tender_dir(company_id, tender_id, root) / "runs" / run_id)
+            or _is(outputs, baseline / "outputs")
         )
         own_record = _is(record_dir, baseline / "record")
     own_record = own_record or _is(record_dir, paths.company_dir(company_id, root) / "runs" / run_id)
     return own_outputs, own_record
 
 
+def status_of(record: dict[str, Any]) -> str:
+    """How a frozen run ended; a line from before statuses is a finished run."""
+    return str(record.get("status", FINISHED))
+
+
 def _same_freeze(old: dict[str, Any], new: dict[str, Any]) -> bool:
-    keys = (set(old) | set(new)) - _VOLATILE
-    return all(old.get(k) == new.get(k) for k in keys)
+    keys = (set(old) | set(new)) - _VOLATILE - {"status"}
+    return status_of(old) == status_of(new) and all(old.get(k) == new.get(k) for k in keys)
 
 
 def freeze_run(
@@ -392,13 +405,20 @@ def freeze_run(
     root: Path | None = None,
     input_dir: Path | None = None,
     extra: dict[str, Any] | None = None,
+    status: str = FINISHED,
 ) -> dict[str, Any]:
-    """Hash a finished run into the ledger and make its outputs read-only. Returns the record with its
-    `line_number` and `line_sha256`. Freezing a run again is a no-op when every hash still matches, and refused
-    otherwise: a frozen prediction never changes.
+    """Hash a run into the ledger and make its outputs read-only. Returns the record with its `line_number` and
+    `line_sha256`. Freezing a run again is a no-op when every hash still matches, and refused otherwise: a frozen
+    prediction never changes.
+
+    `status` says how the run ended (`RUN_STATUSES`). A finished run must have written outputs. A halted or failed
+    one may have written none, or no outputs folder at all (`outputs_dir` null in its line); its run record must
+    still be there.
 
     The exam passes `input_dir`, the tender folder the run read (its inbox manifest and prep are hashed from there
     rather than from the dev folder), and `extra`, fields of its own such as the input variant."""
+    if status not in RUN_STATUSES:
+        raise FreezeError(f"a run's status is one of {', '.join(RUN_STATUSES)}")
     _company(company_id)
     try:
         check_run_id(run_id)
@@ -406,13 +426,18 @@ def freeze_run(
         raise FreezeError(str(exc)) from None
     if tender_id is not None:
         _tender(tender_id)
-    outputs = _check_location(outputs_dir, company_id, sealed, root, "outputs")
+    unwritten = status != FINISHED and not outputs_dir.exists() and not outputs_dir.is_symlink()
+    outputs = None if unwritten else _check_location(outputs_dir, company_id, sealed, root, "outputs")
     record_dir = _check_location(run_record_dir, company_id, sealed, root, "run record")
-    output_files = _tree(outputs, "outputs")
-    if not output_files:
+    output_files = {} if outputs is None else _tree(outputs, "outputs")
+    if not output_files and status == FINISHED:
         raise FreezeError("the outputs folder has no files")
     record_files = _tree(record_dir, "run record")
     own_outputs, own_record = _own(company_id, tender_id, run_id, outputs, record_dir, root)
+    if outputs is None:
+        outputs_named = None
+    else:
+        outputs_named = _relative(outputs, root) if own_outputs else _named(_relative(outputs, root), own=False)
 
     config = repo_hashes()
     manifest_sha, prep = _inputs(company_id, tender_id, root, input_dir)
@@ -421,13 +446,14 @@ def freeze_run(
         "kind": "freeze",
         "tender": f"{company_id}/{tender_id}" if tender_id else None,
         "run_id": run_id,
+        "status": status,
         "frozen_at": (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds"),
         "harness": _harness(record_dir),
         "config_sha256": config,
         "config_set_sha256": _sha(canonical(config)),
         "input_manifest_sha256": manifest_sha,
         "prep_sha256": prep,
-        "outputs_dir": _relative(outputs, root) if own_outputs else _named(_relative(outputs, root), own=False),
+        "outputs_dir": outputs_named,
         "run_record_dir": _relative(record_dir, root) if own_record else _named(_relative(record_dir, root), own=False),
         "outputs_sha256": _hash_tree(output_files, own_outputs),
         "run_record_sha256": _hash_tree(record_files, own_record),

@@ -18,6 +18,7 @@ from anbud import cli
 from anbud.evals import freeze
 from anbud.evals.freeze import FreezeError, freeze_run, import_manual, is_frozen, ledger_file, verify
 from anbud.granskning import command
+from anbud.store import canonical
 
 CODE = {"harness_sha": "a" * 40, "dirty": False, "diff_sha256": None}
 NOW = datetime(2026, 11, 26, 12, 0, tzinfo=UTC)
@@ -231,6 +232,55 @@ def test_outputs_become_read_only_and_a_second_freeze_is_a_no_op_or_refused(data
     (outputs / "extra.json").write_text("[]\n")
     with pytest.raises(FreezeError, match="already frozen at ledger line 1"):
         freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001")
+
+
+def test_a_halted_or_failed_run_is_frozen_with_its_status_even_without_outputs(data_root: Path) -> None:
+    outputs, record = make_run(data_root, "r1")
+    halted = freeze_run(
+        "co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", status=freeze.HALTED
+    )
+    assert halted["status"] == "halted" and set(halted["outputs_sha256"]) == {"flags.json", "report/granskning.html"}
+    record = data_root / "co-001" / "runs" / "r2"
+    record.mkdir(parents=True)
+    (record / "run.json").write_text(json.dumps({"code": CODE}))
+    none = data_root / "co-001" / "dev" / "t-0002" / "runs" / "r2"  # the run wrote no outputs folder
+    failed = freeze_run("co-001", "r2", outputs_dir=none, run_record_dir=record, tender_id="t-0002", status="failed")
+    assert (
+        failed["outputs_dir"] is None
+        and failed["outputs_sha256"] == {}
+        and failed["run_record_dir"] == "co-001/runs/r2"
+    )
+    empty = data_root / "co-001" / "dev" / "t-0003" / "runs" / "r3"
+    empty.mkdir(parents=True)
+    assert freeze_run("co-001", "r3", outputs_dir=empty, run_record_dir=record, tender_id="t-0003", status="halted")
+    with pytest.raises(FreezeError, match="outputs folder doesn't exist"):  # a finished run must have outputs
+        freeze_run("co-001", "r4", outputs_dir=none, run_record_dir=record, tender_id="t-0002")
+    with pytest.raises(FreezeError, match="no files"):
+        freeze_run("co-001", "r4", outputs_dir=empty, run_record_dir=record, tender_id="t-0003")
+    with pytest.raises(FreezeError, match="run record folder doesn't exist"):  # every frozen attempt has its record
+        freeze_run(
+            "co-001", "r4", outputs_dir=none, run_record_dir=record.parent / "r4", tender_id="t-0002", status="failed"
+        )
+    with pytest.raises(FreezeError, match="status is one of finished, halted, failed"):
+        freeze_run("co-001", "r4", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", status="ok")
+    lines = [json.loads(line) for line in ledger_file("co-001").read_text().splitlines()]
+    assert [freeze.status_of(r) for r in lines] == ["halted", "failed", "halted"]
+    assert is_frozen("co-001", "t-0002")  # its answers can still be stored, so it is scored as no prediction
+
+
+def test_a_line_from_before_statuses_is_a_finished_run(data_root: Path) -> None:
+    outputs, record = make_run(data_root, "r1")
+    freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", now=NOW)
+    ledger = ledger_file("co-001")
+    old = json.loads(ledger.read_text())
+    del old["status"]
+    ledger.write_bytes(canonical(old) + b"\n")  # the one line, as it was written before statuses
+    assert freeze.status_of(old) == "finished"
+    later = datetime(2026, 11, 28, tzinfo=UTC)
+    again = freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", now=later)
+    assert again["line_number"] == 1 and verify(ledger).lines == 1  # the same freeze: a no-op
+    with pytest.raises(FreezeError, match="already frozen at ledger line 1"):
+        freeze_run("co-001", "r1", outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", status="halted")
 
 
 def test_a_sealed_freeze_uses_the_sealed_ledger(data_root: Path) -> None:
