@@ -237,12 +237,26 @@ def _checks(
     return checks
 
 
+def lost(result: GranskningResult) -> tuple[list[str], bool]:
+    """The lenses an error took after its retries (not the hard stop: that is `budget`), and whether the map's was."""
+    lenses = [r.lens_id for r in result.lenses if r.status == "error" and r.error != BUDGET]
+    return lenses, result.map.tender_map is None
+
+
 def _record_budget(client: ModelClient, store: RunStore, summary_file: str, cov: TenderCoverage) -> None:
     """Adds to the run summary what the hard stop cost the run: the calls it refused, the lenses it kept from running
-    or finishing, and how many of the verifier's flags got a verdict. A run with any of them finished, degraded."""
+    or finishing, and how many of the verifier's flags got a verdict. A run with any of them finished, degraded. And
+    what errors cost it after their retries (`degraded`): the lenses they took, and the map."""
     summary_path = store.run_dir(client.run_id) / summary_file
     try:
         summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+        summary["degraded"] = {
+            "lenses_lost": cov.lenses_lost,
+            "map_lost": cov.map_lost,
+            "retries": client.retries,  # attempts made again after a transient error, recovered or not
+            "failed_calls": sum(client.failures.values()),  # calls that failed for good, after their retries
+            "failures": dict(sorted(client.failures.items())),  # those, by error kind
+        }
         summary["budget"] = {
             "refused_calls": client.budget_refused,
             "lenses_not_run": [lc.lens_id for lc in cov.lenses if lc.budget == "not_run"],
@@ -343,6 +357,12 @@ def run_pipeline(
         parallel=concurrency,
         check_results=checked.lens_results(client.config.model_for(CHECK_ROLE)),
         checks=checked.report,
+    )
+    lenses_lost, map_lost = lost(result)
+    finished.report = finished.report.model_copy(
+        update={
+            "coverage": finished.report.coverage.model_copy(update={"lenses_lost": lenses_lost, "map_lost": map_lost})
+        }
     )
     _record_budget(client, store, summary_file, finished.report.coverage)
     cost = client.budget.spent - spent_before  # every call this pipeline made, merge and failed calls included

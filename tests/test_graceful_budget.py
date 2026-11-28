@@ -186,7 +186,7 @@ def test_a_degraded_run_rebuilt_at_zero_refuses_the_same_calls_and_comes_out_the
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Mutation: drop `self.store.step_put(key, {"refused": "budget"})` in `_refuse`: the rebuild has no record of the
+    """Mutation: drop the refusal record's `self.store.step_put(...)` in `_refuse`: the rebuild has no record of the
     refused verifier calls, misses the step cache on them, and exits replay-incomplete without being frozen."""
     sdk, _ = _paid(monkeypatch, _verifier)
     run = "t-0001-degraded"

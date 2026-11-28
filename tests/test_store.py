@@ -307,7 +307,8 @@ def test_a_failed_event_write_never_hides_the_api_error(tmp_path: Path, monkeypa
     monkeypatch.setattr(store, "append_event", lambda event: (_ for _ in ()).throw(OSError("read-only")))
     with pytest.raises(ModelError) as caught:
         _ask(client, "q1")
-    assert caught.value.kind == "rate_limited" and client.persist_failures == 1
+    # Each attempt's error event (the first and each retry) failed to write; the error still came through.
+    assert caught.value.kind == "rate_limited" and client.retries == 2 and client.persist_failures == 3
 
 
 def test_every_new_folder_is_private(tmp_path: Path) -> None:

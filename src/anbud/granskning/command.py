@@ -231,6 +231,12 @@ def run_command(args: argparse.Namespace, kind: str) -> int:
             f"  verifier: {len(result.verifier.outcomes)} flags {verdicts}, verified {cov.verifier_verified} of "
             f"{cov.verifier_selected}, ${result.verifier.cost_usd:.2f}"
         )
+        if cov.lenses_lost or cov.map_lost or client.retries or client.failures:
+            kinds = ", ".join(f"{k} {n}" for k, n in sorted(client.failures.items())) or "none"
+            print(
+                f"  degraded: {client.retries} attempts made again; calls failed for good: {kinds}; "
+                f"map {'lost' if cov.map_lost else 'kept'}; lenses lost: {', '.join(cov.lenses_lost) or 'none'}"
+            )
         if client.budget_refused:
             skipped = [lc.lens_id for lc in cov.lenses if lc.budget]
             print(

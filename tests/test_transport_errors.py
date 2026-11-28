@@ -187,9 +187,11 @@ def test_a_transport_error_mid_stream_is_a_model_error_with_the_whole_reservatio
             effort="low",
         )
     assert caught.value.kind == kind and DROP not in str(caught.value)
+    attempts = 1 + len(model_client.RETRY_DELAYS)  # each one tried again (item 5), each attempt may have been billed
+    assert len(fake.sent) == attempts and client.retries == attempts - 1
     price = client.config.price_for(client.config.model_for("map"))
-    assert client.budget.spent == pytest.approx(price.max_cost(1000, 64)) and client.budget.reserved == pytest.approx(0)
-    assert client.halted == 0
+    assert client.budget.spent == pytest.approx(attempts * price.max_cost(1000, 64))
+    assert client.budget.reserved == pytest.approx(0) and client.halted == 0
 
 
 def test_any_other_error_is_still_a_bug_and_raised() -> None:
