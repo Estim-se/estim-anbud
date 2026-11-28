@@ -75,6 +75,8 @@ class Outcome:
     organization_ids: list[str] = field(default_factory=list)
     env_names: list[str] = field(default_factory=list)
     blocked_hosts: int = 0
+    calls_waited: int = 0  # calls that waited for room under the hard stop (the preload's `Room`)
+    wait_ms_max: int = 0
     output_file: bool = False
 
 
@@ -280,6 +282,8 @@ def read_calls(calls_log: Path) -> dict[str, Any]:
         "organization_ids": set(),
         "env_names": [],
         "blocked_hosts": 0,
+        "calls_waited": 0,  # calls that waited for room under the hard stop (`Room`)
+        "wait_ms_max": 0,
     }
     lines = calls_log.read_text(encoding="utf-8").splitlines() if calls_log.is_file() else []
     for line in lines:
@@ -307,6 +311,9 @@ def read_calls(calls_log: Path) -> dict[str, Any]:
             out["in_flight_usd_at_stop"] = float(record.get("in_flight_usd") or 0)
         elif event == "blocked":
             out["blocked_hosts"] += 1
+        elif event == "wait":
+            out["calls_waited"] += 1
+            out["wait_ms_max"] = max(out["wait_ms_max"], int(record.get("ms") or 0))
     out["workspace_ids"] = sorted(out["workspace_ids"])
     out["organization_ids"] = sorted(out["organization_ids"])
     return out

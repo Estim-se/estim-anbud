@@ -5,11 +5,12 @@
 // - Every model call is logged to ANBUD_BASELINE_CALLS as one JSON line: sequence, model, max_tokens, HTTP status,
 //   duration, the id headers of the response (request, organization, workspace), usage and cost, and for an error
 //   response its kind (`errorKind`). Never a prompt, a response text or a header value other than those ids.
-// - The hard stop: a call whose worst case would take settled plus in-flight spend past ANBUD_BASELINE_HARD_STOP is
-//   never sent, and the run ends (exit 86).
+// - The hard stop: a call whose worst case would take settled plus in-flight spend past ANBUD_BASELINE_HARD_STOP
+//   waits for the calls in flight, in arrival order (`Room`), and is logged as a `wait`. A call that doesn't fit with
+//   nothing in flight is never sent, and the run ends (exit 86).
 // - With ANBUD_BASELINE_DRY=1 the first model call ends the run before any network (exit 88).
 import { appendFileSync } from 'node:fs';
-import { headerIds, maxCost, mergeUsage, usageCost } from './baseline_usage.mjs';
+import { Room, headerIds, maxCost, mergeUsage, usageCost } from './baseline_usage.mjs';
 
 const EXIT = { hard_stop: 86, blocked: 87, dry_run: 88 };
 const API = 'https://api.anthropic.com/v1/messages';
@@ -44,7 +45,8 @@ const end = (code, record) => {
 };
 write({ event: 'start', env_names: Object.keys(env).sort(), hard_stop_usd: hardStop, dry_run: dry });
 
-let seq = 0, spent = 0, inFlight = 0;
+let seq = 0;
+const room = new Room(hardStop, { wait: true });
 const realFetch = globalThis.fetch;
 
 globalThis.fetch = async (input, init) => {
@@ -69,21 +71,24 @@ globalThis.fetch = async (input, init) => {
   const maxTokens = Number(body?.max_tokens) || null;
   if (dry) end(EXIT.dry_run, { event: 'dry_run', seq: n, model, max_tokens: maxTokens });
   const reserve = body ? maxCost(body, price) : hardStop;
-  if (spent + inFlight + reserve > hardStop) {
-    end(EXIT.hard_stop, { event: 'hard_stop', seq: n, model, reserve_usd: reserve, spent_usd: spent, in_flight_usd: inFlight });
+  const asked = Date.now();
+  let waited = null;
+  try {
+    waited = await room.take(reserve);
+  } catch {
+    end(EXIT.hard_stop, { event: 'hard_stop', seq: n, model, reserve_usd: reserve, spent_usd: room.spent, in_flight_usd: room.reserved, waited_ms: Date.now() - asked });
   }
-  inFlight += reserve;
+  if (waited) write({ event: 'wait', seq: n, model, ms: Date.now() - asked, reserve_usd: reserve, reserved_usd: waited.reserved_usd, in_flight: waited.in_flight });
   const started = Date.now();
   const record = { event: 'call', seq: n, model, max_tokens: maxTokens, reserve_usd: reserve };
   let settled = false;
   const settle = (usage, extra) => {
     if (settled) return;
     settled = true;
-    inFlight -= reserve;
     // A cut-off call is counted at its worst case; an error response is not billed.
     const cost = extra.incomplete ? reserve : usage ? usageCost(usage, price) : extra.status >= 400 ? 0 : reserve;
-    spent += cost;
-    write({ ...record, ...extra, ms: Date.now() - started, usage: usage ?? null, cost_usd: cost, spent_usd: spent });
+    room.settle(reserve, cost);
+    write({ ...record, ...extra, ms: Date.now() - started, usage: usage ?? null, cost_usd: cost, spent_usd: room.spent });
   };
   let response;
   try {

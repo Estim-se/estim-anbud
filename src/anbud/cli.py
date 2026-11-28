@@ -344,6 +344,9 @@ def baseline_report(result: Any) -> list[str]:
     ]
     if result.outcome == "hard_stop":
         lines.append(f"hard stop: up to ${result.in_flight_usd_at_stop:.2f} was in flight when the run ended")
+    if result.calls_waited:
+        longest = result.wait_ms_max / 1000
+        lines.append(f"waited for room under the hard stop: {result.calls_waited} calls, the longest {longest:.0f} s")
     if result.blocked_hosts:
         lines.append(f"blocked: {result.blocked_hosts} request to a host other than the Messages API")
     return lines

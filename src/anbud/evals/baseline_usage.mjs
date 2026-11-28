@@ -3,7 +3,12 @@
 
 const PAGE_TOKENS = 3000; // a PDF page as text plus image, rounded up
 const IMAGE_TOKENS = 1600;
-const CHARS_PER_TOKEN = 3; // rounded down for Swedish text, so the estimate errs high
+// Swedish tender text with markup, as Kalkyl's paid calls measured it (kalkyl/run.py CHARS_PER_TOKEN: 1.50-2.30
+// characters per token); the smallest, rounded down, so the estimate errs high. 3 ran low.
+const CHARS_PER_TOKEN = 1.4;
+// The longest a call waits for room before the run ends at the hard stop anyway: past the app's SDK's own 10-minute
+// call timeout, so a wait that long means a call in flight that never settled.
+const WAIT_LIMIT_MS = 15 * 60 * 1000;
 
 function pdfPages(base64) {
   try {
@@ -93,4 +98,85 @@ export function headerIds(headers) {
     if (lower === 'request-id' || (lower.startsWith('anthropic-') && lower.endsWith('-id'))) out[lower] = value;
   }
   return out;
+}
+
+/** A call the hard stop refuses: it doesn't fit with nothing else in flight, or it waited past the limit. */
+export class Refused extends Error {
+  constructor(reserve, waited) {
+    super('hard stop');
+    this.reserve = reserve;
+    this.waited = waited;
+  }
+}
+
+/**
+ * The hard stop's room, shared by the calls in flight. Each call reserves the most it can cost (`maxCost`) and
+ * settles what it did cost. With `wait`, a call that doesn't fit while others are in flight waits for them, in
+ * arrival order: a later call never takes the room ahead of an earlier one. It is refused only when it doesn't fit
+ * with nothing in flight, or after `limitMs`. Reservations alone then never end a run below its stop.
+ */
+export class Room {
+  constructor(hardStop, { wait = true, limitMs = WAIT_LIMIT_MS } = {}) {
+    this.hardStop = hardStop;
+    this.wait = wait;
+    this.limitMs = limitMs;
+    this.spent = 0;
+    this.reserved = 0;
+    this.inFlight = 0; // a count, so a float's residue never holds a wait
+    this.queue = []; // the calls waiting for room, oldest first
+  }
+
+  fits(usd) {
+    return this.spent + this.reserved + usd <= this.hardStop;
+  }
+
+  /** Resolves when the call may go, with how it waited (null: it didn't); rejects with Refused. */
+  take(usd) {
+    if (!this.queue.length && this.fits(usd)) {
+      this.#grant(usd);
+      return Promise.resolve(null);
+    }
+    if (!this.wait || (!this.queue.length && this.inFlight === 0)) return Promise.reject(new Refused(usd, null));
+    const waited = { reserved_usd: this.reserved, in_flight: this.inFlight };
+    return new Promise((resolve, reject) => {
+      const waiter = { usd, waited, resolve, reject };
+      waiter.timer = setTimeout(() => {
+        this.queue.splice(this.queue.indexOf(waiter), 1);
+        reject(new Refused(usd, waited));
+        this.#drain();
+      }, this.limitMs);
+      this.queue.push(waiter);
+    });
+  }
+
+  /** A reserved call ended, whatever the way: its reservation is released and what it cost is spent. */
+  settle(reserved, actual) {
+    this.reserved -= reserved;
+    this.spent += actual;
+    this.inFlight -= 1;
+    this.#drain();
+  }
+
+  #grant(usd) {
+    this.reserved += usd;
+    this.inFlight += 1;
+  }
+
+  #drain() {
+    while (this.queue.length) {
+      const head = this.queue[0];
+      if (this.fits(head.usd)) {
+        this.queue.shift();
+        clearTimeout(head.timer);
+        this.#grant(head.usd);
+        head.resolve(head.waited);
+      } else if (this.inFlight === 0) {
+        this.queue.shift();
+        clearTimeout(head.timer);
+        head.reject(new Refused(head.usd, head.waited)); // nothing left to settle: it never fits
+      } else {
+        return;
+      }
+    }
+  }
 }
