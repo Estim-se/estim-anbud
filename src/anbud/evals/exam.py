@@ -981,6 +981,7 @@ def run_exam(
     if plan is not None:
         report.plan = {"file": plan["file"], "sha256": plan["sha256"], "line": plan["line_number"]}
     exam = exam_dir(company_id, kind, root)
+    _check_ledger_heads(company_id, root)  # before any work: a ledger that lost lines would run a pair again
     stamp = _stamp(now)
     logs = exam / "logs" / stamp
     runner = runner or Engines(logs, app, app_ref, root)
@@ -1167,7 +1168,7 @@ def run_exam(
             if plans[t]:
                 _write_record(company_id, kind, t, records[t], root)
         report.combined = combine(company_id, status, root)
-        _write_exam(exam, stamp, report, records, [])
+        _write_exam(exam, stamp, report, records, [], _sealed_head(company_id, root))
         _say(report, say, say_total)
         return report
 
@@ -1293,7 +1294,7 @@ def run_exam(
     report.owed = sum((t, e, v) not in done for t, todo in todos.items() for e, v in todo)
     report.owed += sum(n for stop, n in report.prep_stops.items() if stop not in KEPT_STOPS)
     report.combined["paid"] = paid_summary(company_id, root)
-    _write_exam(exam, stamp, report, records, runs)
+    _write_exam(exam, stamp, report, records, runs, _sealed_head(company_id, root))
     _say(report, say, say_total)
     return report
 
@@ -1629,14 +1630,48 @@ def _record_counts(every: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _sealed_head(company_id: str, root: Path | None) -> dict[str, Any]:
+    try:
+        return freeze.head_of(freeze.ledger_file(company_id, True, root), root)
+    except freeze.FreezeError as exc:
+        raise ExamError(f"the sealed ledger: {exc}") from None
+
+
+def _check_ledger_heads(company_id: str, root: Path | None) -> None:
+    """Each pass, first: the sealed ledger still holds the head every earlier pass's exam record names. The chain
+    can't show lines dropped from its end, and the head beside the ledger (`freeze.head_file`) could be lost with it;
+    the exam records are in their own folders. A started line's fields (its group, its deadline state) are inside the
+    hashed line, so a head covers them too. A record from before heads were kept names none."""
+    heads: list[dict[str, Any]] = []
+    for kind in ORDER:
+        for path in sorted((exam_dir(company_id, kind, root) / "exams").glob("*.json")):
+            try:
+                head = json.loads(path.read_text()).get("ledger_head")
+            except (OSError, ValueError) as exc:
+                raise ExamError(f"an exam record can't be read ({type(exc).__name__}); restore it first") from None
+            if head is not None:
+                heads.append(head if isinstance(head, dict) else {})
+    try:
+        freeze.check_heads(freeze.ledger_file(company_id, True, root), heads, root)
+    except freeze.FreezeError as exc:
+        raise ExamError(f"the sealed ledger: {exc}") from None
+
+
 def _write_exam(
-    exam: Path, stamp: str, report: Report, records: dict[str, dict[str, Any]], runs: list[EngineRun]
+    exam: Path,
+    stamp: str,
+    report: Report,
+    records: dict[str, dict[str, Any]],
+    runs: list[EngineRun],
+    ledger_head: dict[str, Any],
 ) -> None:
-    """The exam's own record, in sealed storage: per tender and per run, ids and counts."""
+    """The exam's own record, in sealed storage: per tender and per run, ids and counts, and the sealed ledger's head
+    as the pass left it (`_check_ledger_heads`)."""
     data = {
         "report": asdict(report),
         "tenders": records,
         "runs": [{**asdict(r), "status": r.status, "outputs_dir": None, "record_dir": None} for r in runs],
+        "ledger_head": ledger_head,
     }
     target = exam / "exams" / f"{stamp}.json"
     private_dirs(target.parent)
