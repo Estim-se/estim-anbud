@@ -485,14 +485,14 @@ def test_a_run_that_cannot_be_frozen_exits_non_zero(
         raise FreezeError("the outputs folder has no files")
 
     monkeypatch.setattr(freeze, "freeze_run", refuse)
-    assert command.freeze_after_run(_args(), "dev", "r1", Path("out"), Path("rec")) == 1
+    assert command.freeze_after_run(_args(), "dev", "r1", Path("out"), Path("rec")) == command.FINISHED_NOT_FROZEN
     assert "not frozen: the outputs folder has no files" in capsys.readouterr().err
 
     def crash(*_: Any, **__: Any) -> dict[str, Any]:
         raise OSError("/Users/x/Fiktivbolaget AB/flags.json")
 
     monkeypatch.setattr(freeze, "freeze_run", crash)
-    assert command.freeze_after_run(_args(), "dev", "r1", Path("out"), Path("rec")) == 1
+    assert command.freeze_after_run(_args(), "dev", "r1", Path("out"), Path("rec")) == command.FINISHED_NOT_FROZEN
     err = capsys.readouterr().err
     assert "not frozen: OSError" in err
     assert_no_fake_names(err)
@@ -511,7 +511,7 @@ def test_a_chmod_failure_after_the_append_still_reports_the_freeze(
     monkeypatch.setattr(freeze.os, "chmod", gone)
     code = command.freeze_after_run(_args(), "dev", "r1", outputs, record)
     captured = capsys.readouterr()
-    assert code == 1
+    assert code == command.FINISHED_NOT_FROZEN
     assert "frozen: ledger line 1, " in captured.out and "not frozen" not in captured.err
     assert "2 output files could not be made read-only (FileNotFoundError)" in captured.err
     assert is_frozen("co-001", "t-0001")

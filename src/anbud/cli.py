@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from anbud.granskning.command import MODEL_UNREACHABLE
+from anbud.granskning.command import FINISHED_NOT_FROZEN, MODEL_UNREACHABLE
 from anbud.runguard import RunRefused, check_run_allowed, held_out_refusal
 
 NOT_BUILT = 2
@@ -254,7 +254,7 @@ def _kalkyl(args: argparse.Namespace) -> int:
         return MODEL_UNREACHABLE
     if summary.get("freeze_failures"):
         print(f"anbud kalkyl: {summary['freeze_failures']} entries could not be made read-only", file=sys.stderr)
-        return 1
+        return FINISHED_NOT_FROZEN
     return 0
 
 

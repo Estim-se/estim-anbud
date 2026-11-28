@@ -71,8 +71,9 @@ from anbud.config import CONFIG_DIR
 from anbud.evals import baseline, freeze
 from anbud.evals import split_heldout as sh
 from anbud.granskning.command import (
-    MODEL_UNREACHABLE,
-)  # no lens or extraction call answered: `anbud run`, `anbud kalkyl`
+    FINISHED_NOT_FROZEN,  # finished, but the engine's own freeze failed: `anbud run`, `anbud kalkyl`
+    MODEL_UNREACHABLE,  # no lens or extraction call answered: `anbud run`, `anbud kalkyl`
+)
 from anbud.stops import ESTIMATE, Stop, granskning_stop, granskning_tiers, kalkyl_stop, kalkyl_tiers, top
 from anbud.store import private_dirs
 
@@ -367,6 +368,7 @@ class EngineRun:
     lost: dict[str, Any] | None = None  # Granskning: what errors cost it after their retries (its `degraded`)
     failures: dict[str, int] | None = None  # calls that failed for good, by kind, as each engine's record says
     unreachable: bool = False  # the old engine: it sent calls and none was answered
+    required: tuple[str, ...] = ()  # the outputs a finished run always writes; the sealed freeze checks they're there
 
     @property
     def status(self) -> str:
@@ -521,6 +523,10 @@ PAID_REFUSED = 3  # `anbud run`'s exit code for a run refused or stopped before 
 RUN_HALTED = 5  # `anbud run`'s exit code for a run a limit stopped before it finished
 # Kinds of a run's failed calls that every later run would fail the same way (`_breaks`).
 ENVIRONMENTAL = frozenset({"key_missing", "auth", "spend_cap"})
+# A run finished: exit 0, or FINISHED_NOT_FROZEN (its own freeze failed). The sealed freeze below hashes the same
+# outputs and makes them read-only itself, and refuses a finished run missing an output it always writes
+# (`EngineRun.required`), so a 7 never skips the exam's own checks.
+FINISHED = (0, FINISHED_NOT_FROZEN)
 BASELINE_HALTS = ("hard_stop", "stopped", "timeout")  # the old engine's outcomes that are a limit, not an error
 
 # Why prep stopped, from the one line `anbud prep` writes to stderr when it stops (its messages name no file and quote
@@ -594,6 +600,8 @@ class Engines:
         return float(match.group(1)) if proc.returncode == 0 and match else None
 
     def granskning(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
+        from anbud.granskning.pipeline import REQUIRED_OUTPUTS as GRANSKNING_OUTPUTS
+
         proc = self._anbud(vroot, ["run", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
         code, spent = proc.returncode, _GRANSKNING_SPENT.findall(proc.stdout)
         record = paths.company_dir(company_id, vroot) / "runs" / run_id
@@ -603,7 +611,7 @@ class Engines:
             "granskning",
             run_id,
             code,
-            code == 0,
+            code in FINISHED,
             float(spent[-1]) if spent else None,
             paths.dev_tender_dir(company_id, tender_id, vroot) / "runs" / run_id,
             record,
@@ -611,9 +619,12 @@ class Engines:
             budget=budget,
             lost=lost,
             failures=_failure_kinds(_section(lost).get("failures")),
+            required=GRANSKNING_OUTPUTS,
         )
 
     def kalkyl(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
+        from anbud.kalkyl.run import REQUIRED_OUTPUTS as KALKYL_OUTPUTS
+
         proc = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
         code, match = proc.returncode, _KALKYL_COST.search(proc.stdout)
         halted = _KALKYL_HALTED.search(proc.stdout)
@@ -627,12 +638,13 @@ class Engines:
             "kalkyl",
             run_id,
             code,
-            code == 0 and _KALKYL_FROZEN.search(proc.stdout) is not None,
+            code in FINISHED and _KALKYL_FROZEN.search(proc.stdout) is not None,
             float(match.group(1)) if match else None,
             outputs,
             paths.company_dir(company_id, vroot) / "runs" / run_id,
             halted=halted is not None and int(halted.group(1)) > 0,
             failures=_failure_kinds(_section(summary).get("failures")),
+            required=KALKYL_OUTPUTS,
         )
 
     def api_check(self) -> str | None:
@@ -1178,6 +1190,7 @@ def run_exam(
             extra = {
                 "exam": {
                     **fields,
+                    "exit_code": one.exit_code,  # 7: finished, but the engine's own freeze failed
                     "after_deadline": after[t],
                     "settings": one.settings,
                     "plan": report.plan,
@@ -1197,6 +1210,7 @@ def run_exam(
                     extra=extra,
                     root=root,
                     status=status,
+                    required=one.required,
                 )
                 report.frozen += 1
                 report.frozen_by_status[status] = report.frozen_by_status.get(status, 0) + 1

@@ -27,7 +27,7 @@ import os
 import re
 import stat
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -536,13 +536,15 @@ def freeze_run(
     input_dir: Path | None = None,
     extra: dict[str, Any] | None = None,
     status: str = FINISHED,
+    required: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Hash a run into the ledger and make its outputs read-only. Returns the record with its `line_number` and
     `line_sha256`. Freezing a run again is a no-op when every hash still matches, and refused otherwise: a frozen
     prediction never changes.
 
-    `status` says how the run ended (`RUN_STATUSES`). A finished run must have written outputs. A halted or failed
-    one may have written none, or no outputs folder at all (`outputs_dir` null in its line); its run record must
+    `status` says how the run ended (`RUN_STATUSES`). A finished run must have written outputs, and each of `required`
+    (posix paths inside the outputs folder) when given: the exam passes what its engine always writes. A halted or
+    failed one may have written none, or no outputs folder at all (`outputs_dir` null in its line); its run record must
     still be there.
 
     The exam passes `input_dir`, the tender folder the run read (its inbox manifest and prep are hashed from there
@@ -562,6 +564,8 @@ def freeze_run(
     output_files = {} if outputs is None else _tree(outputs, "outputs")
     if not output_files and status == FINISHED:
         raise FreezeError("the outputs folder has no files")
+    if status == FINISHED and (missing := [name for name in required if name not in output_files]):
+        raise FreezeError(f"{len(missing)} of the outputs a finished run writes are missing")
     record_files = _tree(record_dir, "run record")
     own_outputs, own_record = _own(company_id, tender_id, run_id, outputs, record_dir, root)
     if outputs is None:
