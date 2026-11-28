@@ -333,7 +333,8 @@ def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget
     assert after.get("co-002/t-0003") is True and after.get("co-002/t-0002", False) is False
     plans = freeze.verify(freeze.ledger_file("co-002")).kinds
     assert plans == {"preregistration": 1}  # the plan only: no run is frozen in the plain ledger
-    assert "frozen runs came after their tender's deadline" in "\n".join(lines)
+    assert report.runs_after_deadline > 0
+    assert not [line for line in lines if line.startswith("runs")]  # a pass prints no figure of its runs (run_both)
 
 
 def _sealed_lines() -> list[dict]:
@@ -382,9 +383,8 @@ def test_a_run_that_halts_or_fails_is_frozen_with_its_status_and_never_counted_f
     assert all(r["outputs_dir"] is None and r["outputs_sha256"] == {} for r in kalkyl)  # nothing written, still frozen
     late = sum(1 for r in records if r["exam"]["after_deadline"] and r["status"] == "finished")
     assert 0 < late == report.runs_after_deadline  # only a finished run counts as a late prediction
-    printed = "\n".join(lines)
-    assert f"runs: finished baseline {finished}; halted granskning 3; failed kalkyl 3; 0 not started" in printed
-    assert f"{len(records)} frozen in the sealed ledger (failed 3, finished {finished}, halted 3)" in printed
+    assert not [line for line in lines if line.startswith("runs")]  # its figures print once, in run_both's total
+    assert report.runs_skipped_budget == 0 and report.owed == 0
     exams = list((exam.exam_dir("co-002", "prospective") / "exams").glob("*.json"))
     runs = json.loads(exams[0].read_text())["runs"]
     assert Counter(r["status"] for r in runs) == {"halted": 3, "failed": 3, "finished": finished}
@@ -406,7 +406,6 @@ def test_a_run_that_leaves_no_folder_is_counted_and_not_frozen(data_root: Path) 
     report = _paid(runner, lines)
     assert {r["exam"]["engine"] for r in _freezes()} == {"granskning", "kalkyl"}
     assert report.not_frozen == report.runs_failed["baseline"] > 0
-    assert f"; {report.not_frozen} not frozen" in "\n".join(lines)
     # Each one is still on record as an attempt, started and never frozen: no prediction, and never run again.
     started = [r for r in _sealed_lines() if r["kind"] == "started" and r["exam"]["engine"] == "baseline"]
     assert len(started) == report.not_frozen

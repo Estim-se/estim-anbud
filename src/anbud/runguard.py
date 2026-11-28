@@ -1,7 +1,7 @@
 """Who may run: `anbud run` takes dev tenders and synthetic fixtures only.
 
 Held-out, prospective and unknown tenders are refused, and so is anything that resolves into held-out or sealed
-storage. Only `anbud eval heldout` / `anbud eval prospective` may touch held-out data: run by a person at a terminal,
+storage. Only `anbud eval heldout|prospective|exam` may touch held-out data: run by a person at a terminal,
 or by the eval lane, which the orchestrator starts with `ANBUD_EVAL_LANE=1` (AGENTS.md, "Held-out tenders"). Any
 other agent session is refused.
 """
@@ -77,7 +77,7 @@ EVAL_LANE = "ANBUD_EVAL_LANE"
 def held_out_refusal(
     env: Mapping[str, str] | None = None, stdin: TextIO | None = None, stdout: TextIO | None = None
 ) -> str | None:
-    """Why `anbud eval heldout|prospective` must not run here, or None. It fails closed: a person at a terminal, or
+    """Why `anbud eval heldout|prospective|exam` must not run here, or None. It fails closed: a person at a terminal, or
     the eval lane (`ANBUD_EVAL_LANE=1`, exactly), which may run without a terminal."""
     env = os.environ if env is None else env
     if env.get(EVAL_LANE) == "1":
