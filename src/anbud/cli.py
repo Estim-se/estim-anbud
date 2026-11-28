@@ -172,10 +172,12 @@ def intake_report(result: Any, cutoff: Any = None) -> list[str]:
 def _kalkyl(args: argparse.Namespace) -> int:
     """Kalkyl in shadow on a dev tender. Paid unless --dry-run or --replay; never in CI."""
     import os
+    from dataclasses import replace
 
     from anbud.config import CONFIG_DIR, load_config
     from anbud.kalkyl.catalog import CatalogError
     from anbud.kalkyl.run import KalkylError, plan, run_dev_tender
+    from anbud.kalkyl.settings import load_kalkyl_config
     from anbud.model_client import KeyMissing, keychain_key, make_sdk_client
     from anbud.prep.tender import IntakeStop
     from anbud.store import StoreError
@@ -190,8 +192,11 @@ def _kalkyl(args: argparse.Namespace) -> int:
         if args.replay and not (args.run_id or args.base_run):
             print("anbud kalkyl: --replay needs the --run-id or --base-run of a stored run", file=sys.stderr)
             return REFUSED
+        kalkyl = load_kalkyl_config()
+        if args.group_pass:
+            kalkyl = replace(kalkyl, group_pass=True)
         if args.dry_run:
-            summary = plan(args.company_id, args.tender_id, catalog_name=args.catalog)
+            summary = plan(args.company_id, args.tender_id, catalog_name=args.catalog, kalkyl=kalkyl)
         else:
             from anbud.granskning import provenance
 
@@ -217,6 +222,7 @@ def _kalkyl(args: argparse.Namespace) -> int:
                 run_id=args.run_id,
                 code=code,
                 base_run=args.base_run,
+                kalkyl=kalkyl,
             )
     except (KalkylError, CatalogError, StoreError, KeyMissing, IntakeStop) as exc:
         print(f"anbud kalkyl: stopped: {exc}", file=sys.stderr)
@@ -610,6 +616,11 @@ def main(argv: list[str] | None = None) -> int:
     kalkyl.add_argument(
         "--base-run",
         help="rebuild from this stored run: a new run with its salt, so unchanged requests cost $0; never writes to it",
+    )
+    kalkyl.add_argument(
+        "--group-pass",
+        action="store_true",
+        help="after R2, read each uncovered code group of the technical description twice (config/kalkyl.toml)",
     )
     sub.add_parser("replay", help="replay a stored run at $0 (phase 1)")
     sub.add_parser("guards", help="repo guards: names, document files, licensed text")

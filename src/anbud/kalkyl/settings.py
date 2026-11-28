@@ -40,6 +40,7 @@ class KalkylConfig:
     concurrency: int
     match_batch: int
     roles: dict[str, RoleSettings]
+    group_pass: bool = False  # the code-group pass after R2 (`kalkyl.group_pass`)
 
 
 def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
@@ -64,4 +65,5 @@ def load_kalkyl_config(directory: Path = CONFIG_DIR) -> KalkylConfig:
         concurrency=max(1, int(ex["concurrency"])),
         match_batch=max(1, int(ma["batch_size"])),
         roles=roles,
+        group_pass=bool(raw.get("group_pass", {}).get("enabled", False)),
     )

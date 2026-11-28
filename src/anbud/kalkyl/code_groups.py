@@ -76,6 +76,7 @@ class CodeGroup:
     open_lines: int = 0  # of those, still "Ej omhändertaget"
     post: bool = False
     reason: bool = False
+    block_ids: list[str] = field(default_factory=list, repr=False)  # every block under it, headings too, in order
 
     @property
     def covered(self) -> bool:
@@ -159,6 +160,7 @@ def _roll_up(
             children.setdefault(up, []).append(code)
 
     groups: dict[str, CodeGroup] = {}
+    reading_at = {b: i for i, b in enumerate(corpus.order)}
 
     def build(code: str) -> CodeGroup:
         node = nodes[code]
@@ -179,6 +181,7 @@ def _roll_up(
             open_lines=len(open_lines & node.own) + sum(k.open_lines for k in kids),
             post=bool(posted & node.own) or any(k.post for k in kids),
             reason=bool(reasoned & node.own) or any(k.reason for k in kids),
+            block_ids=sorted({*node.own, *(b for k in kids for b in k.block_ids)}, key=reading_at.__getitem__),
         )
         groups[code] = group
         return group
@@ -200,6 +203,8 @@ def for_result(result: Any, corpus: Corpus) -> CodeCoverage:
     """The coverage of a Kalkyl result (`KalkylResult`) over the corpus it read."""
     posted = {b for p in result.posts for ln in p.lines for b in ln.record.block_ids}
     reasoned = {u.block_id for u in result.uncovered if not u.unresolved}
+    if getattr(result, "group_pass", None) is not None:  # blocks a code-group pass set aside, both readings agreeing
+        reasoned |= result.group_pass.set_aside_blocks
     open_lines = {u.block_id for u in result.uncovered if u.unresolved}
     lines = set(_ids(c.quantity_ids for c in result.chunks)) | set(_ids(c.scope_ids for c in result.chunks))
     return coverage(corpus, posted, reasoned, lines, open_lines)
