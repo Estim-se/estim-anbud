@@ -254,7 +254,7 @@ def run_dev_tender(
     cells = load_cells(tender / "prep" / CELLS_FILE)
     estimate = _estimate(config, kalkyl, corpus, cells, catalog, store, company_id, tender_id)
     stop = kalkyl_stop(kalkyl.stops, estimate["cost_usd_est_high"], kalkyl.margin)  # before any paid call
-    budget = Budget(stop.usd)
+    budget = Budget(stop.usd, wait=True)  # a call waits for room while others are in flight (`Budget`)
     client = ModelClient(config, sdk, budget, run_id=run_id, company_id=company_id, store=store, salt=salt)
     corpus, cards = with_cards(client, store, corpus, tender_id)
     try:
