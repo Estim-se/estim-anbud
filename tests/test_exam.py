@@ -179,7 +179,13 @@ class FakeEngines(exam.Engines):
         api: list[str | None] | None = None,
         failures: dict[tuple[str, str], dict[str, int]] | None = None,
         codes: dict[tuple[str, str], int] | None = None,
+        tiles: dict[str, int] | None = None,
+        highs: dict[str, float] | None = None,
+        pages: dict[str, int] | None = None,
     ) -> None:
+        self.tiles = tiles or {}  # tender -> the tiles its Granskning dry run names; none when not given
+        self.highs = highs or {}  # tender -> its Kalkyl dry run's high estimate; $1 when not given
+        self.pages = pages or {}  # tender -> its prep's text pages; 50 when not given
         self.api = list(api or [])  # what each $0 API check finds, in order; it passes once these run out
         self.api_checks = 0
         self.failures = failures or {}  # (tender, engine) -> its calls failed for good, by kind
@@ -221,14 +227,18 @@ class FakeEngines(exam.Engines):
             return self.stops[tender_id]
         prep = paths.dev_tender_dir(company_id, tender_id, vroot) / "prep"
         prep.mkdir(parents=True, exist_ok=True)
-        (prep / "summary.json").write_text(json.dumps({"documents": 2, "pages_by_kind": {"text": 50}}))
+        pages = self.pages.get(tender_id, 50)
+        (prep / "summary.json").write_text(json.dumps({"documents": 2, "pages_by_kind": {"text": pages}}))
         return None
 
     def granskning_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> int | None:
         return self.tokens.get(tender_id, 10_000)
 
     def kalkyl_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> float | None:
-        return 1.0
+        return self.highs.get(tender_id, 1.0)
+
+    def granskning_tiles(self, tender_id: str) -> int | None:
+        return self.tiles.get(tender_id)
 
     def _run(
         self, engine: str, variant: str, vroot: Path, company_id: str, tender_id: str, run_id: str
@@ -765,6 +775,7 @@ def test_an_engine_on_a_single_tender_prints_totals_only(data_root: Path) -> Non
         assert "granskning prefix: 1 tender runs it, fewer than 2, so no figures" in lines
         assert "1 fits, fewer than 2, so no planned prefix" in text and "planned prefix median" not in text
         assert "hard-stop tiers: not shown, since granskning runs on fewer than 2 tenders; 2 stopping" in text
+        assert "size checks" not in text  # its counts per engine would be that one run's too
         assert "per engine only when each runs on at least 2 tenders" in text and "granskning $" not in text
     # Only the estimate line's totals, over three tenders, can differ with that one run's size.
     assert [x for x in printed[0] if not x.startswith("estimate")] == [
