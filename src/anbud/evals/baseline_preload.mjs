@@ -7,10 +7,11 @@
 //   response its kind (`errorKind`). Never a prompt, a response text or a header value other than those ids.
 // - The hard stop: a call whose worst case would take settled plus in-flight spend past ANBUD_BASELINE_HARD_STOP
 //   waits for the calls in flight, in arrival order (`Room`), and is logged as a `wait`. A call that doesn't fit with
-//   nothing in flight is never sent, and the run ends (exit 86).
+//   nothing in flight is never sent, and the run ends (exit 86). A call its caller aborts while it waits is never
+//   sent either: it fails as a real fetch would, costs nothing, and is logged as `aborted`.
 // - With ANBUD_BASELINE_DRY=1 the first model call ends the run before any network (exit 88).
 import { appendFileSync } from 'node:fs';
-import { Room, headerIds, maxCost, mergeUsage, usageCost } from './baseline_usage.mjs';
+import { Refused, Room, headerIds, maxCost, mergeUsage, usageCost } from './baseline_usage.mjs';
 
 const EXIT = { hard_stop: 86, blocked: 87, dry_run: 88 };
 const API = 'https://api.anthropic.com/v1/messages';
@@ -74,8 +75,12 @@ globalThis.fetch = async (input, init) => {
   const asked = Date.now();
   let waited = null;
   try {
-    waited = await room.take(reserve);
-  } catch {
+    waited = await room.take(reserve, init?.signal ?? (input instanceof Request ? input.signal : undefined));
+  } catch (error) {
+    if (!(error instanceof Refused)) {
+      write({ event: 'aborted', seq: n, model, ms: Date.now() - asked, reserve_usd: reserve });
+      throw error;
+    }
     end(EXIT.hard_stop, { event: 'hard_stop', seq: n, model, reserve_usd: reserve, spent_usd: room.spent, in_flight_usd: room.reserved, waited_ms: Date.now() - asked });
   }
   if (waited) write({ event: 'wait', seq: n, model, ms: Date.now() - asked, reserve_usd: reserve, reserved_usd: waited.reserved_usd, in_flight: waited.in_flight });

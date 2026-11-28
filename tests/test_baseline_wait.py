@@ -145,6 +145,43 @@ done({ stuck, next, queue: room.queue.length });
     assert out == {"stuck": {"waited": {"reserved_usd": 6, "in_flight": 1}}, "next": {"ran": None}, "queue": 0}
 
 
+@needs_js
+def test_a_waiting_call_its_caller_aborts_leaves_the_line_and_the_next_call_runs(tmp_path: Path) -> None:
+    """The app's SDK times out or aborts a call while it waits for room: it leaves the line holding no room, fails
+    with the signal's reason as a real fetch would, and the call behind it gets the room. A call whose signal is
+    already aborted takes no room at all. Mutation: `signal?.addEventListener('abort', waiter.onAbort, { once: true });`
+    -> deleted in `Room.take`: the aborted call keeps its place, and the call behind it waits too. Also caught:
+    `if (signal?.aborted) return Promise.reject(abortReason(signal));` -> deleted: an aborted call takes room, and
+    `this.#drain(); // the call behind it may fit now` -> deleted: the call behind it waits."""
+    out = js(
+        tmp_path,
+        """
+const room = new Room(10);
+await room.take(6);
+const ac = new AbortController();
+const aborted = room.take(6, ac.signal).then(() => 'ran', e => e.name);
+const next = room.take(3).then(w => ({ ran: w }));
+await tick(20);
+const before = room.queue.length;
+ac.abort();
+const ended = { aborted: await pending(aborted), next: await pending(next) };
+const already = await room.take(0.5, AbortSignal.abort()).then(() => 'ran', e => e.name);
+done({ before, ...ended, already, queue: room.queue.length, reserved: room.reserved, inFlight: room.inFlight,
+  spent: room.spent });
+""",
+    )
+    assert out == {
+        "before": 2,
+        "aborted": "AbortError",
+        "next": {"ran": {"reserved_usd": 6, "in_flight": 1}},
+        "already": "AbortError",
+        "queue": 0,
+        "reserved": 9,
+        "inFlight": 2,
+        "spent": 0,
+    }
+
+
 # (characters, tokens) measured on the dev tender's paid reading calls, counts only (see test_kalkyl_token_fit.py):
 # the densest chunk message, the largest one, and the system blocks with the tools cached.
 MEASURED = ((623, 416), (25_045, 12_902), (25_118, 14_624))
@@ -189,9 +226,9 @@ def max_tokens_for(share: float) -> int:
     return int(share * HARD_STOP * 1e6 / (1.05 * PRICE["output"]))
 
 
-def preload(tmp_path: Path, sizes: list[int]) -> tuple[int, list[dict], Path]:
-    (tmp_path / "stub.mjs").write_text(STUB)
-    (tmp_path / "engine.mjs").write_text(ENGINE)
+def preload(tmp_path: Path, sizes: list[int], engine: str = ENGINE, stub: str = STUB) -> tuple[int, list[dict], Path]:
+    (tmp_path / "stub.mjs").write_text(stub)
+    (tmp_path / "engine.mjs").write_text(engine)
     log = tmp_path / "calls.jsonl"
     env = {
         "PATH": "/usr/bin:/bin",
@@ -236,6 +273,55 @@ def test_a_lone_call_bigger_than_the_stop_still_ends_the_run(tmp_path: Path) -> 
     assert [(r["event"], r["seq"]) for r in events] == [("call", 1), ("hard_stop", 2)]
     assert events[-1]["in_flight_usd"] == 0 and events[-1]["spent_usd"] == pytest.approx(events[0]["cost_usd"])
     assert "waited_ms" in events[-1]
+
+
+# The second call is aborted by its caller while it waits behind the first, which the stub holds for a moment.
+ABORTING = """
+import { writeFileSync } from 'node:fs';
+const sizes = JSON.parse(process.env.SIZES);
+const ac = new AbortController();
+const send = (max_tokens, signal) => fetch('https://api.anthropic.com/v1/messages', { method: 'POST', signal,
+  body: JSON.stringify({ model: 'claude-sonnet-5', max_tokens, stream: true, messages: [] }) })
+  .then(res => res.text()).then(() => 'ok', error => error.name);
+const ends = Promise.all([send(sizes[0]), send(sizes[1], ac.signal), send(sizes[2])]);
+setTimeout(() => ac.abort(), 50);
+writeFileSync('ends.json', JSON.stringify(await ends));
+"""
+SLOW_FIRST = """
+const usage = { input_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 500, output_tokens: 1 };
+const events = [{ type: 'message_start', message: { usage } }, { type: 'message_delta', usage: { output_tokens: 200 } },
+  { type: 'message_stop' }];
+const sse = events.map(e => `event: ${e.type}\\ndata: ${JSON.stringify(e)}\\n\\n`).join('');
+let n = 0;
+globalThis.fetch = async () => {
+  if (n++ === 0) await new Promise(r => setTimeout(r, 400)); // the first call stays in flight a while
+  return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+};
+"""
+
+
+@needs_bun
+def test_a_call_aborted_while_it_waits_is_never_sent_and_costs_nothing(tmp_path: Path) -> None:
+    """Calls of 60%, 60% and 30% of the stop: the second waits behind the first, and its caller aborts it. It fails
+    with an AbortError, is never sent, costs nothing, and the third gets its room before the first ends. Mutation:
+    `room.take(reserve, init?.signal ?? (…))` -> `room.take(reserve)` in baseline_preload.mjs: the aborted call keeps
+    its place and is sent once the first ends."""
+    code, records, _ = preload(
+        tmp_path, [max_tokens_for(0.6), max_tokens_for(0.6), max_tokens_for(0.3)], ABORTING, SLOW_FIRST
+    )
+    assert code == 0
+    assert json.loads((tmp_path / "ends.json").read_text()) == ["ok", "AbortError", "ok"]
+    calls = [r["seq"] for r in records if r["event"] == "call"]
+    assert calls == [3, 1]  # the third ran while the first was still in flight
+    aborted = [r for r in records if r["event"] == "aborted"]
+    assert [a["seq"] for a in aborted] == [2] and set(aborted[0]) == {
+        "at",
+        "event",
+        "seq",
+        "model",
+        "ms",
+        "reserve_usd",
+    }
 
 
 def test_the_report_says_how_many_calls_waited_and_the_longest_wait() -> None:
