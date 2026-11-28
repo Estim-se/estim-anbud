@@ -425,8 +425,15 @@ class ModelClient:
 
     @staticmethod
     def _mapped(exc: Exception) -> ModelError:
+        """The SDK's errors, and a transport error it lets through: a stream that drops after it opened (a protocol,
+        read or write error, a read timeout) surfaces as httpx's own error, not the SDK's. Anything else is a bug."""
         import anthropic
+        import httpx2
 
         if isinstance(exc, anthropic.APIError):
             return classify(exc)
+        if isinstance(exc, httpx2.TimeoutException):
+            return ModelError("timeout", None, None, type(exc).__name__)
+        if isinstance(exc, httpx2.TransportError):
+            return ModelError("connection", None, None, type(exc).__name__)
         raise exc
