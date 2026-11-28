@@ -313,13 +313,17 @@ class _Answer:
 
 def trigger_hints(corpus: Corpus, lens_results: Sequence[LensResult] = ()) -> list[str]:
     """Blocks that may call up a standard for outlets per room type: lens flags of claim type `outlet_recipe` first,
-    then blocks that name a standard with outlet or room-type words within two blocks. Empty: the check is skipped."""
+    then blocks that name a standard with outlet or room-type words within two blocks. Empty: the check is skipped.
+    Every document is walked but another trade's (`Corpus.excluded`): a search-only document's text isn't in the
+    prefix, but its trigger still counts, and the model reaches the block through search."""
     hints: dict[str, None] = {}
     for result in lens_results:
         for flag in result.flags:
             if flag.claim_type == CLAIM_TYPE:
                 hints.update((c.block_id, None) for c in flag.citations)
-    for block_id in corpus.order:
+    for block_id in corpus.all_order:
+        if corpus.blocks[block_id].doc_id in corpus.excluded:
+            continue
         if _STANDARD.search(corpus.blocks[block_id].text) and any(
             _OUTLETS.search(b.text) for b in corpus.neighbours(block_id, 2)
         ):
