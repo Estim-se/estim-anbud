@@ -61,10 +61,15 @@ def _size(folder: Path, names: list[str]) -> int:
     return total
 
 
-def _runs(folder: Path) -> int:
+def _runs(folder: Path, smoke: bool = False) -> int:
+    """The run folders in `folder`: the smoke runs when `smoke`, otherwise every other run."""
     if not folder.is_dir() or folder.is_symlink():
         return 0
-    return sum(1 for p in folder.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith("."))
+    return sum(
+        1
+        for p in folder.iterdir()
+        if p.is_dir() and not p.is_symlink() and not p.name.startswith(".") and freeze.is_smoke(p.name) == smoke
+    )
 
 
 def dev_card(company_id: str, tender_id: str, frozen: int, root: Path | None = None) -> dict[str, Any]:
@@ -100,6 +105,7 @@ def dev_card(company_id: str, tender_id: str, frozen: int, root: Path | None = N
             "granskning": _runs(tender / "runs"),
             "kalkyl": _runs(tender / "kalkyl"),
             "frozen": frozen,
+            "smoke": _runs(tender / "runs", smoke=True) + _runs(tender / "kalkyl", smoke=True),
         },
     }
     if record:
@@ -169,7 +175,8 @@ def render(cards: dict[str, Any], now: datetime | None = None) -> str:
             f"links {_fmt(prep.get('links_skipped'))}; furniture dropped {_fmt(prep.get('furniture_dropped'))}; "
             f"web-page sections withheld {_fmt(prep.get('withheld_sections'))}",
             f"- Masked: {_fmt(prep.get('masked_by_kind'))}",
-            f"- Runs: {runs['granskning']} review, {runs['kalkyl']} Kalkyl; {runs['frozen']} frozen in the ledger",
+            f"- Runs: {runs['granskning']} review, {runs['kalkyl']} Kalkyl; {runs['frozen']} frozen in the ledger; "
+            f"{runs.get('smoke', 0)} smoke runs left out of these counts",
         ]
         if "intake" in card:
             intake = card["intake"]
