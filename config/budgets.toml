@@ -64,7 +64,7 @@ large_prefix_tokens = 200000
 # alone exceed it does the run stop, before any paid call. Lines brought back from other trades' documents take at
 # most `boundary_share` of it.
 [prefix]
-budget_tokens = 450000
+budget_tokens = 64000 # SMOKE ONLY (branch smoke/prefix-64k-2026-11-28): never merged; main keeps 450000
 boundary_share = 0.10
 
 [schema_check]
