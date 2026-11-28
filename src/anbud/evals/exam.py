@@ -20,19 +20,27 @@ Per tender of the split status asked for:
    the old engine's measured cost per page, times a margin, per engine and in total, beside the worst case (every
    hard stop), and the prefix sizes: median, max, and how many are over the context and over a large-prefix mark.
    Without `--paid` the exam stops here, after the old engine's dry run on each input.
-4. **Runs** (`--paid`, with a scoring plan registered with `anbud freeze plan` and a `--budget` at or above the
-   estimate): Granskning on the granskning input, Kalkyl on the
-   kalkyl input, and the old engine at matched settings on both (once when they're the same). A run is not started
-   when it could take the spend past the budget. Each run is frozen into the sealed ledger with the variant it used,
-   its settings, whether it came after the tender's deadline and how it ended (`EngineRun.status`): finished, halted
-   by a limit, or failed. Every attempt is frozen; only a finished run can be a scored prediction.
+4. **Runs** (`--paid`, with a scoring plan registered with `anbud freeze plan` and a `--budget` for the whole exam):
+   Granskning on the granskning input, Kalkyl on the kalkyl input, and the old engine at matched settings on both
+   (once when they're the same).
+   - **One attempt per tender, engine and input** (scoring plan v3.1). Each run is put on record in the sealed ledger
+     (`freeze.start_run`) before it starts, and a pair with an attempt on record is never run again, by any later
+     pass: an attempt that never came back (killed, crashed, the machine slept) is no prediction.
+   - **The budget** covers both splits and every pass: a pass counts what earlier ones charged, from the sealed
+     ledger, refuses to start when the runs left can't fit, and starts no run that could take the spend past it.
+   - **Each run is frozen** into the sealed ledger with the variant it used, its settings, what it was charged,
+     Granskning's `budget` section (what the hard stop cost it), whether it came after the tender's deadline and how
+     it ended (`EngineRun.status`): finished, halted by a limit, or failed. Only a finished run can be a scored
+     prediction.
 
 For prospective tenders it prints the nearest deadline of the open ones, in days, and warns about every tender whose
 deadline has passed: a run after the deadline isn't a prospective prediction any more.
 
 No figure is printed for a group of fewer than two tenders (`MIN_GROUP`). Sizes, the selection, the prefix plan and the
 estimate are kept per tender in its sealed exam record and printed as one total over every prepared tender of both
-splits (`combine`), never per split; a split of fewer than two tenders prints counts of tenders only.
+splits (`combine`), never per split; a split of fewer than two tenders prints counts of tenders only. A paid pass's
+runs line is printed for a split of two or more prepared tenders, and the paid exam so far as one total over both
+splits and every pass (`paid_summary`).
 """
 
 from __future__ import annotations
@@ -343,11 +351,45 @@ class EngineRun:
     record_dir: Path | None = None
     settings: dict[str, Any] | None = None
     halted: bool = False  # stopped by a limit: its hard stop, the spend cap, a stop marker or the timeout
+    budget: dict[str, Any] | None = None  # Granskning: what the hard stop cost the run (its summary's `budget`)
+    lost: dict[str, Any] | None = None  # Granskning: work an error cost it (its summary's `degraded`), when given
 
     @property
     def status(self) -> str:
         """How the run ended, as its freeze line says: only a finished run can be a scored prediction."""
         return freeze.FINISHED if self.ok else freeze.HALTED if self.halted else freeze.FAILED
+
+    @property
+    def degraded(self) -> bool:
+        return is_degraded(self.budget, self.lost)
+
+
+def is_degraded(budget: Any, lost: Any) -> bool:
+    """Whether a run finished with less than a full review: the hard stop refused calls, kept a lens from running or
+    finishing, or left flags unverified (`budget`), or an error cost it a lens or the map (`lost`)."""
+    b = budget if isinstance(budget, dict) else {}
+    verifier = b.get("verifier") if isinstance(b.get("verifier"), dict) else {}
+    lost_any = isinstance(lost, dict) and any(bool(v) for v in lost.values())
+    return bool(
+        b.get("refused_calls")
+        or b.get("partial")
+        or b.get("lenses_not_run")
+        or b.get("lenses_stopped")
+        or verifier.get("not_verified_budget")
+        or lost_any
+    )
+
+
+def _summary_sections(record_dir: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The `budget` and `degraded` sections of a Granskning run's summary (`granskning.json`), None when absent."""
+    try:
+        data = json.loads((record_dir / "granskning.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    budget, lost = data.get("budget"), data.get("degraded")
+    return (budget if isinstance(budget, dict) else None), (lost if isinstance(lost, dict) else None)
 
 
 _PREFIX = re.compile(r"estimated prefix: (\d+) tokens")
@@ -357,6 +399,8 @@ _KALKYL_COST = re.compile(r"^cost_usd: ([\d.]+)$", re.M)
 # calls a limit refused.
 _KALKYL_FROZEN = re.compile(r"^frozen: True$", re.M)
 _KALKYL_HALTED = re.compile(r"^halted: (\d+)$", re.M)
+# What a Granskning run spent, as `anbud run` reports it: inside its "total" line, or as a line of its own. The exam
+# charges the last one it finds whatever the exit code, and the run's tier cap only when there is none.
 _GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
 # Granskning's stop when the prefix's fixed part and priority 1 exceed the prefix budget (anbud.granskning.budget),
 # as `anbud run` writes it to stderr.
@@ -437,17 +481,21 @@ class Engines:
 
     def granskning(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
         proc = self._anbud(vroot, ["run", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
-        code, match = proc.returncode, _GRANSKNING_SPENT.search(proc.stdout)
+        code, spent = proc.returncode, _GRANSKNING_SPENT.findall(proc.stdout)
+        record = paths.company_dir(company_id, vroot) / "runs" / run_id
+        budget, lost = _summary_sections(record)
         return EngineRun(
             "granskning",
             "granskning",
             run_id,
             code,
             code == 0,
-            float(match.group(1)) if match else None,
+            float(spent[-1]) if spent else None,
             paths.dev_tender_dir(company_id, tender_id, vroot) / "runs" / run_id,
-            paths.company_dir(company_id, vroot) / "runs" / run_id,
+            record,
             halted=code == RUN_HALTED,
+            budget=budget,
+            lost=lost,
         )
 
     def kalkyl(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
@@ -622,10 +670,13 @@ class Report:
     runs_ok: dict[str, int] = field(default_factory=dict)  # finished runs, by engine
     runs_halted: dict[str, int] = field(default_factory=dict)  # stopped by a limit, by engine
     runs_failed: dict[str, int] = field(default_factory=dict)
+    runs_degraded: dict[str, int] = field(default_factory=dict)  # of the finished, those with less than a full review
     runs_skipped_budget: int = 0
+    runs_attempted_before: int = 0  # attempted by an earlier pass: one attempt per tender, engine and input
     runs_prefix_stop: int = 0  # Granskning runs not started: they stop on the prefix budget, checked at $0
     runs_after_deadline: int = 0
-    spent_usd: float = 0.0
+    spent_usd: float = 0.0  # charged by this pass
+    spent_before_usd: float = 0.0  # charged by earlier passes, over both splits, from the sealed ledger
     frozen: int = 0
     frozen_by_status: dict[str, int] = field(default_factory=dict)
     not_frozen: int = 0  # runs that left no run record, or whose freeze was refused
@@ -772,6 +823,7 @@ def run_exam(
     prefixes: list[int] = []
     sizes: dict[str, dict[str, Any]] = {}
     caps: dict[tuple[str, str], float] = {}  # (tender, engine) -> the most its run may spend
+    run_estimates: dict[tuple[str, str, str], float] = {}  # (tender, engine, variant) -> its run's estimate
     prefix_stopped: set[str] = set()  # tenders whose Granskning run stops on the prefix budget, checked at $0
     for t in ready:
         roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
@@ -817,7 +869,7 @@ def run_exam(
                 usd = cap
             else:
                 usd = min(basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin, cap)
-            size["estimate_usd"]["granskning"] = usd
+            size["estimate_usd"]["granskning"] = run_estimates[t, "granskning", "granskning"] = usd
             size["worst_usd"] += cap
             size["worst_by_engine"]["granskning"] = cap
         if "kalkyl" in engines:
@@ -825,14 +877,18 @@ def run_exam(
             cap = caps[t, "kalkyl"] = tender_stop("kalkyl", high)
             _record_tier(size, "kalkyl", tender_tier("kalkyl", high))
             size["estimate_unknown"] += high is None
-            size["estimate_usd"]["kalkyl"] = cap if high is None else min(high * margin, cap)
+            size["estimate_usd"]["kalkyl"] = run_estimates[t, "kalkyl", "kalkyl"] = (
+                cap if high is None else min(high * margin, cap)
+            )
             size["worst_usd"] += cap
             size["worst_by_engine"]["kalkyl"] = cap
         variants = ["granskning"] if records[t]["same_input"] else list(VARIANTS)
         plans[t] = variants if "baseline" in engines else []
         for v in plans[t]:
             pages = sum((_summary(paths.dev_tender_dir(company_id, t, roots[v])).get("pages_by_kind") or {}).values())
-            usd = min(pages * float(cfg["baseline_usd_per_page"]) * margin, stops["baseline"])
+            usd = run_estimates[t, "baseline", v] = min(
+                pages * float(cfg["baseline_usd_per_page"]) * margin, stops["baseline"]
+            )
             size["estimate_usd"]["baseline"] = size["estimate_usd"].get("baseline", 0.0) + usd
             size["worst_usd"] += stops["baseline"]
             size["worst_by_engine"]["baseline"] = size["worst_by_engine"].get("baseline", 0.0) + stops["baseline"]
@@ -856,6 +912,7 @@ def run_exam(
         records[t] = record
         intake._write_private(_record_path(company_id, kind, t, root), json.dumps(record, indent=1, sort_keys=True))
     report.combined = combine(company_id, status, root)
+    report.combined["paid"] = paid_summary(company_id, root)
 
     # The old engine's dry run on each input: the plumbing works, and nothing is sent.
     if not paid:
@@ -877,24 +934,40 @@ def run_exam(
         _say(report, say)
         return report
 
-    # 4. Paid runs, within the budget.
+    # 4. Paid runs, within the budget. The budget is the whole exam's, over both splits and every pass: what earlier
+    # passes charged comes from the sealed ledger. Each tender is attempted once per engine and input (scoring plan
+    # v3.1): a pair with an attempt on record is never run again, and every run is put on record before it starts.
     assert budget_usd is not None
-    if report.estimate_total > budget_usd:
-        figure = f" (${report.estimate_total:.2f})" if report.tenders >= MIN_GROUP else ""
-        raise ExamError(f"the estimate{figure} is above the budget (${budget_usd:.2f})")
+    try:
+        attempts = freeze.exam_attempts(freeze.records(freeze.ledger_file(company_id, True, root), root))
+    except freeze.FreezeError as exc:
+        raise ExamError(f"the sealed ledger: {exc}") from None
+    report.spent_before_usd = round(sum(charged_usd(a) for found in attempts.values() for a in found), 2)
+    left = round(sum(usd for (t, e, v), usd in run_estimates.items() if (f"{company_id}/{t}", e, v) not in attempts), 2)
+    if report.spent_before_usd + left > budget_usd:
+        raise ExamError(_refusal(report, budget_usd))
     runs: list[EngineRun] = []
     for t in ready:
         roots = {v: variant_root(company_id, kind, v, root) for v in VARIANTS}
         todo: list[tuple[str, str]] = [(e, e) for e in ("granskning", "kalkyl") if e in engines]
         todo += [("baseline", v) for v in plans[t]]
         for engine, variant in todo:
+            if (f"{company_id}/{t}", engine, variant) in attempts:
+                report.runs_attempted_before += 1  # never run again, whatever its first attempt came to
+                continue
             if engine == "granskning" and t in prefix_stopped:
                 report.runs_prefix_stop += 1  # it would stop before any call: nothing to run, nothing to freeze
                 continue
-            if report.spent_usd + caps.get((t, engine), stops[engine]) > budget_usd:
+            cap = caps.get((t, engine), stops[engine])
+            if report.spent_before_usd + report.spent_usd + cap > budget_usd:
                 report.runs_skipped_budget += 1
                 continue
             run_id = f"exam-{kind}-{t}-{engine}{'-' + variant if engine == 'baseline' else ''}-{stamp}"
+            fields = {"kind": kind, "engine": engine, "variant": variant, "input": VARIANT_LABELS[variant]}
+            try:
+                freeze.start_run(company_id, run_id, tender_id=t, exam={**fields, "cap_usd": cap}, root=root)
+            except freeze.FreezeError as exc:
+                raise ExamError(f"a run couldn't be put on record, so it wasn't started: {exc}") from None
             if engine == "granskning":
                 one = runner.granskning(roots[variant], company_id, t, run_id)
             elif engine == "kalkyl":
@@ -903,12 +976,15 @@ def run_exam(
                 one = runner.baseline(
                     roots[variant], company_id, t, variant, run_id, exam / "baseline" / t / run_id, dry_run=False
                 )
-            report.spent_usd += caps.get((t, engine), stops[engine]) if one.cost_usd is None else one.cost_usd
+            charged = cap if one.cost_usd is None else one.cost_usd  # the most it may have spent, when it didn't say
+            report.spent_usd += charged
             status = one.status
             bucket = {freeze.FINISHED: report.runs_ok, freeze.HALTED: report.runs_halted}.get(
                 status, report.runs_failed
             )
             bucket[engine] = bucket.get(engine, 0) + 1
+            if status == freeze.FINISHED and one.degraded:
+                report.runs_degraded[engine] = report.runs_degraded.get(engine, 0) + 1
             runs.append(one)
             if one.outputs_dir is None or one.record_dir is None:
                 report.not_frozen += 1  # it left nothing to freeze
@@ -917,13 +993,13 @@ def run_exam(
                 report.runs_after_deadline += after[t]
             extra = {
                 "exam": {
-                    "kind": kind,
-                    "engine": engine,
-                    "variant": variant,
-                    "input": VARIANT_LABELS[variant],
+                    **fields,
                     "after_deadline": after[t],
                     "settings": one.settings,
                     "plan": report.plan,
+                    "charged_usd": round(charged, 4),
+                    **({"budget": one.budget} if one.budget is not None else {}),
+                    **({"degraded": one.lost} if one.lost is not None else {}),
                 }
             }
             try:
@@ -947,6 +1023,7 @@ def run_exam(
                     bucket[engine] -= 1
                     report.runs_failed[engine] = report.runs_failed.get(engine, 0) + 1
     report.spent_usd = round(report.spent_usd, 2)
+    report.combined["paid"] = paid_summary(company_id, root)
     _write_exam(exam, stamp, report, records, runs)
     _say(report, say)
     return report
@@ -1069,6 +1146,58 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
     return out
 
 
+def charged_usd(attempt: dict[str, Any]) -> float:
+    """What an exam attempt counts against the budget: what its freeze line says it was charged, else what its started
+    line allowed it (its tier cap), since a run that never came back may have spent up to its hard stop. An older
+    harness's freeze line, with neither, counts nothing."""
+    frozen = ((attempt.get("freeze") or {}).get("exam") or {}).get("charged_usd")
+    if isinstance(frozen, int | float):
+        return float(frozen)
+    cap = ((attempt.get("started") or {}).get("exam") or {}).get("cap_usd")
+    return float(cap) if isinstance(cap, int | float) else 0.0
+
+
+NEVER_FROZEN = "never_frozen"  # an attempt started and never frozen: no prediction
+
+
+def paid_summary(company_id: str, root: Path | None = None) -> dict[str, Any]:
+    """The paid exam so far, over both splits and every pass, from the sealed ledger: tenders attempted, attempts, how
+    each pair's attempt ended by engine (`NEVER_FROZEN` for one that never came back), the finished ones with less than
+    a full review, and what was charged. Never per tender or per split."""
+    try:
+        attempts = freeze.exam_attempts(freeze.records(freeze.ledger_file(company_id, True, root), root))
+    except freeze.FreezeError as exc:
+        raise ExamError(f"the sealed ledger: {exc}") from None
+    ended: dict[str, Counter[str]] = {}
+    degraded = 0
+    for (_, engine, _), found in sorted(attempts.items()):
+        line = found[0]["freeze"]
+        status = freeze.status_of(line) if line is not None else NEVER_FROZEN
+        ended.setdefault(status, Counter())[engine] += 1
+        exam = (line or {}).get("exam") or {}
+        degraded += status == freeze.FINISHED and is_degraded(exam.get("budget"), exam.get("degraded"))
+    return {
+        "tenders": len({tender for tender, _, _ in attempts}),
+        "attempts": sum(len(found) for found in attempts.values()),
+        "pairs": len(attempts),
+        "ended": {k: dict(sorted(v.items())) for k, v in sorted(ended.items())},
+        "degraded": degraded,
+        "charged_usd": round(sum(charged_usd(a) for found in attempts.values() for a in found), 2),
+    }
+
+
+def _refusal(report: Report, budget_usd: float) -> str:
+    """Why a paid pass won't start, with no figure of the split's own: for a split with one prepared tender that would
+    be the tender's estimate, and next to the total over both splits it gives the other split's by subtraction."""
+    c = report.combined
+    total = (
+        f"; the estimate over both splits is ${sum(c['estimate_usd'].values()):.2f}, worst case ${c['worst_usd']:.2f}"
+        if int(c.get("tenders") or 0) >= MIN_GROUP and "estimate_usd" in c
+        else ""
+    )
+    return f"the runs left, with what earlier passes charged, are above the budget (${budget_usd:.2f}){total}"
+
+
 def _write_exam(
     exam: Path, stamp: str, report: Report, records: dict[str, dict[str, Any]], runs: list[EngineRun]
 ) -> None:
@@ -1117,19 +1246,46 @@ def _say(r: Report, say: Callable[[str], None]) -> None:
     if r.plan is not None:
         say(f"scoring plan: ledger line {r.plan['line']}, sha256 {r.plan['sha256'][:12]}")
     if r.paid:
-        if small:
-            say("runs: counts and spend stay in the sealed exam record (fewer than 2 tenders)")
+        # The runs' figures are summed over the prepared tenders only, so the guard is on those, not on the split.
+        if r.prepared < MIN_GROUP:
+            say("runs: counts and spend stay in the sealed exam record (fewer than 2 prepared tenders)")
         else:
             stopped = f"; {r.runs_prefix_stop} not started (prefix budget)" if r.runs_prefix_stop else ""
             unfrozen = f"; {r.not_frozen} not frozen" if r.not_frozen else ""
+            before = (
+                f"; {r.runs_attempted_before} attempted by an earlier pass, not run again"
+                if r.runs_attempted_before
+                else ""
+            )
+            degraded = sum(r.runs_degraded.values())
+            # One degraded run is counted only in the total over both splits (`_say_paid`).
+            less = f", {degraded} of them with less than a full review" if degraded >= MIN_GROUP else ""
             say(
-                f"runs: finished {_counts(r.runs_ok)}; halted {_counts(r.runs_halted)}; failed "
-                f"{_counts(r.runs_failed)}; {r.runs_skipped_budget} not started (budget){stopped}; spent "
-                f"${r.spent_usd:.2f}; {r.frozen} frozen in the sealed ledger ({_counts(r.frozen_by_status)}){unfrozen}"
+                f"runs: finished {_counts(r.runs_ok)}{less}; halted {_counts(r.runs_halted)}; failed "
+                f"{_counts(r.runs_failed)}; {r.runs_skipped_budget} not started (budget){stopped}{before}; spent "
+                f"${r.spent_usd:.2f} this pass; {r.frozen} frozen in the sealed ledger "
+                f"({_counts(r.frozen_by_status)}){unfrozen}"
             )
         if r.runs_after_deadline:
             say(f"warning: {r.runs_after_deadline} frozen runs came after their tender's deadline")
     _say_combined(r.combined, say)
+    _say_paid(r.combined.get("paid") or {}, say)
+
+
+def _say_paid(p: dict[str, Any], say: Callable[[str], None]) -> None:
+    """The paid exam so far, one total over both splits and every pass (`paid_summary`), when 2 or more tenders have
+    an attempt on record."""
+    if not p.get("tenders"):
+        return
+    if p["tenders"] < MIN_GROUP:
+        say("paid exam so far: fewer than 2 tenders attempted, so no figures")
+        return
+    ended = "; ".join(f"{status} {_counts(n)}" for status, n in p["ended"].items())
+    say(
+        f"paid exam so far, one total over both splits and every pass (sealed ledger): {p['tenders']} tenders, "
+        f"{p['attempts']} attempts of {p['pairs']} engine-input pairs; {ended}; {p['degraded']} finished with less "
+        f"than a full review; charged ${p['charged_usd']:.2f}"
+    )
 
 
 def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:

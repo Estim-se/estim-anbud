@@ -592,7 +592,11 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument(
         "--paid", action="store_true", help="run the engines (paid); without it: quarantine, prep, estimate"
     )
-    ev.add_argument("--budget", type=float, help="USD for the whole exam; required with --paid, at least the estimate")
+    ev.add_argument(
+        "--budget",
+        type=float,
+        help="USD for the whole exam, over both splits and every pass (earlier passes' charges count); with --paid",
+    )
     ev.add_argument("--engines", help="comma-separated: granskning,kalkyl,baseline (default: all three)")
     ev.add_argument("--app", type=Path, help="the app checkout for the old engine (default as for anbud baseline)")
     ev.add_argument("--app-ref", help="the app commit for the old engine (default: origin/main)")

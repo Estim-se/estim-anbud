@@ -303,23 +303,29 @@ def _exam_line(
     return line
 
 
+def _started(run: str, at: str, engine: str = "granskning", variant: str = "granskning") -> dict[str, Any]:
+    return {"kind": "started", "tender": "co-002/t-0002", "run_id": run, "started_at": at,
+            "exam": {"engine": engine, "variant": variant, "cap_usd": 20.0}}  # fmt: skip
+
+
 CUTOFF = datetime(2026, 12, 8, 12, tzinfo=UTC)
 T = "co-002/t-0002"
 
 
-def test_the_scored_prediction_is_the_last_finished_run_before_the_cut_off() -> None:
+def test_the_scored_prediction_is_the_pair_s_one_attempt_when_it_finished_before_the_cut_off() -> None:
+    """Mutation: picking `attempts[-1]` in scored_prediction (the last attempt) makes it fail."""
     records = [
         {"kind": "preregistration", "file": "scoring-plan-v3.md"},
         _exam_line("r1", "finished", "2026-12-01T01:00:00+00:00"),
-        _exam_line("r2", "finished", "2026-12-01T02:00:00+00:00"),
-        _exam_line("r3", "finished", "2026-12-09T00:00:00+00:00"),  # after the cut-off: late, never scored
+        _exam_line("r2", "finished", "2026-12-01T02:00:00+00:00"),  # a second attempt: a second look, never scored
         _exam_line("k1", "finished", "2026-12-01T05:00:00+00:00", engine="kalkyl", variant="kalkyl"),
         _exam_line("b1", "finished", "2026-12-01T06:00:00+00:00", engine="baseline", variant="kalkyl"),
         _exam_line("o1", "finished", "2026-12-01T07:00:00+00:00", tender="co-002/t-0003"),
     ]
     pick = freeze.scored_prediction
-    assert pick(records, T, "granskning", "granskning", CUTOFF)["run_id"] == "r2"
-    assert pick(records, T, "granskning", "granskning", datetime(2026, 12, 1, 2, tzinfo=UTC))["run_id"] == "r1"
+    assert pick(records, T, "granskning", "granskning", CUTOFF)["run_id"] == "r1"
+    # Frozen at the cut-off, r1 is late: no prediction, and the later attempt doesn't stand in for it.
+    assert pick(records, T, "granskning", "granskning", datetime(2026, 12, 1, 1, tzinfo=UTC)) is None
     assert pick(records, T, "kalkyl", "kalkyl", CUTOFF)["run_id"] == "k1"
     assert pick(records, T, "baseline", "kalkyl", CUTOFF)["run_id"] == "b1"
     assert pick(records, T, "baseline", "granskning", CUTOFF) is None  # an input it never ran on
@@ -337,6 +343,51 @@ def test_a_later_halted_or_failed_run_never_replaces_an_earlier_finished_one() -
     ]
     assert freeze.scored_prediction(records, T, "granskning", "granskning", CUTOFF)["run_id"] == "r1"
     assert freeze.scored_prediction(records[1:], T, "granskning", "granskning", CUTOFF) is None  # no prediction
+
+
+def test_an_attempt_started_and_never_frozen_is_no_prediction_and_no_later_run_stands_in() -> None:
+    """The one-use rule (scoring plan v3.1). Mutation: skipping started lines in `_pair` makes it fail."""
+    pick = freeze.scored_prediction
+    gone = [
+        _started("r1", "2026-12-01T01:00:00+00:00"),  # killed, crashed or the machine slept: never frozen
+        _exam_line("r2", "finished", "2026-12-01T03:00:00+00:00"),  # a rerun by an older harness
+        _started("r3", "2026-12-01T04:00:00+00:00"),
+        _exam_line("r3", "finished", "2026-12-01T05:00:00+00:00"),  # and another
+    ]
+    assert pick(gone, T, "granskning", "granskning", CUTOFF) is None
+    attempts = freeze.exam_attempts(gone)[(T, "granskning", "granskning")]
+    assert [(a["run_id"], a["started"] is not None, a["freeze"] is not None) for a in attempts] == [
+        ("r1", True, False),
+        ("r2", False, True),
+        ("r3", True, True),
+    ]
+    # Started, then frozen: the same run is the attempt, scored when it finished.
+    done = [_started("r1", "2026-12-01T01:00:00+00:00"), _exam_line("r1", "finished", "2026-12-01T02:00:00+00:00")]
+    assert pick(done, T, "granskning", "granskning", CUTOFF)["run_id"] == "r1"
+    halted = [done[0], _exam_line("r1", "halted", "2026-12-01T02:00:00+00:00")]
+    assert pick(halted, T, "granskning", "granskning", CUTOFF) is None
+    # Another engine's attempt is its own pair.
+    other = [_started("k1", "2026-12-01T01:00:00+00:00", "kalkyl", "kalkyl"), *done]
+    assert pick(other, T, "granskning", "granskning", CUTOFF)["run_id"] == "r1"
+    assert pick(other, T, "kalkyl", "kalkyl", CUTOFF) is None
+
+
+def test_an_exam_pair_is_started_once_and_its_attempt_opens_the_answer_gate(data_root: Path) -> None:
+    """Mutation: dropping `or _pair(old) == pair` from start_run's check makes it fail."""
+    granskning = {"engine": "granskning", "variant": "granskning", "cap_usd": 20.0}
+    first = freeze.start_run("co-002", "r1", tender_id="t-0002", exam=granskning)
+    assert first["line_number"] == 1 and first["kind"] == freeze.STARTED
+    assert is_frozen("co-002", "t-0002", sealed=True)  # an attempt on record takes its answers
+    with pytest.raises(FreezeError, match="already attempted at sealed ledger line 1"):
+        freeze.start_run("co-002", "r2", tender_id="t-0002", exam=granskning)  # the same pair, a new run id
+    with pytest.raises(FreezeError, match="already attempted"):
+        freeze.start_run("co-002", "r1", tender_id="t-0003", exam=granskning)  # the same run id
+    with pytest.raises(FreezeError, match="engine and input"):
+        freeze.start_run("co-002", "r4", tender_id="t-0003", exam={"engine": "granskning"})
+    kalkyl = {"engine": "kalkyl", "variant": "kalkyl", "cap_usd": 3.0}
+    assert freeze.start_run("co-002", "r3", tender_id="t-0002", exam=kalkyl)["line_number"] == 2
+    ledger = ledger_file("co-002", sealed=True)
+    assert verify(ledger).kinds == {"started": 2} and not freeze.freezes_by_tender(ledger)  # a start isn't a freeze
 
 
 def test_a_line_written_before_statuses_existed_counts_as_finished_and_only_then() -> None:

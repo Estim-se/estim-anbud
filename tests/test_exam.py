@@ -175,8 +175,10 @@ class FakeEngines(exam.Engines):
         ends: dict[str, str] | None = None,
         bare: frozenset[str] = frozenset(),
         nothing: frozenset[str] = frozenset(),
+        budgets: dict[str, dict] | None = None,
     ) -> None:
         self.ends = ends or {}  # how each engine's runs end; finished unless given
+        self.budgets = budgets or {}  # tender -> the `budget` section its Granskning run's summary reports
         self.bare = bare  # engines whose runs write no outputs folder
         self.nothing = nothing  # engines whose runs leave no folder at all
         self.costs = costs
@@ -234,6 +236,7 @@ class FakeEngines(exam.Engines):
             out / "record",
             settings,
             halted=end == freeze.HALTED,
+            budget=self.budgets.get(tender_id) if engine == "granskning" else None,
         )
 
     def granskning(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> exam.EngineRun:
@@ -314,8 +317,13 @@ def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget
         "large": 200_000,
     }
     assert sum(report.runs_ok.values()) == report.frozen == len(runner.calls)
-    records = [json.loads(line) for line in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
-    assert len(records) == report.frozen and all(r["kind"] == "freeze" for r in records)
+    lines_on_record = [json.loads(x) for x in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
+    # Each run is put on record before it starts, then frozen: a started line, then its freeze line.
+    assert [r["kind"] for r in lines_on_record] == ["started", "freeze"] * report.frozen
+    assert all(a["run_id"] == b["run_id"] for a, b in zip(lines_on_record[::2], lines_on_record[1::2], strict=True))
+    records = [r for r in lines_on_record if r["kind"] == "freeze"]
+    assert sum(r["exam"]["charged_usd"] for r in records) == pytest.approx(report.spent_usd)
+    assert report.combined["paid"]["charged_usd"] == pytest.approx(report.spent_usd)
     for r in records:
         assert r["exam"]["variant"] in exam.VARIANTS and r["exam"]["kind"] == "prospective"
         assert r["exam"]["plan"] == {"file": "scoring-plan-v1.md", "sha256": plan["sha256"], "line": 1}
@@ -326,6 +334,14 @@ def test_a_paid_exam_freezes_each_run_with_its_input_and_stays_within_the_budget
     plans = freeze.verify(freeze.ledger_file("co-002")).kinds
     assert plans == {"preregistration": 1}  # the plan only: no run is frozen in the plain ledger
     assert "frozen runs came after their tender's deadline" in "\n".join(lines)
+
+
+def _sealed_lines() -> list[dict]:
+    return [json.loads(line) for line in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
+
+
+def _freezes() -> list[dict]:
+    return [r for r in _sealed_lines() if r["kind"] == "freeze"]
 
 
 def _paid(runner: FakeEngines, lines: list[str], budget: float = 200.0) -> exam.Report:
@@ -351,7 +367,8 @@ def test_a_run_that_halts_or_fails_is_frozen_with_its_status_and_never_counted_f
     )
     lines: list[str] = []
     report = _paid(runner, lines)
-    records = [json.loads(line) for line in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
+    everything = _sealed_lines()
+    records = [r for r in everything if r["kind"] == "freeze"]
     finished = report.runs_ok["baseline"]
     assert Counter((r["exam"]["engine"], r["status"]) for r in records) == {
         ("granskning", "halted"): 3,
@@ -375,10 +392,10 @@ def test_a_run_that_halts_or_fails_is_frozen_with_its_status_and_never_counted_f
     # has no prediction for those engines, while its finished old-engine runs are scored.
     cutoff = datetime(2027, 1, 1, tzinfo=UTC)
     for tender in sorted({r["tender"] for r in records}):
-        assert freeze.scored_prediction(records, tender, "granskning", "granskning", cutoff) is None
-        assert freeze.scored_prediction(records, tender, "kalkyl", "kalkyl", cutoff) is None
+        assert freeze.scored_prediction(everything, tender, "granskning", "granskning", cutoff) is None
+        assert freeze.scored_prediction(everything, tender, "kalkyl", "kalkyl", cutoff) is None
         inputs = {r["exam"]["variant"] for r in records if r["tender"] == tender and r["exam"]["engine"] == "baseline"}
-        assert inputs and all(freeze.scored_prediction(records, tender, "baseline", v, cutoff) for v in inputs)
+        assert inputs and all(freeze.scored_prediction(everything, tender, "baseline", v, cutoff) for v in inputs)
 
 
 def test_a_run_that_leaves_no_folder_is_counted_and_not_frozen(data_root: Path) -> None:
@@ -387,10 +404,13 @@ def test_a_run_that_leaves_no_folder_is_counted_and_not_frozen(data_root: Path) 
     runner = FakeEngines({"granskning": 8.0, "kalkyl": 1.0, "baseline": 2.0}, nothing=frozenset({"baseline"}))
     lines: list[str] = []
     report = _paid(runner, lines)
-    records = [json.loads(line) for line in freeze.ledger_file("co-002", sealed=True).read_text().splitlines()]
-    assert {r["exam"]["engine"] for r in records} == {"granskning", "kalkyl"}
+    assert {r["exam"]["engine"] for r in _freezes()} == {"granskning", "kalkyl"}
     assert report.not_frozen == report.runs_failed["baseline"] > 0
     assert f"; {report.not_frozen} not frozen" in "\n".join(lines)
+    # Each one is still on record as an attempt, started and never frozen: no prediction, and never run again.
+    started = [r for r in _sealed_lines() if r["kind"] == "started" and r["exam"]["engine"] == "baseline"]
+    assert len(started) == report.not_frozen
+    assert report.combined["paid"]["ended"][exam.NEVER_FROZEN] == {"baseline": report.not_frozen}
 
 
 @pytest.mark.parametrize(
