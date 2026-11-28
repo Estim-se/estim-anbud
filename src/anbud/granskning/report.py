@@ -88,6 +88,7 @@ class Report(_Model):
 
 OTHER_DISCIPLINE = "Ej lästa (annan disciplin)"
 SEARCH_ONLY = "Endast sökbara (prefixbudget)"
+SEARCH_ONLY_P1 = "Prioritet 1 granskad via sökning, inte i sin helhet"
 STOP = "Kostnadsstopp (nivå efter storlek)"
 
 
@@ -291,6 +292,12 @@ def render_html(report: Report) -> str:
             f"<p>{SEARCH_ONLY}: {len(cov.search_only_documents)} dokument. Prefixet höll bara deras rubriker; "
             f"granskningen nådde texten genom sökning. {_e(', '.join(cov.search_only_documents))}</p>"
         )
+    if cov.search_only_priority_1:
+        parts.append(
+            f"<p><strong>{SEARCH_ONLY_P1}</strong>: {len(cov.search_only_priority_1)} dokument. AF och kontrakt "
+            "låg i sin helhet; dessa prioritet 1-handlingar var för stora för prefixet och lästes genom sökning, så "
+            f"granskningen av dem är ofullständig. {_e(', '.join(cov.search_only_priority_1))}</p>"
+        )
     if cov.other_discipline:
         parts.append(
             f"<p>{OTHER_DISCIPLINE}: {_e(cov.other_discipline)}. Sökbara för hänvisningar; "
@@ -474,6 +481,11 @@ def build_workbook(
         ("Dokument i underlaget", report.coverage.documents),
         (OTHER_DISCIPLINE, report.coverage.other_discipline or "0 sidor, 0 dokument"),
         (SEARCH_ONLY, len(report.coverage.search_only_documents)),
+        *(  # only when some were: a report where P1 fits keeps its rows
+            [(SEARCH_ONLY_P1, ", ".join(report.coverage.search_only_priority_1))]
+            if report.coverage.search_only_priority_1
+            else []
+        ),
         ("Modellkostnad (USD)", round(report.cost_usd, 2) if report.cost_usd is not None else "Okänd"),
         (STOP, report.stop or "Okänt"),
         ("Täckning", report.coverage.note),

@@ -255,7 +255,7 @@ def run_pipeline(
     say = on_progress or (lambda _msg: None)
     spent_before = client.budget.spent
     budget = PrefixBudget.from_config(client.config.budgets)
-    if budget is not None and not (early := plan_prefix(corpus, calc, budget, corpus.tiles.values())).p1_fits:
+    if budget is not None and (early := plan_prefix(corpus, calc, budget, corpus.tiles.values())).stops:
         raise PrefixOverBudget(over_budget(early))  # before the cards, with the most their text can add: no paid call
     say(f"page cards: {len(corpus.tiles)} tiles")
     read = read_all_cards(client, store, corpus)
@@ -269,7 +269,8 @@ def run_pipeline(
     corpus = add_cards(corpus, cards)
     corpus, plan = fit_prefix(corpus, calc, client.config.budgets)
     if plan is not None:
-        say(f"prefix plan: {plan.total} of {plan.budget} tokens, {len(plan.search_only)} documents search-only")
+        p1 = f" ({len(plan.p1_search_only)} of priority 1)" if plan.p1_search_only else ""
+        say(f"prefix plan: {plan.total} of {plan.budget} tokens, {len(plan.search_only)} documents search-only{p1}")
 
     toolbox = Toolbox(corpus, calc, tile_loader=store.get_blob, catalog=catalog)
     validator = flag_validator(corpus, set(CLAIM_TYPES), {p.id: p for p in calc})

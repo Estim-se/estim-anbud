@@ -563,10 +563,18 @@ def selection_sizes(prep_dir: Path, calc_dir: Path, budgets: dict[str, Any]) -> 
         out |= {
             "budget_tokens": plan.budget,
             "p1_fits": plan.p1_fits,
+            "stops": plan.stops,  # the core (AF and contract) doesn't fit: the run stops before any paid call
             "planned_tokens": plan.total,
             "search_only": len(plan.search_only),
+            "p1_search_only": len(plan.p1_search_only),  # of them, P1 documents read through search
         }
     return out
+
+
+def _stops(selection: dict[str, Any]) -> bool:
+    """Whether a tender's run stops at its prefix check. A size record from before P1 could be demoted has no `stops`:
+    then P1 not fitting was the stop."""
+    return bool(selection.get("stops", selection.get("p1_fits") is False))
 
 
 # --- The exam -----------------------------------------------------------------------------------------------------
@@ -775,13 +783,14 @@ def run_exam(
         if "granskning" in engines:
             tokens = runner.granskning_estimate(roots["granskning"], company_id, t, f"estimate-{t}-granskning.log")
             size["prefix_tokens"] = tokens
-            planned = selection.get("planned_tokens") if selection and selection.get("p1_fits") else None
+            fits = bool(selection and "p1_fits" in selection and not _stops(selection))
+            planned = selection.get("planned_tokens") if selection and fits else None
             basis = planned if planned is not None else tokens
             cap = caps[t, "granskning"] = tender_stop("granskning", tokens)  # the tier its run opens at
             _record_tier(size, "granskning", tender_tier("granskning", tokens))
             if tokens is not None:
                 prefixes.append(tokens)
-            would_stop = bool(selection and selection.get("p1_fits") is False)
+            would_stop = bool(selection and _stops(selection))
             if would_stop:  # checked at $0; a confirmed stop is never started, so it costs nothing
                 check_id = f"exam-{kind}-{t}-granskning-prefixcheck-{stamp}"
                 stopped = runner.granskning_stop_check(roots["granskning"], company_id, t, check_id)
@@ -995,7 +1004,7 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
         documents = sum(int(x["documents"]) for x in selections)
         selected = [int(x["pages"]) - int(x["pages_excluded"]) for x in selections]
         planned = [x for x in selections if "p1_fits" in x]
-        fitting = [int(x["planned_tokens"]) for x in planned if x["p1_fits"]]
+        fitting = [int(x["planned_tokens"]) for x in planned if not _stops(x)]
         out["selection"] = {
             "tenders": len(selections),
             "pages_excluded_pct": round(100 * sum(int(x["pages_excluded"]) for x in selections) / pages, 1)
@@ -1008,12 +1017,13 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
             "selected_pages_max": max(selected),
             "planned": len(planned),
             "budget_tokens": max((int(x["budget_tokens"]) for x in planned), default=0),
-            "would_stop": sum(not x["p1_fits"] for x in planned),
-            "stop_checked": sum(bool(x.get("stop_checked")) for x in planned if not x["p1_fits"]),
+            "would_stop": sum(_stops(x) for x in planned),
+            "stop_checked": sum(bool(x.get("stop_checked")) for x in planned if _stops(x)),
             "fitting": len(fitting),
             "planned_tokens_median": _median(fitting) if fitting else None,
             "planned_tokens_max": max(fitting) if fitting else None,
             "search_only_documents": sum(int(x.get("search_only") or 0) for x in planned),
+            "p1_search_only_documents": sum(int(x.get("p1_search_only") or 0) for x in planned),
         }
     return out
 
@@ -1117,10 +1127,11 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
                 if sel["would_stop"]
                 else ""
             )
+            p1 = sel.get("p1_search_only_documents") or 0
             say(
                 f"prefix budget {sel['budget_tokens']:,} tokens: {sel['would_stop']} of {sel['planned']} tenders would "
                 f"stop (fixed part and priority 1 over the budget{checked}); {fit}; {sel['search_only_documents']} "
-                "documents search-only"
+                "documents search-only" + (f", {p1} of them priority 1 read through search" if p1 else "")
             )
     tiers = c.get("tiers") or {}
     if tiers:
