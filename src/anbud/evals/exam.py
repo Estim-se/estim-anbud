@@ -121,6 +121,11 @@ def exam_config(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
     return dict(tomllib.loads((config_dir / "budgets.toml").read_text())["exam"])
 
 
+def exam_checks(config_dir: Path = CONFIG_DIR) -> dict[str, Any]:
+    """The $0 pass's size checks (`config/exam_checks.toml`): diagnostics, read by no stop, cap or estimate."""
+    return tomllib.loads((config_dir / "exam_checks.toml").read_text())
+
+
 def hard_stops(config_dir: Path = CONFIG_DIR) -> dict[str, float]:
     """Each engine's top hard stop: a tender's worst case when its dry run gives no size."""
     budgets = tomllib.loads((config_dir / "budgets.toml").read_text())
@@ -507,6 +512,7 @@ def _summary_sections(record_dir: Path) -> tuple[dict[str, Any] | None, dict[str
 
 
 _PREFIX = re.compile(r"estimated prefix: (\d+) tokens")
+_TILES = re.compile(r"^  tiles for page cards: (\d+)$", re.M)
 _KALKYL_HIGH = re.compile(r"^cost_usd_est_high: ([\d.]+)$", re.M)
 _KALKYL_COST = re.compile(r"^cost_usd: ([\d.]+)$", re.M)
 # Kalkyl exits 0 when its calc is incomplete too; it finished only when it froze its own outputs. `halted` counts the
@@ -567,6 +573,7 @@ class Engines:
         self.root = root
         self._app_root: Path | None = None
         self._app_sha: str | None = None
+        self._tiles: dict[str, int] = {}  # tender -> the tiles its Granskning dry run says the page cards would read
 
     def _anbud(self, vroot: Path, args: list[str], log_name: str) -> subprocess.CompletedProcess[str]:
         env = {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
@@ -586,7 +593,13 @@ class Engines:
     def granskning_estimate(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> int | None:
         proc = self._anbud(vroot, ["run", company_id, tender_id, "--dry-run"], log_name)
         match = _PREFIX.search(proc.stdout)
+        if proc.returncode == 0 and (tiles := _TILES.search(proc.stdout)):
+            self._tiles[tender_id] = int(tiles.group(1))
         return int(match.group(1)) if proc.returncode == 0 and match else None
+
+    def granskning_tiles(self, tender_id: str) -> int | None:
+        """The tiles the tender's Granskning dry run (`granskning_estimate`) said its page cards would read."""
+        return self._tiles.get(tender_id)
 
     def granskning_stop_check(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> bool:
         """Whether Granskning's run stops on the prefix budget before any model call, checked at $0: the run path in
@@ -1048,6 +1061,8 @@ def run_exam(
             else:
                 usd = min(basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin, cap)
             size["estimate_usd"]["granskning"] = run_estimates[t, "granskning", "granskning"] = usd
+            if (tiles := runner.granskning_tiles(t)) is not None and basis is not None and cap > 0:
+                size["card_map_share"] = round(_cards_and_map_usd(tiles, basis) / cap, 4)
             size["worst_usd"] += cap
             size["worst_by_engine"]["granskning"] = cap
         if "kalkyl" in engines:
@@ -1058,15 +1073,18 @@ def run_exam(
             size["estimate_usd"]["kalkyl"] = run_estimates[t, "kalkyl", "kalkyl"] = (
                 cap if high is None else min(high * margin, cap)
             )
+            size["kalkyl_high_usd"] = high  # for the size checks: what the run may spend, against its stop
             size["worst_usd"] += cap
             size["worst_by_engine"]["kalkyl"] = cap
         variants = ["granskning"] if records[t]["same_input"] else list(VARIANTS)
         plans[t] = variants if "baseline" in engines else []
         for v in plans[t]:
             pages = sum((_summary(paths.dev_tender_dir(company_id, t, roots[v])).get("pages_by_kind") or {}).values())
-            usd = run_estimates[t, "baseline", v] = min(
-                pages * float(cfg["baseline_usd_per_page"]) * margin, stops["baseline"]
-            )
+            raw = pages * float(cfg["baseline_usd_per_page"])
+            usd = run_estimates[t, "baseline", v] = min(raw * margin, stops["baseline"])
+            over = size.setdefault("baseline_over_stop", {"without_margin": False, "with_margin": False})
+            over["without_margin"] |= raw > stops["baseline"]
+            over["with_margin"] |= raw * margin > stops["baseline"]
             size["estimate_usd"]["baseline"] = size["estimate_usd"].get("baseline", 0.0) + usd
             size["worst_usd"] += stops["baseline"]
             size["worst_by_engine"]["baseline"] = size["worst_by_engine"].get("baseline", 0.0) + stops["baseline"]
@@ -1263,6 +1281,63 @@ def _runs_on(found: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _cards_and_map_usd(tiles: int, prefix_tokens: float) -> float:
+    """What a Granskning run spends before its lenses, at most: its page cards (`card_usd_per_tile` each), then the
+    map's reservation, the planned prefix (before cards add their text) at the map model's dearest input price plus
+    its max tokens. Neither degrades, so a refusal of either halts the run (audit 2, C10)."""
+    from anbud.config import load_config
+    from anbud.granskning.mapping import MAP_MAX_TOKENS
+
+    config = load_config()
+    price = config.price_for(config.model_for("map"))
+    cards = tiles * float(exam_checks()["granskning"]["card_usd_per_tile"])
+    return cards + price.max_cost(int(prefix_tokens), MAP_MAX_TOKENS)
+
+
+def _size_checks(found: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per engine, over the tenders it runs on, how many may reach their hard stop, from the sizes each record keeps
+    (`exam_checks`). Counts only; a record from before these checks counts as unknown."""
+    checks = exam_checks()
+    share = float(checks["granskning"]["card_map_share"])
+    out: dict[str, Any] = {}
+    granskning = [one for one in found if "granskning" in (one.get("estimate_usd") or {}) and not _stopped(one)]
+    if granskning:
+        shares = [one["card_map_share"] for one in granskning if isinstance(one.get("card_map_share"), int | float)]
+        out["granskning"] = {
+            "tenders": len(granskning),
+            "prefix_stopped": len([one for one in found if _stopped(one)]),
+            "card_usd_per_tile": float(checks["granskning"]["card_usd_per_tile"]),
+            "share": share,
+            "above_share": sum(x > share for x in shares),
+            "above_stop": sum(x > 1 for x in shares),
+            "unknown": len(granskning) - len(shares),
+        }
+    kalkyl = [one for one in found if "kalkyl" in (one.get("estimate_usd") or {})]
+    if kalkyl:
+        known = [
+            (float(one["kalkyl_high_usd"]), float(one["worst_by_engine"]["kalkyl"]))
+            for one in kalkyl
+            if isinstance(one.get("kalkyl_high_usd"), int | float)
+            and isinstance((one.get("worst_by_engine") or {}).get("kalkyl"), int | float)
+        ]
+        ratios = [1.0, *(float(r) for r in checks["kalkyl"]["spend_ratios"])]
+        out["kalkyl"] = {
+            "tenders": len(kalkyl),
+            "above_stop": [[r, sum(high * r > cap for high, cap in known)] for r in ratios],
+            "unknown": len(kalkyl) - len(known),
+        }
+    baseline_ = [one for one in found if int(one.get("baseline_runs") or 0) > 0]
+    if baseline_:
+        over = [one.get("baseline_over_stop") for one in baseline_]
+        out["baseline"] = {
+            "tenders": len(baseline_),
+            "without_margin": sum(bool(x and x.get("without_margin")) for x in over),
+            "with_margin": sum(bool(x and x.get("with_margin")) for x in over),
+            "unknown": sum(not isinstance(x, dict) for x in over),
+        }
+    return out
+
+
 def combine(company_id: str, status: dict[str, str], root: Path | None = None) -> dict[str, Any]:
     """Sizes, the selection, the prefix plan and the estimate as one total over every tender of both splits whose
     last exam pass prepared it, from the sealed tender records. Never per tender or per split; `tenders` and
@@ -1319,6 +1394,7 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
         "prefix_stopped": len(found) - len(runners),
         "baseline_runs": sum(int(one.get("baseline_runs") or 0) for one in found),
         "tiers": _tier_counts(found),
+        "size_checks": _size_checks(found),
     }
     selections = [one["selection"] for one in found if isinstance(one.get("selection"), dict)]
     if selections:
@@ -1582,6 +1658,37 @@ def run_both(
     return reports
 
 
+def _size_line(checks: dict[str, Any]) -> str | None:
+    """The size checks (`_size_checks`) as one line, or None when there are none. Only `_say_combined` prints it, and
+    only when every engine runs on 2 or more tenders."""
+
+    def unknown(n: int) -> str:
+        return f" ({n} unknown)" if n else ""
+
+    rows = []
+    if g := checks.get("granskning"):
+        rows.append(
+            f"granskning, {g['tenders']} tenders: page cards at ${g['card_usd_per_tile']:.2f} a tile plus the map's "
+            f"reservation above {g['share']:.0%} of the stop {g['above_share']}, above the stop {g['above_stop']}"
+            f"{unknown(g['unknown'])}; {g['prefix_stopped']} stop on the prefix budget, not run"
+        )
+    if k := checks.get("kalkyl"):
+        at = ", ".join(f"x{r:g}: {n}" for r, n in k["above_stop"])
+        rows.append(
+            f"kalkyl, {k['tenders']} tenders: dry-run high estimate above the stop at {at}{unknown(k['unknown'])}"
+        )
+    if b := checks.get("baseline"):
+        rows.append(
+            f"baseline, {b['tenders']} tenders: estimate above the stop without its margin {b['without_margin']}, "
+            f"with it {b['with_margin']}{unknown(b['unknown'])}"
+        )
+    return (
+        "size checks, tenders that may reach their hard stop, over the tenders each engine runs on: " + "; ".join(rows)
+        if rows
+        else None
+    )
+
+
 def _say_combined(c: dict[str, Any], say: Callable[[str], None], dry_runs: bool = True) -> None:
     """The total over both splits, or a note when fewer than `MIN_GROUP` tenders have a record or sizes. No count in
     it is per split."""
@@ -1668,6 +1775,8 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None], dry_runs: bool 
             "hard-stop tiers, tenders per tier from the dry runs, over the tenders each engine runs on: "
             f"{'; '.join(rows) or 'none'}{left}"
         )
+        if line := _size_line(c.get("size_checks") or {}):
+            say(line)
     total = round(sum(c["estimate_usd"].values()), 2)
     unknown = (
         f"; {c['estimate_unknown']} engine estimates unknown, counted at their hard stop"

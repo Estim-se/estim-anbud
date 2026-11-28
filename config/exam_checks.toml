@@ -1,0 +1,19 @@
+# Size checks the $0 exam pass prints as counts over both splits (`anbud.evals.exam`, its "size checks" line): how
+# many tenders each engine's run may reach its hard stop on. Diagnostics only: no stop, cap, estimate or run reads
+# this file, so it is outside the config set a run records.
+
+[granskning]
+# Page cards come before the map, and neither degrades: a refused card or map reservation halts the run (audit 2,
+# C10). The pass counts tenders whose cards (tiles times this) plus the map's reservation (the planned prefix before
+# cards, at the map model's dearest input price, plus its max tokens) are above a share of their stop, and above it.
+card_usd_per_tile = 0.03 # one card: a ~9,000-token image tile at Sonnet's input price and ~1,200 output tokens
+card_map_share = 0.5 # the warning share of the stop
+
+[kalkyl]
+# A run's spend as a share of its dry run's cost_usd_est_high, measured on the dev tender (19 chunks, 28 Nov 2026).
+# The pass counts tenders whose high estimate times each share is above their stop, and the high estimate alone.
+spend_ratios = [
+    0.161, # the max of the 9 first paid dev runs (min 0.141, median 0.147)
+    0.29, # the all-repaired extrapolation, not a measurement: every chunk repaired (measured runs had 0 to 3 in 19)
+    0.33, # a margin for size: a larger tender carries a larger uncapped outline prefix, whose share grows with size
+]
