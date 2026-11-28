@@ -120,7 +120,10 @@ class Event(_Model):
     run_id: str
     company_id: str
     step: str
-    kind: Literal["start", "model_call", "cache_hit", "tool_call", "result", "error", "end"]
+    # Per call: model_call and error, the only kinds a resumed run's opening spend counts (`RunStore.run_spend`).
+    # Per step: result, or step_error for a step that ended in error, each with the step's cost already counted in
+    # its calls' events.
+    kind: Literal["start", "model_call", "cache_hit", "tool_call", "result", "step_error", "error", "end"]
     at: datetime
     duration_ms: int | None = None
     input_tokens: int | None = None
