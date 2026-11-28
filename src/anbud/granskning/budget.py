@@ -127,7 +127,8 @@ class PrefixPlan:
             "boundary_lines_dropped": len(self.boundary_dropped),
             "p1_fits": self.p1_fits,
             **({"p1_card_tokens_max": self.cards} if self.cards else {}),  # a plan after the cards stays as it was
-            # only when P1 overflows: a plan where it fits stays as it was
+            # only when P1 overflows, or when the plan demotes a P1 document all the same (P1 fits, but the other
+            # documents' outlines and the other trades' lines don't fit with it): a plan without either stays as it was
             **(
                 {
                     "core_tokens": self.core,
@@ -139,7 +140,7 @@ class PrefixPlan:
                     "core_search_only_documents": len(self.core_search_only),
                     "core_search_only": list(self.core_search_only),
                 }
-                if not self.p1_fits
+                if not self.p1_fits or self.p1_search_only or self.core_search_only
                 else {}
             ),
         }
