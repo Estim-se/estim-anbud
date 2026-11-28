@@ -173,8 +173,8 @@ def test_the_budget_refusal_names_no_figure_for_the_one_prepared_tender(data_roo
     assert "both splits" not in message  # the total covers one tender too, so it isn't shown
 
 
-def test_the_paid_runs_line_prints_no_spend_for_one_prepared_tender(data_root: Path) -> None:
-    """Audit exam #3. Mutation: guarding the runs line on `r.tenders` instead of `r.prepared` makes it fail."""
+def test_a_paid_pass_with_one_prepared_tender_prints_no_figure_of_its_runs(data_root: Path) -> None:
+    """Audit exam #3. Mutation: printing the pass's `spent_usd` in `_say` makes it fail."""
     sealed_store(data_root)
     register(data_root)
     lines: list[str] = []
@@ -182,8 +182,7 @@ def test_the_paid_runs_line_prints_no_spend_for_one_prepared_tender(data_root: P
     assert report.prepared == 1 and report.tenders == 3
     assert report.spent_usd > 0  # one tender's runs did spend
     assert not [line for line in lines if re.search(r"\$\d", line)], lines  # no figure in dollars at all
-    assert "fewer than 2 prepared tenders" in "\n".join(lines)
-    assert "paid exam so far: fewer than 2 tenders attempted, so no figures" in lines
+    assert report.owed == 2  # the two tenders whose prep stopped for a reason a later pass retries
 
 
 DEGRADED = {
@@ -197,35 +196,30 @@ FULL = {**DEGRADED, "refused_calls": 0, "lenses_not_run": [], "lenses_stopped": 
         "verifier": {"selected": 12, "verified": 12, "not_verified_budget": 0}}  # fmt: skip
 
 
-def test_a_degraded_run_is_frozen_finished_with_its_summary_and_one_is_counted_only_over_both_splits(
+def _both(runner: FakeEngines, budget: float = 500.0, now: datetime = NOW, **kw) -> tuple[list[exam.Report], list[str]]:  # type: ignore[no-untyped-def]
+    lines: list[str] = []
+    reports = exam.run_both(
+        "co-002", paid=True, budget_usd=budget, runner=runner, now=now, local_now=LOCAL_NOW, say=lines.append, **kw
+    )
+    return reports, lines
+
+
+def test_a_degraded_run_is_frozen_finished_with_its_summary_and_counted_in_the_exam_s_one_total(
     data_root: Path,
 ) -> None:
-    """Mutations: dropping the `degraded` field from the freeze line's `exam`, or showing the split's degraded count
-    from 1 (`>= 1`), makes it fail."""
+    """Mutation: dropping the `degraded` field from the freeze line's `exam` makes it fail."""
     sealed_store(data_root)
     register(data_root)
-    lines: list[str] = []
-    budgets = {"t-0002": DEGRADED, "t-0003": FULL, "t-0004": FULL}
-    report = _pass(FakeEngines(COSTS, budgets=budgets), 200.0, say=lines.append)
+    budgets = {"t-0001": FULL, "t-0002": DEGRADED, "t-0003": FULL, "t-0004": FULL}
+    reports, lines = _both(FakeEngines(COSTS, budgets=budgets))
     reviews = {r["tender"]: r for r in _freezes() if r["exam"]["engine"] == "granskning"}
     assert reviews["co-002/t-0002"]["status"] == "finished"
     less = reviews["co-002/t-0002"]["exam"]["degraded"]  # partial and the verifier counts on the line, in counts
     assert less["any"] and less["partial"] and less["lenses_not_run"] == less["lenses_stopped"] == 1
     assert (less["verifier_selected"], less["verifier_verified"], less["not_verified_budget"]) == (12, 9, 3)
     assert reviews["co-002/t-0003"]["exam"]["degraded"]["any"] is False
-    assert report.runs_degraded == {"granskning": 1}
-    runs = next(line for line in lines if line.startswith("runs: "))
-    assert "less than a full review" not in runs  # one degraded run: counted only in the total over both splits
-    assert "; 1 finished with less than a full review;" in next(x for x in lines if x.startswith("paid exam so far"))
-
-
-def test_two_degraded_runs_are_counted_in_the_split_s_runs_line(data_root: Path) -> None:
-    sealed_store(data_root)
-    register(data_root)
-    lines: list[str] = []
-    budgets = {"t-0002": DEGRADED, "t-0003": DEGRADED, "t-0004": FULL}
-    _pass(FakeEngines(COSTS, budgets=budgets), 200.0, say=lines.append)
-    assert "finished baseline 5, granskning 3, kalkyl 3, 2 of them with less than a full review;" in "\n".join(lines)
+    assert [r.runs_degraded for r in reports] == [{"granskning": 1}, {}]
+    assert "; 1 finished with less than a full review;" in lines[-1]  # one total over both splits only
 
 
 @pytest.mark.parametrize(

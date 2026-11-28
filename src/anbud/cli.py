@@ -27,7 +27,7 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _eval(args: argparse.Namespace) -> int:
-    if args.kind not in ("heldout", "prospective"):
+    if args.kind not in ("heldout", "prospective", "exam"):
         print(f"anbud eval {args.kind}: not built yet", file=sys.stderr)
         return NOT_BUILT
     refusal = held_out_refusal()
@@ -42,6 +42,13 @@ def _eval(args: argparse.Namespace) -> int:
     from anbud.evals import exam
     from anbud.granskning import provenance
 
+    if args.paid and args.kind != "exam":  # a paid split alone would print figures of part of the exam
+        print(
+            f"anbud eval {args.kind}: refused: a paid exam runs both splits in one invocation: "
+            "anbud eval exam <co> --paid --budget USD",
+            file=sys.stderr,
+        )
+        return REFUSED
     if args.paid:
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
             print(f"anbud eval {args.kind}: refused: paid calls never run in CI", file=sys.stderr)
@@ -51,25 +58,30 @@ def _eval(args: argparse.Namespace) -> int:
             print(f"anbud eval {args.kind}: refused: {refusal}", file=sys.stderr)
             return REFUSED
     engines = tuple(args.engines.split(",")) if args.engines else exam.ENGINES
+    options = {
+        "paid": args.paid,
+        "budget_usd": args.budget,
+        "engines": engines,
+        "app": (args.app or exam.baseline.APP_DIR).expanduser(),
+        "app_ref": args.app_ref or exam.baseline.APP_REF,
+    }
     try:
-        report = exam.run_exam(
-            args.company_id,
-            args.kind,
-            paid=args.paid,
-            budget_usd=args.budget,
-            engines=engines,
-            app=(args.app or exam.baseline.APP_DIR).expanduser(),
-            app_ref=args.app_ref or exam.baseline.APP_REF,
-        )
+        if args.kind == "exam":
+            reports = exam.run_both(args.company_id, **options)
+        else:
+            reports = [exam.run_exam(args.company_id, args.kind, **options)]
     except (exam.ExamError, ValueError) as exc:
         print(f"anbud eval {args.kind}: stopped: {exc}", file=sys.stderr)
         return REFUSED
     except Exception as exc:  # the message may hold a path or a name, so only the type is shown
         print(f"anbud eval {args.kind}: stopped: {type(exc).__name__}", file=sys.stderr)
         return REFUSED
-    digest = exam.estimate_digest(report)
+    digest = exam.estimate_digest(reports[-1])  # the total over both splits, as the last pass left it
     if digest is not None:
         print(f"estimate id: {digest}")
+    if args.kind == "exam":  # run outcomes are exam results, printed once in the total: the exit code says none
+        return 1 if any(n for r in reports for stop, n in r.prep_stops.items() if stop not in exam.KEPT_STOPS) else 0
+    report = reports[0]
     failed = sum(report.runs_failed.values()) + report.prep_failed
     return 1 if failed else 0
 
@@ -587,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
 
     add_run_arguments(run)
     ev = sub.add_parser("eval", help="evals (dev now; held-out and prospective from phase 2, never from an agent)")
-    ev.add_argument("kind", choices=["dev", "heldout", "prospective"])
+    ev.add_argument("kind", choices=["dev", "heldout", "prospective", "exam"], help="exam: both splits, in one go")
     ev.add_argument("company_id", nargs="?")
     ev.add_argument(
         "--paid", action="store_true", help="run the engines (paid); without it: quarantine, prep, estimate"
