@@ -24,5 +24,8 @@ spend_ratios = [
 # The pass also prints what the exam would cost if each tender's stop were scaled so that no engine is cut off by its
 # cap (its "scaled stops" line), never below the tier's stop: the old engine at its estimate with the margin, Kalkyl at
 # its high estimate times the largest of [kalkyl] spend_ratios, Granskning at its cards and map over [granskning]
-# card_map_share, so the lenses keep the rest. A diagnostic for a cap decision: no stop reads it.
+# card_map_share, so the lenses keep the rest. Its expected spend is at measured rates with no margin: the old engine's
+# pages at its rate, Granskning's prefix rate plus its cards and map, Kalkyl's high times the first of [kalkyl]
+# spend_ratios (the measured one). Dollars are printed over every engine only (the group rule). A diagnostic for a cap
+# decision: no stop reads it.
 stop_bands = [60, 100, 150] # each tender's largest scaled stop, counted by band: whether a per-run ceiling matters

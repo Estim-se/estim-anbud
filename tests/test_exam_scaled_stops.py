@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 import pytest
-from test_exam import LOCAL_NOW, NOW, FakeEngines, register
+from test_exam import LOCAL_NOW, NOW, FakeEngines, register, sealed_store
 from test_exam_size_checks import COSTS, HIGHS, PAGES, ROOT, TILES, _free_pass
 
 from anbud.config import CONFIG_DIR
@@ -20,10 +20,10 @@ from anbud.evals import exam
 
 LINE = (
     "scaled stops, if no engine were cut off by its cap (a diagnostic; config/exam_checks.toml), over the tenders each "
-    "engine runs on: worst case $309.72 (granskning $127.02, kalkyl $93.30, baseline $89.40); estimate $200.11 "
-    "(granskning $45.46, kalkyl $90.30, baseline $64.35); stops that would rise: granskning 2 of 4, kalkyl 2 of 4, "
-    "baseline 2 of 4; tenders per largest stop: granskning <=$60 3, <=$100 1, <=$150 0, above $150 0; kalkyl <=$60 4, "
-    "<=$100 0, <=$150 0, above $150 0; baseline <=$60 4, <=$100 0, <=$150 0, above $150 0"
+    "engine runs on: worst case $309.72, estimate $200.11, expected at measured rates with no margin $132.65, over "
+    "every engine; stops that would rise: granskning 2 of 4, kalkyl 2 of 4, baseline 2 of 4; tenders per largest stop: "
+    "granskning <=$60 3, <=$100 1, <=$150 0, above $150 0; kalkyl <=$60 4, <=$100 0, <=$150 0, above $150 0; "
+    "baseline <=$60 4, <=$100 0, <=$150 0, above $150 0"
 )
 
 
@@ -37,7 +37,9 @@ def test_the_free_pass_prints_the_exam_with_stops_scaled_to_each_tender(data_roo
     for the cards and map to take half, 1,000 tiles $61.51. Kalkyl's $100 and $200 highs need $29.10 and $58.20 (0.291);
     $1 stays at S's $3. The old engine's 400 and 500 pages need $13.20 and $16.50 a run; 50 stays at $10. Mutations:
     `run_stop = raw * margin` (no floor at the stop), `min` for `max` over the spend ratios, or Granskning's estimate
-    without its cards and map, each make it fail."""
+    without its cards and map, each make it fail. Expected, at measured rates with no margin: Kalkyl's highs times
+    0.142 ($42.88), the old engine's pages at $0.022 ($42.90), Granskning's prefix rate plus its cards and map
+    ($46.87)."""
     lines = _free_pass(data_root)
     assert _scaled(lines) == LINE
     size = next(i for i, x in enumerate(lines) if x.startswith("size checks"))
@@ -71,23 +73,22 @@ def test_the_line_follows_the_config(data_root: Path, monkeypatch: pytest.Monkey
     }
     monkeypatch.setattr(exam, "exam_checks", lambda config_dir=CONFIG_DIR: checks)
     line = _scaled(_free_pass(data_root))
-    assert "kalkyl $156.00" in line  # $3 + $50 + $100 + $3 at the largest ratio, 0.5
     assert "kalkyl <=$20 2, <=$40 0, above $40 2" in line
     # At a quarter, the map alone ($0.76, $3.04 over 0.25) and the unknown tiles keep S's $20; 400 and 1,000 tiles rise.
     assert "granskning 2 of 4" in line and "granskning <=$20 2, <=$40 0, above $40 2" in line
 
 
 def test_a_scaled_stop_is_never_below_the_tiers_and_an_unknown_size_keeps_it() -> None:
-    assert exam._scaled_kalkyl(25.0, 10.0, 1.5) == {"stop": 25.0, "estimate": 15.0, "rises": False, "largest": 25.0}
-    assert exam._scaled_kalkyl(25.0, None, 1.5)["stop"] == 25.0
-    assert exam._scaled_granskning(20.0, None, None) == {
-        "stop": 20.0,
-        "estimate": 20.0,
-        "rises": False,
-        "largest": 20.0,
-    }
-    assert exam._scaled_granskning(0.0, None, None)["stop"] == 0.0  # a prefix-budget stop runs nothing: no rise
-    assert exam._scaled_granskning(20.0, 1.0, 4.0) == {"stop": 20.0, "estimate": 4.0, "rises": False, "largest": 20.0}
+    kalkyl = exam._scaled_kalkyl(25.0, 10.0, 1.5)
+    assert (kalkyl["stop"], kalkyl["estimate"], kalkyl["rises"]) == (25.0, 15.0, False)
+    assert kalkyl["expected"] == pytest.approx(1.42)  # the high times the measured ratio, 0.142
+    assert exam._scaled_kalkyl(25.0, None, 1.5)["stop"] == exam._scaled_kalkyl(25.0, None, 1.5)["expected"] == 25.0
+    unknown = exam._scaled_granskning(20.0, None, None, 1.5)
+    assert (unknown["stop"], unknown["estimate"], unknown["expected"], unknown["rises"]) == (20.0, 20.0, 20.0, False)
+    assert exam._scaled_granskning(0.0, None, None, 1.5)["stop"] == 0.0  # a prefix-budget stop runs nothing: no rise
+    small = exam._scaled_granskning(20.0, 1.5, 4.0, 1.5)
+    assert (small["stop"], small["estimate"], small["expected"]) == (20.0, 4.0, 5.0)  # $1 prefix at no margin + $4
+    assert exam._scaled_granskning(20.0, 300.0, 4.0, 1.5)["expected"] == 20.0  # never above the stop
 
 
 def test_nothing_goes_into_the_guarded_budgets() -> None:
@@ -101,3 +102,33 @@ def test_the_wrapper_keeps_the_line_among_its_status_lines() -> None:
     script = (ROOT / "scripts" / "exam-run.sh").read_text()
     (pattern,) = re.findall(r"^STATUS_LINES='(.+)'$", script, re.M)
     assert re.match(pattern, "scaled stops, if no engine were cut off by its cap ...")
+
+
+def _dollars_by_engine(line: str) -> list[str]:
+    return re.findall(r"(?:granskning|kalkyl|baseline) \$\d", line)
+
+
+def test_the_line_prints_no_dollar_figure_of_one_engine(data_root: Path) -> None:
+    """An engine's own total beside its count of stops that rise, and the tiers line's stop for each tender that
+    doesn't, gives a single tender's figure by subtraction. Dollars are over every engine only; the counts against
+    fixed thresholds (rises, bands) stay. Mutation: printing an engine's total makes it fail."""
+    line = _scaled(_free_pass(data_root))
+    assert _dollars_by_engine(line) == []
+    totals = line.split(": ", 1)[1].split("; stops that would rise")[0]
+    assert re.findall(r"\$[\d.]+", totals) == ["$309.72", "$200.11", "$132.65"]
+
+
+def test_a_subtraction_against_the_tiers_and_estimate_lines_isolates_no_tender(data_root: Path) -> None:
+    """When scaling changes a single tender (one Kalkyl high above its stop; no tiles; few pages), the worst case and
+    the estimate under it minus the capped ones the estimate line prints would be that tender's: they're not shown.
+    The expected spend has no capped counterpart. Mutation: `== 1` for the withheld case to `== -1` makes it fail."""
+    sealed_store(data_root)
+    register(data_root)
+    lines: list[str] = []
+    highs = {"t-0001": 200.0, "t-0002": 1.0, "t-0003": 1.0, "t-0004": 1.0}
+    runner = FakeEngines(COSTS, tiles={}, highs=highs, pages=dict.fromkeys(highs, 50))
+    exam.run_both("co-002", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
+    line = _scaled(lines)
+    assert "worst case and estimate not shown, since scaling changes a single tender" in line
+    assert "worst case $" not in line and _dollars_by_engine(line) == []
+    assert "kalkyl 1 of 4" in line  # the count passes: a count over the engine's tenders against a fixed threshold
