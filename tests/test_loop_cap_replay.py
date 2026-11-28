@@ -81,8 +81,9 @@ def test_a_lens_truncated_by_its_dollar_cap_without_a_note_replays_at_zero(tmp_p
     assert (again.status, again.turns) == (first.status, first.turns)
 
 
-class _Killed(Exception):
-    """The process dies mid-run (a bug, a kill): the paid run stops after its first turn."""
+class _Killed(BaseException):
+    """The process dies mid-run (a kill, Ctrl-C): the paid run stops after its first turn. A BaseException, as a kill
+    or an interrupt is: an Exception raised inside the SDK's call is a failed call, tried again (`stream`)."""
 
 
 class _DiesAt(ScriptedSDK):
