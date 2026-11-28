@@ -70,6 +70,9 @@ from anbud import notice as notices
 from anbud.config import CONFIG_DIR
 from anbud.evals import baseline, freeze
 from anbud.evals import split_heldout as sh
+from anbud.granskning.command import (
+    MODEL_UNREACHABLE,
+)  # no lens or extraction call answered: `anbud run`, `anbud kalkyl`
 from anbud.stops import ESTIMATE, Stop, granskning_stop, granskning_tiers, kalkyl_stop, kalkyl_tiers, top
 from anbud.store import private_dirs
 
@@ -362,6 +365,8 @@ class EngineRun:
     halted: bool = False  # stopped by a limit: its hard stop, the spend cap, a stop marker or the timeout
     budget: dict[str, Any] | None = None  # Granskning: what the hard stop cost the run (its summary's `budget`)
     lost: dict[str, Any] | None = None  # Granskning: what errors cost it after their retries (its `degraded`)
+    failures: dict[str, int] | None = None  # calls that failed for good, by kind, as each engine's record says
+    unreachable: bool = False  # the old engine: it sent calls and none was answered
 
     @property
     def status(self) -> str:
@@ -375,6 +380,71 @@ class EngineRun:
 
 def _section(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _failure_kinds(value: Any) -> dict[str, int] | None:
+    """An engine's calls failed for good, by kind, as its summary reports them; None when it reports none."""
+    if not isinstance(value, dict):
+        return None
+    return {str(k): _n(n) for k, n in sorted(value.items()) if _n(n)} or None
+
+
+def _breaks(one: EngineRun) -> str | None:
+    """Why a run's end stops the exam: a cause every later run would share, so each would lose its pair. None when
+    it doesn't. Granskning and Kalkyl exit 3 when refused before any call and 6 when no lens or extraction call was
+    answered; the old engine's codes are its own (`baseline.EXIT_CODES`), so its calls' statuses say it."""
+    if one.engine in ("granskning", "kalkyl") and one.exit_code == PAID_REFUSED:
+        return "a run was refused before any call"
+    if one.engine in ("granskning", "kalkyl") and one.exit_code == MODEL_UNREACHABLE:
+        return "a run reached no model"
+    if one.unreachable:
+        return "a run had none of its calls answered"
+    kinds = sorted(ENVIRONMENTAL & set(one.failures or {}))
+    return f"the API refused a run's calls ({', '.join(kinds)})" if kinds else None
+
+
+def _stop(why: str) -> ExamError:
+    """Why the exam stops before its next run: no figure, no tender, engine or split. What ran stays on record as it
+    ended, a pair with an attempt is never run again, and the pairs not started are still owed: the same command, once
+    the cause is fixed, runs only those."""
+    return ExamError(
+        f"stopped before the next run: {why}, so no further run was started. Fix it, then run the same command again: "
+        "a pair with an attempt on record is never run again, and the rest are still owed"
+    )
+
+
+def _baseline_failures(calls_log: Path) -> tuple[dict[str, int] | None, bool]:
+    """The old engine's failed calls by kind, from the preload's log (`baseline_preload.mjs`: each call's HTTP status
+    and an error's kind, never its text), and whether it sent calls and none was answered. The app retries only a 429
+    or a 5xx, so a 401, a 403 or a 400 ends its run. A 401 or 403 is `auth`, a 400 whose balance can't pay is
+    `spend_cap` (as the model client counts it), and any other 400 is `bad_request`."""
+    kinds: Counter[str] = Counter()
+    sent = answered = 0
+    lines = calls_log.read_text(encoding="utf-8").splitlines() if calls_log.is_file() else []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("event") != "call":
+            continue
+        sent += 1
+        status = record.get("status")
+        if isinstance(status, int) and 200 <= status < 300:
+            answered += 1
+        elif not isinstance(status, int):
+            kinds["connection"] += 1
+        elif status in (401, 403):
+            kinds["auth"] += 1
+        elif record.get("error_kind") == "credit_balance":
+            kinds["spend_cap"] += 1
+        elif status == 429:
+            kinds["rate_limited"] += 1
+        elif status >= 500:
+            kinds["server"] += 1
+        else:
+            kinds["bad_request"] += 1
+    return (dict(sorted(kinds.items())) or None), sent > 0 and answered == 0
 
 
 def is_degraded(budget: Any, lost: Any) -> bool:
@@ -449,6 +519,8 @@ _GRANSKNING_SPENT = re.compile(r"budget spent \$([\d.]+) of")
 PREFIX_STOP = "anbud run: stopped: the prefix's fixed part"
 PAID_REFUSED = 3  # `anbud run`'s exit code for a run refused or stopped before any paid call
 RUN_HALTED = 5  # `anbud run`'s exit code for a run a limit stopped before it finished
+# Kinds of a run's failed calls that every later run would fail the same way (`_breaks`).
+ENVIRONMENTAL = frozenset({"key_missing", "auth", "spend_cap"})
 BASELINE_HALTS = ("hard_stop", "stopped", "timeout")  # the old engine's outcomes that are a limit, not an error
 
 # Why prep stopped, from the one line `anbud prep` writes to stderr when it stops (its messages name no file and quote
@@ -538,12 +610,18 @@ class Engines:
             halted=code == RUN_HALTED,
             budget=budget,
             lost=lost,
+            failures=_failure_kinds(_section(lost).get("failures")),
         )
 
     def kalkyl(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> EngineRun:
         proc = self._anbud(vroot, ["kalkyl", company_id, tender_id, "--run-id", run_id], f"{run_id}.log")
         code, match = proc.returncode, _KALKYL_COST.search(proc.stdout)
         halted = _KALKYL_HALTED.search(proc.stdout)
+        outputs = paths.dev_tender_dir(company_id, tender_id, vroot) / "kalkyl" / run_id
+        try:
+            summary = json.loads((outputs / "summary.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            summary = {}
         return EngineRun(
             "kalkyl",
             "kalkyl",
@@ -551,10 +629,40 @@ class Engines:
             code,
             code == 0 and _KALKYL_FROZEN.search(proc.stdout) is not None,
             float(match.group(1)) if match else None,
-            paths.dev_tender_dir(company_id, tender_id, vroot) / "kalkyl" / run_id,
+            outputs,
             paths.company_dir(company_id, vroot) / "runs" / run_id,
             halted=halted is not None and int(halted.group(1)) > 0,
+            failures=_failure_kinds(_section(summary).get("failures")),
         )
+
+    def api_check(self) -> str | None:
+        """$0, in this process: the workspace's key reads and the API answers a token count (`check_api`). None when
+        it does, else the kind that failed."""
+        from anbud.config import load_config
+        from anbud.model_client import check_api, keychain_key
+
+        config = load_config()
+        return check_api(config, lambda: keychain_key(account=config.workspace))
+
+    def launch_sha(self) -> str | None:
+        """The harness commit the exam starts on."""
+        from anbud.granskning import provenance
+
+        return provenance.git_state().sha
+
+    def gate(self, launch_sha: str | None) -> str | None:
+        """$0, in this process, before each paid run's started line: why it mustn't start, or None. A child refuses a
+        dirty tree only after its started line, and a checkout moved to another commit would run code nobody
+        recorded; a key that can't be read, or an API that can't be reached, fails every run."""
+        from anbud.granskning import provenance
+
+        state = provenance.git_state()
+        if provenance.paid_refusal(state) is not None:
+            return "the checkout isn't a clean git checkout"
+        if launch_sha is not None and state.sha != launch_sha:
+            return "the checkout moved off the commit the exam started at"
+        kind = self.api_check()
+        return None if kind is None else f"the API check failed ({kind})"
 
     def selection_plan(self, vroot: Path, company_id: str, tender_id: str) -> dict[str, Any] | None:
         """The selection and prefix plan a Granskning run on the granskning input would use (`selection_sizes`)."""
@@ -573,7 +681,7 @@ class Engines:
     ) -> EngineRun:
         from anbud.config import load_config
         from anbud.granskning import provenance
-        from anbud.model_client import keychain_key
+        from anbud.model_client import KeyMissing, keychain_key
 
         app_root = self._app_export()
         settings = baseline.matched_basis(vroot)
@@ -612,6 +720,9 @@ class Engines:
             )
         except baseline.BaselineError:
             return EngineRun("baseline", variant, run_id, None, False, 0.0)
+        except KeyMissing:  # the key stopped reading after the gate: nothing was sent, and no later run can send
+            return EngineRun("baseline", variant, run_id, None, False, 0.0, failures={"key_missing": 1})
+        failures, unreachable = _baseline_failures(run_dir / "record" / "calls.jsonl")
         ok = result.outcome == ("dry_run" if dry_run else "ok")
         recorded = json.loads((run_dir / "record" / "run.json").read_text(encoding="utf-8")).get("settings")
         return EngineRun(
@@ -625,6 +736,8 @@ class Engines:
             run_dir / "record",
             recorded,
             halted=result.outcome in BASELINE_HALTS,
+            failures=failures,
+            unreachable=unreachable and not dry_run,
         )
 
 
@@ -783,6 +896,7 @@ def run_exam(
     root: Path | None = None,
     say: Callable[[str], None] = print,
     say_total: bool = True,
+    launch_sha: str | None = None,
 ) -> Report:
     """The exam. `say` gets aggregate lines only. Raises ExamError before anything is unpacked when it can't start.
     With `say_total` false the total over both splits isn't printed: `run_both` prints it once, after both splits."""
@@ -991,6 +1105,7 @@ def run_exam(
     # passes charged comes from the sealed ledger. Each tender is attempted once per engine and input (scoring plan
     # v3.1): a pair with an attempt on record is never run again, and every run is put on record before it starts.
     assert budget_usd is not None
+    launch_sha = launch_sha or runner.launch_sha()  # `run_both` passes the commit it checked before either split
     try:
         attempts = freeze.exam_attempts(freeze.records(freeze.ledger_file(company_id, True, root), root))
     except freeze.FreezeError as exc:
@@ -1023,6 +1138,11 @@ def run_exam(
                 continue
             run_id = f"exam-{kind}-{t}-{engine}{'-' + variant if engine == 'baseline' else ''}-{stamp}"
             fields = {"kind": kind, "engine": engine, "variant": variant, "input": VARIANT_LABELS[variant]}
+            # The gate: an attempt is never run again, so a run sent into a broken environment (a dirty or moved
+            # checkout, no key, a refused key, the API out of reach) loses its pair for good. Each is checked at $0
+            # before its started line is written.
+            if (broken := runner.gate(launch_sha)) is not None:
+                raise _stop(broken)
             try:
                 freeze.start_run(company_id, run_id, tender_id=t, exam={**fields, "cap_usd": cap}, root=root)
             except freeze.FreezeError as exc:
@@ -1046,8 +1166,12 @@ def run_exam(
             if status == freeze.FINISHED and one.degraded:
                 report.runs_degraded[engine] = report.runs_degraded.get(engine, 0) + 1
             runs.append(one)
+            # The breaker: a cause the gate can't see (a credit balance that can't pay, say) fails the next run too.
+            breaks = _breaks(one)
             if one.outputs_dir is None or one.record_dir is None:
                 report.not_frozen += 1  # it left nothing to freeze
+                if breaks:
+                    raise _stop(breaks)
                 continue
             if one.ok:
                 report.runs_after_deadline += after[t]
@@ -1081,6 +1205,8 @@ def run_exam(
                 if one.ok:  # a finished run that isn't frozen can't be scored
                     bucket[engine] -= 1
                     report.runs_failed[engine] = report.runs_failed.get(engine, 0) + 1
+            if breaks:  # after its freeze: the run is on record as it ended
+                raise _stop(breaks)
     report.spent_usd = round(report.spent_usd, 2)
     report.owed = sum((t, e, v) not in done for t, todo in todos.items() for e, v in todo)
     report.owed += sum(n for stop, n in report.prep_stops.items() if stop not in KEPT_STOPS)
@@ -1401,6 +1527,12 @@ def run_both(
     left out) says only that; an interrupted one prints nothing of its runs. So no printed figure ever covers part of
     the exam, and none can be subtracted from the total."""
     now = now or datetime.now(UTC)
+    launch: str | None = None
+    if paid:  # the gate before either split is read: a broken environment refuses with nothing written
+        gate = runner or Engines(exam_dir(company_id, ORDER[0], root) / "logs", app, app_ref, root)
+        launch = gate.launch_sha()
+        if (broken := gate.gate(launch)) is not None:
+            raise _stop(broken)
     reports = [
         run_exam(
             company_id,
@@ -1416,6 +1548,7 @@ def run_both(
             root=root,
             say=say,
             say_total=False,
+            launch_sha=launch,
         )
         for kind in ORDER
     ]

@@ -30,6 +30,7 @@ def _fake_security(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -
     monkeypatch.setattr(sys, "platform", "darwin")
 
 
+@pytest.mark.real_client_parts
 def test_a_keychain_read_that_hangs_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutation: drop `timeout=KEYCHAIN_TIMEOUT_S,` from the `security` call in `keychain_key`: the read waits for the
     tool, here 8 s, then fails for an empty answer instead of a timeout."""
@@ -47,6 +48,7 @@ def test_the_shipped_timeout_is_about_ten_seconds() -> None:
     assert model_client.KEYCHAIN_TIMEOUT_S == 10.0
 
 
+@pytest.mark.real_client_parts
 def test_a_keychain_entry_is_read_and_a_missing_one_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_security(tmp_path, monkeypatch, f'[ "$5" = "anbud-dev" ] && printf "{FAKE}\\n" && exit 0; exit 44')
     assert keychain_key() == FAKE
