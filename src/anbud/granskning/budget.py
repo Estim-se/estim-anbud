@@ -35,7 +35,14 @@ from typing import Any
 
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
-from anbud.granskning.prefix import CHARS_PER_TOKEN, block_line, outline_lines, prefix_chars, system_blocks
+from anbud.granskning.prefix import (
+    CHARS_PER_TOKEN,
+    block_line,
+    doc_name,
+    outline_lines,
+    prefix_chars,
+    system_blocks,
+)
 from anbud.models import Block
 from anbud.prep.model import Tile
 from anbud.selection import HEADER_BLOCKS, HEADER_CHARS, classify, views
@@ -47,8 +54,8 @@ P2_ROLES = ("el_list", "el_drawing", "el", "boundary_list", "object_list")
 SEARCH_ONLY = "prefixbudget"  # why a document is search-only
 SEARCH_ONLY_P1 = "prefixbudget, priority 1"  # a P1 document demoted: its text is reached by search
 SEARCH_ONLY_CORE = "prefixbudget, priority 1, AF or contract"  # the core demoted: the review is partial
-MARK_CHARS = 1000  # the search-only note and marks the plan adds to the document list
-DOC_CHARS = 100  # a document's <doc> and </doc> lines
+MARK_CHARS = 1000  # the search-only note the plan adds to the document list (each document's marks: `_mark_chars`)
+TAG_CHARS = 32  # a document's <doc> and </doc> lines without its id and name (27), and a token's rounding to spare
 # At most one tile's card text, and its paragraphs (each a block line). About three dense A4 pages of text: the cards
 # measured so far are far smaller (the dev tender's largest is under 2000 characters).
 CARD_CHARS = 12_000
@@ -160,11 +167,26 @@ def priorities(corpus: Corpus) -> dict[str, int]:
     return {d: 1 if r in P1_ROLES else 2 if r in P2_ROLES else 3 for d, r in roles(corpus).items()}
 
 
+def _tag_chars(corpus: Corpus) -> dict[str, int]:
+    """Each document's <doc id="…" name="…"> and </doc> lines: a long file name makes them long."""
+    names = {d["doc_id"]: doc_name(d) for d in corpus.documents}
+    ids = set(names) | {b.doc_id for b in corpus.blocks.values()} | {t.doc_id for t in corpus.tiles.values()}
+    return {d: TAG_CHARS + len(d) + len(names.get(d, "")) for d in ids}
+
+
+def _mark_chars() -> int:
+    """A search-only document's mark, ` search_only="…"`, in both places it goes: the document list and its <doc>.
+    Counted at the longest mark, the core's, for every document: a document's cards can change which mark it gets,
+    and must never move the floor."""
+    return 2 * (len(' search_only=""') + len(SEARCH_ONLY_CORE))
+
+
 def _doc_chars(corpus: Corpus) -> dict[str, int]:
+    tags = _tag_chars(corpus)
     chars: dict[str, int] = {}
     for block_id in corpus.order:
         block = corpus.blocks[block_id]
-        chars[block.doc_id] = chars.get(block.doc_id, DOC_CHARS) + len(block_line(block)) + 1
+        chars[block.doc_id] = chars.get(block.doc_id, tags[block.doc_id]) + len(block_line(block)) + 1
     return chars
 
 
@@ -202,7 +224,7 @@ def card_tokens(
         return 0, 0
     core = set(core)
     unknown = {v.doc_id for v in views(corpus) if v.doc_id in by_doc and classify(v).discipline == "unknown"}
-    sizes = _doc_chars(corpus)
+    sizes, tags = _doc_chars(corpus), _tag_chars(corpus)
     p1 = in_core = 0
     for doc_id, doc_tiles in by_doc.items():
         cards = sum(_card_tokens_each(t) for t in doc_tiles)
@@ -210,7 +232,7 @@ def card_tokens(
             p1 += cards
             in_core += cards if doc_id in core else 0
         elif doc_id in unknown and _opening_open(corpus, doc_id, {t.page for t in doc_tiles}):
-            cards += _tokens(sizes.get(doc_id, DOC_CHARS))
+            cards += _tokens(sizes.get(doc_id, tags[doc_id]))
             p1, in_core = p1 + cards, in_core + cards
     return p1, in_core
 
@@ -241,7 +263,8 @@ def plan_prefix(
     sizes = {d: _tokens(n) for d, n in chars.items() if d not in corpus.excluded}
     by = {k: sum(t for d, t in sizes.items() if prio.get(d, 3) == k) for k in (1, 2, 3)}
     core_ids = [d for d in sizes if prio.get(d, 3) == 1 and role.get(d) in CORE_ROLES]
-    tags = DOC_CHARS * len({corpus.blocks[b].doc_id for b in boundary_ids})
+    tag = _tag_chars(corpus)
+    tags = sum(tag[d] for d in {corpus.blocks[b].doc_id for b in boundary_ids})
     boundary = _tokens(tags + sum(len(block_line(corpus.blocks[b])) + 1 for b in boundary_ids))
     cards, core_cards = card_tokens(corpus, cards_for, prio, core_ids)
     core = sum(sizes[d] for d in core_ids)
@@ -267,7 +290,10 @@ def plan_prefix(
     # A document whose only text is still to come from its cards has no block yet: once they are in, it is in the
     # prefix, at least as its <doc> lines and outline. Counted now, so the cards can't move the floor.
     pending = {t.doc_id for t in cards_for if t.doc_id not in sizes and t.doc_id not in corpus.excluded}
-    least |= {d: _tokens(DOC_CHARS + sum(len(line) + 1 for line in outline_lines(corpus, d))) for d in pending}
+    least |= {
+        d: _tokens(tag.get(d, TAG_CHARS + len(d)) + _mark_chars() + sum(len(x) + 1 for x in outline_lines(corpus, d)))
+        for d in pending
+    }
     # What the boundary lines leave when every one of them is dropped, by the same sums the plan uses below
     residual = boundary - sum(_tokens(len(block_line(corpus.blocks[b])) + 1) for b in boundary_ids)
     plan.floor = p0 + sum(least.values()) + residual
@@ -307,9 +333,12 @@ def plan_prefix(
 
 
 def _outline_tokens(corpus: Corpus) -> dict[str, int]:
+    """What each document comes to search-only: its <doc> lines, its marks and its outline."""
+    tags = _tag_chars(corpus)
     out: dict[str, int] = {}
     for doc_id in {corpus.blocks[b].doc_id for b in corpus.order}:
-        out[doc_id] = _tokens(DOC_CHARS + sum(len(line) + 1 for line in outline_lines(corpus, doc_id)))
+        lines = sum(len(line) + 1 for line in outline_lines(corpus, doc_id))
+        out[doc_id] = _tokens(tags[doc_id] + _mark_chars() + lines)
     return out
 
 
