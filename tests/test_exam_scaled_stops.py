@@ -20,10 +20,10 @@ from anbud.evals import exam
 
 LINE = (
     "scaled stops, if no engine were cut off by its cap (a diagnostic; config/exam_checks.toml), over the tenders each "
-    "engine runs on: worst case $321.42 (granskning $127.02, kalkyl $105.00, baseline $89.40); estimate $211.81 "
-    "(granskning $45.46, kalkyl $102.00, baseline $64.35); stops that would rise: granskning 2 of 4, kalkyl 2 of 4, "
-    "baseline 2 of 4; tenders per largest stop: granskning <=$60 3, <=$100 1, <=$150 0, above $150 0; kalkyl <=$60 3, "
-    "<=$100 1, <=$150 0, above $150 0; baseline <=$60 4, <=$100 0, <=$150 0, above $150 0"
+    "engine runs on: worst case $309.72 (granskning $127.02, kalkyl $93.30, baseline $89.40); estimate $200.11 "
+    "(granskning $45.46, kalkyl $90.30, baseline $64.35); stops that would rise: granskning 2 of 4, kalkyl 2 of 4, "
+    "baseline 2 of 4; tenders per largest stop: granskning <=$60 3, <=$100 1, <=$150 0, above $150 0; kalkyl <=$60 4, "
+    "<=$100 0, <=$150 0, above $150 0; baseline <=$60 4, <=$100 0, <=$150 0, above $150 0"
 )
 
 
@@ -34,7 +34,7 @@ def _scaled(lines: list[str]) -> str:
 
 def test_the_free_pass_prints_the_exam_with_stops_scaled_to_each_tender(data_root: Path) -> None:
     """At the fake's 10,000-token prefix Granskning opens at S ($20); 400 tiles ($12) plus the map ($0.76) need $25.51
-    for the cards and map to take half, 1,000 tiles $61.51. Kalkyl's $100 and $200 highs need $33 and $66 at 0.33;
+    for the cards and map to take half, 1,000 tiles $61.51. Kalkyl's $100 and $200 highs need $29.10 and $58.20 (0.291);
     $1 stays at S's $3. The old engine's 400 and 500 pages need $13.20 and $16.50 a run; 50 stays at $10. Mutations:
     `run_stop = raw * margin` (no floor at the stop), `min` for `max` over the spend ratios, or Granskning's estimate
     without its cards and map, each make it fail."""
