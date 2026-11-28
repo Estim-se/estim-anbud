@@ -1035,6 +1035,7 @@ def run_exam(
             "baseline_runs": 0,
             "tiers": {},  # engine -> the tier its run opens at, or "unknown" (the top tier's stop)
             "above_top": {},  # engine -> whether the size is above the top tier
+            "scaled": {},  # engine -> its stop and estimate if no engine were cut off by its cap (`_scaled_totals`)
         }
         if "granskning" in engines:
             tokens = runner.granskning_estimate(roots["granskning"], company_id, t, f"estimate-{t}-granskning.log")
@@ -1053,16 +1054,21 @@ def run_exam(
                 size["selection"] = {**(selection or {}), "stop_checked": stopped}
                 if stopped:
                     prefix_stopped.add(t)
+            uncapped: float | None = None
             if t in prefix_stopped:
                 usd = cap = 0.0
             elif basis is None or would_stop:
                 size["estimate_unknown"] += basis is None
                 usd = cap
             else:
-                usd = min(basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin, cap)
+                uncapped = basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin
+                usd = min(uncapped, cap)
             size["estimate_usd"]["granskning"] = run_estimates[t, "granskning", "granskning"] = usd
+            cards_map: float | None = None
             if (tiles := runner.granskning_tiles(t)) is not None and basis is not None and cap > 0:
-                size["card_map_share"] = round(_cards_and_map_usd(tiles, basis) / cap, 4)
+                cards_map = _cards_and_map_usd(tiles, basis)
+                size["card_map_share"] = round(cards_map / cap, 4)
+            size["scaled"]["granskning"] = _scaled_granskning(cap, uncapped, cards_map)  # $0 on a prefix stop
             size["worst_usd"] += cap
             size["worst_by_engine"]["granskning"] = cap
         if "kalkyl" in engines:
@@ -1074,6 +1080,7 @@ def run_exam(
                 cap if high is None else min(high * margin, cap)
             )
             size["kalkyl_high_usd"] = high  # for the size checks: what the run may spend, against its stop
+            size["scaled"]["kalkyl"] = _scaled_kalkyl(cap, high, margin)
             size["worst_usd"] += cap
             size["worst_by_engine"]["kalkyl"] = cap
         variants = ["granskning"] if records[t]["same_input"] else list(VARIANTS)
@@ -1085,6 +1092,14 @@ def run_exam(
             over = size.setdefault("baseline_over_stop", {"without_margin": False, "with_margin": False})
             over["without_margin"] |= raw > stops["baseline"]
             over["with_margin"] |= raw * margin > stops["baseline"]
+            scaled = size["scaled"].setdefault(
+                "baseline", {"stop": 0.0, "estimate": 0.0, "rises": False, "largest": 0.0}
+            )
+            run_stop = max(stops["baseline"], raw * margin)  # its estimate with the margin, never below the stop
+            scaled["stop"] += run_stop
+            scaled["estimate"] += raw * margin
+            scaled["rises"] |= run_stop > stops["baseline"]
+            scaled["largest"] = max(scaled["largest"], run_stop)
             size["estimate_usd"]["baseline"] = size["estimate_usd"].get("baseline", 0.0) + usd
             size["worst_usd"] += stops["baseline"]
             size["worst_by_engine"]["baseline"] = size["worst_by_engine"].get("baseline", 0.0) + stops["baseline"]
@@ -1294,6 +1309,48 @@ def _cards_and_map_usd(tiles: int, prefix_tokens: float) -> float:
     return cards + price.max_cost(int(prefix_tokens), MAP_MAX_TOKENS)
 
 
+def _scaled_granskning(cap: float, uncapped: float | None, cards_map: float | None) -> dict[str, Any]:
+    """Granskning's stop if its cards and map took at most `card_map_share` of it, never below its tier's stop, and its
+    estimate under that stop: at least what its cards and map cost. Unknown sizes keep the tier's stop."""
+    share = float(exam_checks()["granskning"]["card_map_share"])
+    stop = cap if cards_map is None else max(cap, cards_map / share)
+    estimate = stop if uncapped is None else min(max(uncapped, cards_map or 0.0), stop)
+    return {"stop": stop, "estimate": estimate, "rises": stop > cap, "largest": stop}
+
+
+def _scaled_kalkyl(cap: float, high: float | None, margin: float) -> dict[str, Any]:
+    """Kalkyl's stop at its dry run's high estimate times the largest spend ratio, never below its tier's stop, and
+    its estimate under that stop."""
+    ratio = max(float(r) for r in exam_checks()["kalkyl"]["spend_ratios"])
+    stop = cap if high is None else max(cap, high * ratio)
+    estimate = stop if high is None else min(high * margin, stop)
+    return {"stop": stop, "estimate": estimate, "rises": stop > cap, "largest": stop}
+
+
+def _scaled_totals(found: list[dict[str, Any]], runs_on: dict[str, int]) -> dict[str, Any]:
+    """Per engine, over the tenders it runs on: the worst case and the estimate if each tender's stop were scaled so
+    that no engine is cut off by its cap, how many tenders' stops would rise, and tenders per band of their largest
+    scaled stop (`[scaled] stop_bands`). Totals and counts only; a record from before counts as unknown."""
+    bands = [float(b) for b in exam_checks()["scaled"]["stop_bands"]]
+    out: dict[str, Any] = {"bands": bands, "engines": {}}
+    for engine in ENGINES:
+        rows = [x for one in found if isinstance(x := (one.get("scaled") or {}).get(engine), dict)]
+        if not rows:
+            continue
+        counts = [0] * (len(bands) + 1)
+        for row in rows:
+            counts[next((i for i, b in enumerate(bands) if float(row["largest"]) <= b), len(bands))] += 1
+        out["engines"][engine] = {
+            "tenders": len(rows),
+            "stop_usd": round(sum(float(x["stop"]) for x in rows), 2),
+            "estimate_usd": round(sum(float(x["estimate"]) for x in rows), 2),
+            "rises": sum(bool(x["rises"]) for x in rows),
+            "bands": counts,
+            "unknown": max(0, int(runs_on.get(engine, 0)) - len(rows)),
+        }
+    return out
+
+
 def _size_checks(found: list[dict[str, Any]]) -> dict[str, Any]:
     """Per engine, over the tenders it runs on, how many may reach their hard stop, from the sizes each record keeps
     (`exam_checks`). Counts only; a record from before these checks counts as unknown."""
@@ -1396,6 +1453,7 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
         "tiers": _tier_counts(found),
         "size_checks": _size_checks(found),
     }
+    out["scaled"] = _scaled_totals(found, out["runs_on"])
     selections = [one["selection"] for one in found if isinstance(one.get("selection"), dict)]
     if selections:
         pages = sum(int(x["pages"]) for x in selections)
@@ -1658,6 +1716,32 @@ def run_both(
     return reports
 
 
+def _scaled_line(scaled: dict[str, Any]) -> str | None:
+    """The scaled stops (`_scaled_totals`) as one line, or None when there are none. Only `_say_combined` prints it,
+    and only when every engine runs on 2 or more tenders."""
+    engines = scaled.get("engines") or {}
+    if not engines:
+        return None
+    worst = round(sum(e["stop_usd"] for e in engines.values()), 2)
+    estimate = round(sum(e["estimate_usd"] for e in engines.values()), 2)
+    by_stop = ", ".join(f"{k} ${e['stop_usd']:.2f}" for k, e in engines.items())
+    by_estimate = ", ".join(f"{k} ${e['estimate_usd']:.2f}" for k, e in engines.items())
+    rises = ", ".join(
+        f"{k} {e['rises']} of {e['tenders']}" + (f" ({e['unknown']} unknown)" if e["unknown"] else "")
+        for k, e in engines.items()
+    )
+    names = [f"<=${b:g}" for b in scaled["bands"]] + [f"above ${scaled['bands'][-1]:g}"]
+    bands = "; ".join(
+        f"{k} " + ", ".join(f"{name} {n}" for name, n in zip(names, e["bands"], strict=True))
+        for k, e in engines.items()
+    )
+    return (
+        "scaled stops, if no engine were cut off by its cap (a diagnostic; config/exam_checks.toml), over the tenders "
+        f"each engine runs on: worst case ${worst:.2f} ({by_stop}); estimate ${estimate:.2f} ({by_estimate}); "
+        f"stops that would rise: {rises}; tenders per largest stop: {bands}"
+    )
+
+
 def _size_line(checks: dict[str, Any]) -> str | None:
     """The size checks (`_size_checks`) as one line, or None when there are none. Only `_say_combined` prints it, and
     only when every engine runs on 2 or more tenders."""
@@ -1776,6 +1860,8 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None], dry_runs: bool 
             f"{'; '.join(rows) or 'none'}{left}"
         )
         if line := _size_line(c.get("size_checks") or {}):
+            say(line)
+        if line := _scaled_line(c.get("scaled") or {}):
             say(line)
     total = round(sum(c["estimate_usd"].values()), 2)
     unknown = (

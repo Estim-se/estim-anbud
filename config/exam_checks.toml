@@ -10,10 +10,19 @@ card_usd_per_tile = 0.03 # one card: a ~9,000-token image tile at Sonnet's input
 card_map_share = 0.5 # the warning share of the stop
 
 [kalkyl]
-# A run's spend as a share of its dry run's cost_usd_est_high, measured on the dev tender (19 chunks, 28 Nov 2026).
-# The pass counts tenders whose high estimate times each share is above their stop, and the high estimate alone.
+# A run's spend as a share of its dry run's cost_usd_est_high, measured on the dev tender (19 chunks, 28 Nov 2026)
+# against the 3.0-factor high, divided by 2.99/2.64 for the 1.4 refit (CHARS_PER_TOKEN 3.0 to 1.4, TOOLS_TOKENS 3000
+# to 4000, which moved the dev tender's high from $2.64 to $2.99): each stays actual spend over the current code's
+# high. The pass counts tenders whose high estimate times each share is above their stop, and the high estimate alone.
 spend_ratios = [
-    0.161, # the max of the 9 first paid dev runs (min 0.141, median 0.147)
-    0.29, # the all-repaired extrapolation, not a measurement: every chunk repaired (measured runs had 0 to 3 in 19)
-    0.33, # a margin for size: a larger tender carries a larger uncapped outline prefix, whose share grows with size
+    0.142, # the max of the 9 first paid dev runs (0.161 against the 3.0-factor high; min 0.141, median 0.147 there)
+    0.256, # the all-repaired extrapolation, not a measurement: every chunk repaired (0.29 against the 3.0-factor high)
+    0.291, # a margin for size: a larger tender carries a larger uncapped outline prefix (0.33 against the old high)
 ]
+
+[scaled]
+# The pass also prints what the exam would cost if each tender's stop were scaled so that no engine is cut off by its
+# cap (its "scaled stops" line), never below the tier's stop: the old engine at its estimate with the margin, Kalkyl at
+# its high estimate times the largest of [kalkyl] spend_ratios, Granskning at its cards and map over [granskning]
+# card_map_share, so the lenses keep the rest. A diagnostic for a cap decision: no stop reads it.
+stop_bands = [60, 100, 150] # each tender's largest scaled stop, counted by band: whether a per-run ceiling matters

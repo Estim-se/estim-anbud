@@ -52,7 +52,7 @@ def test_the_free_pass_counts_the_tenders_each_engine_may_stop_on(data_root: Pat
         "size checks, tenders that may reach their hard stop, over the tenders each engine runs on: "
         "granskning, 4 tenders: page cards at $0.03 a tile plus the map's reservation above 50% of the stop 2, "
         "above the stop 1 (1 unknown); 0 stop on the prefix budget, not run; "
-        "kalkyl, 4 tenders: dry-run high estimate above the stop at x1: 2, x0.161: 1, x0.29: 2, x0.33: 2; "
+        "kalkyl, 4 tenders: dry-run high estimate above the stop at x1: 2, x0.142: 1, x0.256: 2, x0.291: 2; "
         "baseline, 4 tenders: estimate above the stop without its margin 1, with it 2"
     )
     tiers = next(i for i, x in enumerate(lines) if x.startswith("hard-stop tiers"))
@@ -61,7 +61,11 @@ def test_the_free_pass_counts_the_tenders_each_engine_may_stop_on(data_root: Pat
 
 def test_the_line_follows_the_config(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutation: a fixed ratio list in `_size_checks` instead of `checks["kalkyl"]["spend_ratios"]` makes it fail."""
-    checks = {"granskning": {"card_usd_per_tile": 0.03, "card_map_share": 0.9}, "kalkyl": {"spend_ratios": [0.2]}}
+    checks = {
+        "granskning": {"card_usd_per_tile": 0.03, "card_map_share": 0.9},
+        "kalkyl": {"spend_ratios": [0.2]},
+        "scaled": {"stop_bands": [60, 100, 150]},
+    }
     monkeypatch.setattr(exam, "exam_checks", lambda config_dir=CONFIG_DIR: checks)
     line = _size_line(_free_pass(data_root))
     assert "above 90% of the stop 1, above the stop 1 (1 unknown)" in line  # 400 tiles is 64% of the stop
@@ -72,12 +76,13 @@ def test_each_ratio_names_its_source() -> None:
     """The ratios are measurements and margins; a value changed without its source would read as measured."""
     text = (CONFIG_DIR / "exam_checks.toml").read_text()
     loaded = exam.exam_checks()
-    assert loaded["kalkyl"]["spend_ratios"] == [0.161, 0.29, 0.33]
+    assert loaded["kalkyl"]["spend_ratios"] == [0.142, 0.256, 0.291]
     sources = {
-        "0.161": "the max of the 9 first paid dev runs",
-        "0.29": "the all-repaired extrapolation, not a measurement",
-        "0.33": "a margin for size",
+        "0.142": "the max of the 9 first paid dev runs (0.161 against the 3.0-factor high",
+        "0.256": "the all-repaired extrapolation, not a measurement",
+        "0.291": "a margin for size",
     }
+    assert "divided by 2.99/2.64 for the 1.4 refit" in text  # measured against the old high, re-expressed once
     for value, source in sources.items():
         (line,) = [x for x in text.splitlines() if x.strip().startswith(value + ",")]
         assert source in line, line
@@ -96,7 +101,7 @@ def test_a_record_from_before_the_checks_counts_as_unknown() -> None:
     old = {"estimate_usd": {"granskning": 1.0, "kalkyl": 1.0}, "baseline_runs": 1, "worst_by_engine": {"kalkyl": 3.0}}
     checks: dict[str, Any] = exam._size_checks([old, dict(old)])
     assert checks["granskning"]["unknown"] == checks["kalkyl"]["unknown"] == checks["baseline"]["unknown"] == 2
-    assert checks["kalkyl"]["above_stop"] == [[1.0, 0], [0.161, 0], [0.29, 0], [0.33, 0]]
+    assert checks["kalkyl"]["above_stop"] == [[1.0, 0], [0.142, 0], [0.256, 0], [0.291, 0]]
 
 
 def test_the_granskning_dry_runs_tiles_are_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
