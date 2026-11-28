@@ -425,8 +425,8 @@ def test_prep_stops_are_counted_by_category_and_prefix_sizes_summarised(data_roo
     assert report.prefix_tokens["median"] == 725_000 and report.prefix_tokens["max"] == 1_200_000
     assert report.prefix_tokens["over_context"] == 1 and report.prefix_tokens["over_large"] == 2
     assert (
-        "granskning prefix after the selection, before the prefix budget (dry-run estimate, before page cards): "
-        "median 725,000 tokens, max 1,200,000; of 2 runs 1 over the context (1,000,000), 2 over 200,000"
+        "granskning prefix after the selection, before the prefix budget (dry-run estimate, before page cards), over "
+        "the 2 tenders it runs on: median 725,000 tokens, max 1,200,000; 1 over the context (1,000,000), 2 over 200,000"
     ) in printed
     stopped = paths.dev_tender_dir("co-002", "t-0003", exam.variant_root("co-002", "prospective", "kalkyl"))
     assert not (stopped / "prep").exists()  # a tender whose first input stopped isn't prepared a second time
@@ -601,7 +601,7 @@ def test_no_figure_for_a_group_of_fewer_than_two_tenders(data_root: Path) -> Non
     # tenders, seven old-engine inputs (the folder delivery has one).
     assert combined[-1] == (
         "estimate: $21.45 (baseline $11.55, granskning $3.90, kalkyl $6.00; 7 old-engine runs); "
-        "worst case $162.00 (every hard stop)"
+        "worst case $162.00 (every hard stop: baseline $70.00, granskning $80.00, kalkyl $12.00)"
     )
 
     again = exam_pass("heldout", datetime(2026, 12, 1, 10, 0, tzinfo=UTC))
@@ -655,6 +655,85 @@ def test_the_selection_and_the_prefix_budget_are_one_total_over_the_tenders(data
     assert runner.checked == ["t-0003"]
     assert report.combined["estimate_usd"]["granskning"] == pytest.approx(9.75 + 14.625, abs=0.01)
     assert report.combined["worst_usd"] == 20 + 20 + 3 * 3 + 5 * 10
+
+
+KEYS = ("documents", "unknown_documents", "pages", "pages_excluded", "p1_fits", "planned_tokens", "search_only")
+
+
+def _selections(sizes: dict[str, tuple]) -> dict[str, dict]:
+    return {t: {**dict(zip(KEYS, v, strict=True)), "budget_tokens": 450_000} for t, v in sizes.items()}
+
+
+def test_no_printed_figure_depends_on_the_tier_of_a_single_stopping_tender(data_root: Path) -> None:
+    """One tender stops on the prefix budget, and the others are of mixed tiers. Whatever the stopper's tier from its
+    dry run, every printed line is the same: its tier, its prefix and its caps enter no figure."""
+    sealed_store(data_root)
+    costs = {"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0}
+    exam.run_exam("co-002", "heldout", runner=FakeEngines(costs), now=NOW, local_now=LOCAL_NOW, say=lambda _: None)
+    selections = _selections(
+        {
+            "t-0002": (10, 1, 400, 300, True, 100_000, 2),
+            "t-0003": (10, 3, 600, 100, False, 900_000, 0),  # stops: priority 1 over the budget
+            "t-0004": (20, 0, 1000, 600, True, 150_000, 5),
+        }
+    )
+    printed: list[list[str]] = []
+    ids: list[str | None] = []
+    for second, stopper in enumerate((100_000, 250_000, 1_200_000), start=1):  # tier S, M and above L
+        tokens = {"t-0002": 100_000, "t-0003": stopper, "t-0004": 250_000}  # S and M among the others
+        runner = FakeEngines(costs, tokens=tokens, selections=selections)
+        lines: list[str] = []
+        now = NOW.replace(second=second)  # a run id of its own per pass; the same day for the deadlines
+        report = exam.run_exam("co-002", "prospective", runner=runner, now=now, local_now=LOCAL_NOW, say=lines.append)
+        assert runner.checked == ["t-0003"] and report.combined["prefix_stopped"] == 1
+        printed.append(lines)
+        ids.append(exam.estimate_digest(report))
+    assert printed[0] == printed[1] == printed[2] and ids[0] == ids[1] == ids[2]
+    lines = printed[0]
+    assert (
+        "hard-stop tiers, tenders per tier from the dry runs, over the tenders each engine runs on: granskning S 2, "
+        "M 1, L 0; kalkyl S 4, M 0, L 0; 1 stopping on the prefix budget not counted"
+    ) in lines
+    assert any(
+        line.startswith("granskning prefix after the selection") and "over the 3 tenders it runs on" in line
+        for line in lines
+    )
+    # The worst case per engine is the caps the paid gate uses: Granskning S 20 + S 20 + M 30 and the stopper $0,
+    # Kalkyl 4 x S $3, the old engine 7 inputs x $10.
+    assert lines[-1].endswith("(every hard stop: baseline $70.00, granskning $70.00, kalkyl $12.00)")
+
+
+def test_an_engine_on_a_single_tender_prints_totals_only(data_root: Path) -> None:
+    """Two of three tenders stop on the prefix budget, so Granskning runs on one: no Granskning prefix, tier or
+    planned-prefix figure, no tiers that would give its cap back from the worst case, and no per-engine split."""
+    sealed_store(data_root)
+    selections = _selections(
+        {
+            "t-0002": (10, 1, 400, 300, False, 900_000, 0),
+            "t-0003": (10, 3, 600, 100, False, 900_000, 0),
+            "t-0004": (20, 0, 1000, 600, True, 150_000, 5),
+        }
+    )
+    printed: list[list[str]] = []
+    for second, alone in enumerate((100_000, 400_000), start=1):  # the one Granskning run's tier: S or L
+        runner = FakeEngines(
+            {"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0}, tokens={"t-0004": alone}, selections=selections
+        )
+        lines: list[str] = []
+        now = NOW.replace(second=second)
+        report = exam.run_exam("co-002", "prospective", runner=runner, now=now, local_now=LOCAL_NOW, say=lines.append)
+        assert report.combined["runs_on"]["granskning"] == 1
+        printed.append(lines)
+    for lines in printed:
+        text = "\n".join(lines)
+        assert "granskning prefix: 1 tender runs it, fewer than 2, so no figures" in lines
+        assert "1 fits, fewer than 2, so no planned prefix" in text and "planned prefix median" not in text
+        assert "hard-stop tiers: not shown, since granskning runs on fewer than 2 tenders; 2 stopping" in text
+        assert "per engine only when each runs on at least 2 tenders" in text and "granskning $" not in text
+    # Only the estimate line's totals, over three tenders, can differ with that one run's size.
+    assert [x for x in printed[0] if not x.startswith("estimate")] == [
+        x for x in printed[1] if not x.startswith("estimate")
+    ]
 
 
 def test_a_prefix_stop_the_check_does_not_confirm_counts_at_its_hard_stop_and_runs(data_root: Path) -> None:
@@ -727,8 +806,8 @@ def test_tenders_per_hard_stop_tier_are_one_total_and_set_the_worst_case(data_ro
     lines: list[str] = []
     report = exam.run_exam("co-002", "prospective", runner=runner, now=NOW, local_now=LOCAL_NOW, say=lines.append)
     assert (
-        "hard-stop tiers, tenders per tier from the dry runs: granskning S 1, M 1, L 1 (1 above the top tier); "
-        "kalkyl S 3, M 0, L 0"
+        "hard-stop tiers, tenders per tier from the dry runs, over the tenders each engine runs on: granskning S 1, "
+        "M 1, L 1 (1 above the top tier); kalkyl S 3, M 0, L 0"
     ) in lines
     # Worst case: Granskning 20 + 30 + 45, Kalkyl 3 x 3, the old engine 5 inputs x 10.
     assert report.combined["worst_usd"] == 154.0
