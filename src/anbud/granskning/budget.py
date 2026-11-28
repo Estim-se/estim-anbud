@@ -9,6 +9,10 @@ own estimate, so the plan is deterministic and a rebuild sends the same bytes:
 - P1, always in full: the administrative terms (AF), the contract, the general description (rambeskrivning), the
   time plan and the electrical technical description. If P0 and P1 alone exceed the budget, the run stops before any
   paid call (`PrefixOverBudget`); the dry run shows P1 on its own line.
+
+The page cards are read before the plan is made, and their text joins its documents. So the check before the cards
+counts, for each tile, the most text its card can add to P1 (`card_tokens`): a run that P1's cards would take over the
+budget stops before the first card is paid for, not after.
 - P2: the electrical drawings and lists, the boundary and object lists, the other electrical documents, and the lines
   brought back from other trades' documents (capped at a share of the budget).
 - P3: the other common documents and the unclassified ones.
@@ -21,19 +25,26 @@ summary and the report name every search-only document.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from anbud.granskning.contracts import CalcPost
 from anbud.granskning.corpus import Corpus
 from anbud.granskning.prefix import CHARS_PER_TOKEN, block_line, outline_lines, prefix_chars, system_blocks
-from anbud.selection import classify, views
+from anbud.models import Block
+from anbud.prep.model import Tile
+from anbud.selection import HEADER_BLOCKS, HEADER_CHARS, classify, views
 
 P1_ROLES = ("af", "contract", "general_description", "time_plan", "el_description")
 P2_ROLES = ("el_list", "el_drawing", "el", "boundary_list", "object_list")
 SEARCH_ONLY = "prefixbudget"  # why a document is search-only
 MARK_CHARS = 1000  # the search-only note and marks the plan adds to the document list
 DOC_CHARS = 100  # a document's <doc> and </doc> lines
+# At most one tile's card text, and its paragraphs (each a block line). About three dense A4 pages of text: the cards
+# measured so far are far smaller (the dev tender's largest is under 2000 characters).
+CARD_CHARS = 12_000
+CARD_BLOCKS = 60
 
 
 class PrefixOverBudget(RuntimeError):
@@ -65,10 +76,11 @@ class PrefixPlan:
     search_only: list[str] = field(default_factory=list)  # doc ids, in the order they were demoted
     boundary_dropped: list[str] = field(default_factory=list)  # block ids past the cap
     total: int = 0  # the planned prefix, estimated
+    cards: int = 0  # at most what the page cards still to be read add to P1 (`card_tokens`); 0 once they are in
 
     @property
     def p1_fits(self) -> bool:
-        return self.p0 + self.p1 <= self.budget
+        return self.p0 + self.p1 + self.cards <= self.budget
 
     def summary(self) -> dict[str, Any]:
         """Counts only: safe to print and to log."""
@@ -83,6 +95,7 @@ class PrefixPlan:
             "search_only_documents": len(self.search_only),
             "boundary_lines_dropped": len(self.boundary_dropped),
             "p1_fits": self.p1_fits,
+            **({"p1_card_tokens_max": self.cards} if self.cards else {}),  # a plan after the cards stays as it was
         }
 
 
@@ -109,8 +122,54 @@ def _doc_chars(corpus: Corpus) -> dict[str, int]:
     return chars
 
 
-def plan_prefix(corpus: Corpus, calc: list[CalcPost], budget: PrefixBudget) -> PrefixPlan:
-    """What stays in full and what becomes search-only. Deterministic: sizes from characters, ties by doc id."""
+def _card_tokens_each(tile: Tile) -> int:
+    empty = Block(id=f"{tile.id}-{CARD_BLOCKS}", doc_id=tile.doc_id, kind="tile_text", text="", page=tile.page)
+    return _tokens(CARD_CHARS + CARD_BLOCKS * (len(block_line(empty)) + 1))
+
+
+def _opening_open(corpus: Corpus, doc_id: str, tile_pages: set[int]) -> bool:
+    """Whether card text can reach the document's opening text, which `selection.classify` reads: a tile on a page
+    before the document's first page of text, or on that page while the text there is shorter than the opening."""
+    own = [corpus.blocks[b] for b in corpus.all_order if corpus.blocks[b].doc_id == doc_id]
+    pages = [b.page for b in own if b.page is not None]
+    if not pages:
+        return True
+    first = min(pages)
+    if min(tile_pages) < first:
+        return True
+    opening = [b.text for b in own if b.page == first][:HEADER_BLOCKS]
+    return first in tile_pages and len(opening) < HEADER_BLOCKS and len(" ".join(opening)) < HEADER_CHARS
+
+
+def card_tokens(corpus: Corpus, tiles: Iterable[Tile], priority: dict[str, int]) -> int:
+    """At most how many tokens the page cards of `tiles` add to P1, before any is read: a full card for each tile of a
+    P1 document. A document no signal classifies yet (a scan under a plain name) whose opening text its cards can still
+    reach may be classified by them, as P1 too, so it counts with its own text and a full card for each of its tiles.
+    Excluded documents never enter P1."""
+    by_doc: dict[str, list[Tile]] = {}
+    for tile in tiles:
+        if tile.doc_id not in corpus.excluded:
+            by_doc.setdefault(tile.doc_id, []).append(tile)
+    if not by_doc:
+        return 0
+    unknown = {v.doc_id for v in views(corpus) if v.doc_id in by_doc and classify(v).discipline == "unknown"}
+    sizes = _doc_chars(corpus)
+    total = 0
+    for doc_id, doc_tiles in by_doc.items():
+        cards = sum(_card_tokens_each(t) for t in doc_tiles)
+        if priority.get(doc_id, 3) == 1:
+            total += cards
+        elif doc_id in unknown and _opening_open(corpus, doc_id, {t.page for t in doc_tiles}):
+            total += cards + _tokens(sizes.get(doc_id, DOC_CHARS))
+    return total
+
+
+def plan_prefix(
+    corpus: Corpus, calc: list[CalcPost], budget: PrefixBudget, cards_for: Iterable[Tile] = ()
+) -> PrefixPlan:
+    """What stays in full and what becomes search-only. Deterministic: sizes from characters, ties by doc id.
+    `cards_for` are the tiles whose cards are still to be read: before the cards, P1 must fit with the most text they
+    can add (`card_tokens`)."""
     p0 = _tokens(prefix_chars(system_blocks(replace(corpus, order=[]), calc)) + MARK_CHARS)  # all but document text
     chars = _doc_chars(corpus)
     prio = priorities(corpus)
@@ -119,7 +178,8 @@ def plan_prefix(corpus: Corpus, calc: list[CalcPost], budget: PrefixBudget) -> P
     by = {k: sum(t for d, t in sizes.items() if prio.get(d, 3) == k) for k in (1, 2, 3)}
     tags = DOC_CHARS * len({corpus.blocks[b].doc_id for b in boundary_ids})
     boundary = _tokens(tags + sum(len(block_line(corpus.blocks[b])) + 1 for b in boundary_ids))
-    plan = PrefixPlan(budget.tokens, p0, by[1], by[2], by[3], boundary, prio)
+    cards = card_tokens(corpus, cards_for, prio)
+    plan = PrefixPlan(budget.tokens, p0, by[1], by[2], by[3], boundary, prio, cards=cards)
     if not plan.p1_fits:
         plan.total = p0 + sum(by.values()) + boundary
         return plan
@@ -175,7 +235,8 @@ def fit_prefix(corpus: Corpus, calc: list[CalcPost], budgets: dict[str, Any]) ->
 
 
 def over_budget(plan: PrefixPlan) -> str:
+    cards = f" with at most {plan.cards} tokens of their page cards," if plan.cards else ""
     return (
-        f"the prefix's fixed part ({plan.p0} tokens) and its priority-1 documents ({plan.p1} tokens) exceed the "
-        f"budget of {plan.budget} tokens"
+        f"the prefix's fixed part ({plan.p0} tokens) and its priority-1 documents ({plan.p1} tokens{cards}) exceed "
+        f"the budget of {plan.budget} tokens"
     )

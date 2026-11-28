@@ -332,17 +332,18 @@ def dry_run(
         "the prefix its first call measures is in a lower tier"
     )
     if budget is not None:
-        plan = plan_prefix(corpus, calc, budget)
+        plan = plan_prefix(corpus, calc, budget, corpus.tiles.values())
         print(
             f"  prefix budget {plan.budget} tokens: fixed {plan.p0}, priority 1 {plan.p1}, priority 2 {plan.p2}, "
-            f"priority 3 {plan.p3}, other trades' lines {plan.boundary}"
+            f"priority 3 {plan.p3}, other trades' lines {plan.boundary}; priority 1's page cards at most {plan.cards}"
         )
         if not plan.p1_fits:
             print("  priority 1 does not fit: a paid run stops before any model call")
         else:
             print(
-                f"  priority 1 fits ({plan.p0 + plan.p1} tokens); planned prefix {plan.total} tokens, "
-                f"{len(plan.search_only)} documents search-only, {len(plan.boundary_dropped)} lines past the cap"
+                f"  priority 1 fits ({plan.p0 + plan.p1 + plan.cards} tokens with its cards at most); planned prefix "
+                f"{plan.total} tokens before the cards, {len(plan.search_only)} documents search-only, "
+                f"{len(plan.boundary_dropped)} lines past the cap"
             )
     print(
         f"  lens tier (from the estimate): {caps.max_turns} turns, ${caps.max_usd:.2f} per lens; {len(lenses)} lenses"
