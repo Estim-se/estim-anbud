@@ -46,6 +46,11 @@ PLAN_KIND = "preregistration"  # a scoring plan, frozen before any paid exam
 # attempt is on record. A freeze line without a status was written before statuses and is a finished run.
 FINISHED, HALTED, FAILED = "finished", "halted", "failed"
 RUN_STATUSES = (FINISHED, HALTED, FAILED)
+# Statuses came in with commit 6cbe33b (PR #43, merged as 4662705 at this time); every freeze line written by the
+# harness since carries one. An exam line without a status frozen at or after it came from an older harness, which
+# froze only exit-0 runs and an incomplete Kalkyl calc as finished, so it is never a scored prediction. Scoring plan
+# v3 (registered at 2026-11-28T11:40:43Z, before any exam line was frozen) agrees.
+STATUSES_SINCE = datetime(2026, 11, 28, 11, 57, 37, tzinfo=UTC)
 HASHED_REPO_DIRS = ("config", "schemas", "lenses")
 PREP_FILES = ("blocks.jsonl", "documents.json", "summary.json")
 # The names the harness itself gives files and folders in a run; anything else may be a customer's name.
@@ -386,6 +391,37 @@ def _own(
 def status_of(record: dict[str, Any]) -> str:
     """How a frozen run ended; a line from before statuses is a finished run."""
     return str(record.get("status", FINISHED))
+
+
+def scored_prediction(
+    records: list[dict[str, Any]], tender: str, engine: str, variant: str, cutoff: datetime
+) -> dict[str, Any] | None:
+    """Scoring plan v3's scored prediction for one tender ("<co>/<t>"), engine and input variant: the last finished
+    run frozen before the cut-off, which is the tender's deadline or its answers being added, whichever comes first.
+    `records` are the sealed ledger's lines in ledger order, the order they were frozen in.
+
+    A halted or failed run is never the scored prediction and never stands in for one. None means "no prediction",
+    which counts against the engine. A line without a status is a finished run only when frozen before statuses
+    existed (`STATUSES_SINCE`)."""
+    if cutoff.tzinfo is None:
+        raise FreezeError("the cut-off needs a time zone")
+    found: dict[str, Any] | None = None
+    for record in records:
+        exam = record.get("exam") if isinstance(record.get("exam"), dict) else {}
+        if record.get("kind") != "freeze" or record.get("tender") != tender:
+            continue
+        if exam.get("engine") != engine or exam.get("variant") != variant or status_of(record) != FINISHED:
+            continue
+        try:
+            frozen_at = datetime.fromisoformat(str(record.get("frozen_at")))
+        except ValueError:
+            continue
+        if frozen_at.tzinfo is None or frozen_at >= cutoff:
+            continue
+        if "status" not in record and frozen_at >= STATUSES_SINCE:
+            continue  # an older harness's line, frozen after statuses existed
+        found = record
+    return found
 
 
 def _same_freeze(old: dict[str, Any], new: dict[str, Any]) -> bool:

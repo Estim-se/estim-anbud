@@ -371,6 +371,14 @@ def test_a_run_that_halts_or_fails_is_frozen_with_its_status_and_never_counted_f
     exams = list((exam.exam_dir("co-002", "prospective") / "exams").glob("*.json"))
     runs = json.loads(exams[0].read_text())["runs"]
     assert Counter(r["status"] for r in runs) == {"halted": 3, "failed": 3, "finished": finished}
+    # Under scoring plan v3 neither the halted review nor the failed calc is ever a scored prediction: each tender
+    # has no prediction for those engines, while its finished old-engine runs are scored.
+    cutoff = datetime(2027, 1, 1, tzinfo=UTC)
+    for tender in sorted({r["tender"] for r in records}):
+        assert freeze.scored_prediction(records, tender, "granskning", "granskning", cutoff) is None
+        assert freeze.scored_prediction(records, tender, "kalkyl", "kalkyl", cutoff) is None
+        inputs = {r["exam"]["variant"] for r in records if r["tender"] == tender and r["exam"]["engine"] == "baseline"}
+        assert inputs and all(freeze.scored_prediction(records, tender, "baseline", v, cutoff) for v in inputs)
 
 
 def test_a_run_that_leaves_no_folder_is_counted_and_not_frozen(data_root: Path) -> None:
