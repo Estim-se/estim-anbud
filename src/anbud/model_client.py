@@ -121,10 +121,17 @@ class CallResult:
     duration_ms: int
     request_id: str | None
     cached: bool = False
+    paid_usd: float | None = None  # a cache hit: what the call cost when it was first made (its step record)
 
     @property
     def stop_reason(self) -> str | None:
         return self.message.stop_reason
+
+    @property
+    def loop_cost_usd(self) -> float:
+        """The call's cost for a tool loop's own caps: what it cost when it was made, a cache hit included. A replay
+        or a resume then decides each turn as the paid run did, while the budget charges a cache hit $0."""
+        return self.cost_usd if self.paid_usd is None else self.paid_usd
 
 
 def classify(exc: Exception) -> ModelError:
@@ -310,7 +317,8 @@ class ModelClient:
             blob=record["response"],
             request_blob=record["request"],
         )
-        return CallResult(message, model, 0.0, 0, record.get("request_id"), cached=True)
+        paid = float(record.get("cost_usd") or 0.0)
+        return CallResult(message, model, 0.0, 0, record.get("request_id"), cached=True, paid_usd=paid)
 
     def call(
         self,

@@ -106,9 +106,9 @@ def run_tool_loop(
     out = LoopOutcome(status="truncated")
     extra = 0  # turns granted past the cap for a repair or a nudge
     repaired = nudged = False
-    last_cost = 0.0
+    last_cost = capped = 0.0  # the caps count each call at what it cost when made, so a replay turns the same way
     while True:
-        if out.turns >= max_turns + extra or out.cost_usd >= max_usd:
+        if out.turns >= max_turns + extra or capped >= max_usd:
             out.status = "truncated"
             return out
         try:
@@ -125,8 +125,9 @@ def run_tool_loop(
             out.error = exc.kind if isinstance(exc, ModelError) else type(exc).__name__
             return out
         out.turns += 1
-        out.cost_usd += result.cost_usd
-        last_cost = result.cost_usd
+        out.cost_usd += result.cost_usd  # what this run spent: $0 for a cache hit
+        capped += result.loop_cost_usd
+        last_cost = result.loop_cost_usd
         if out.first_usage is None:
             out.first_usage = result.message.usage
         content = [_plain(b) for b in result.message.content]
@@ -193,7 +194,7 @@ def run_tool_loop(
             out.status = "submitted"
             return out
         remaining = max_turns + extra - out.turns
-        if remaining <= 1 or out.cost_usd + last_cost >= max_usd:
+        if remaining <= 1 or capped + last_cost >= max_usd:
             note = f"Your next turn is your last. {finish} with everything you have found so far."
             results.append({"type": "text", "text": note})
         messages.append({"role": "user", "content": results})
