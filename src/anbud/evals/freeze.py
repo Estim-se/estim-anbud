@@ -41,6 +41,10 @@ LEDGER = "ledger.jsonl"
 LOCK = "ledger.lock"
 FREEZE_KINDS = ("freeze", "manual_freeze_v0")
 PLAN_KIND = "preregistration"  # a scoring plan, frozen before any paid exam
+# An exam attempt: written to the sealed ledger before the exam launches a paid run, so a run that never comes back
+# (killed, crashed, the machine slept) is on record. Each tender is attempted once per engine and input: a pair with
+# a started or exam freeze line is never run again, and one whose attempt was never frozen has no prediction.
+STARTED = "started"
 # How a frozen run ended. Only a finished run can be a scored prediction; a halted one (stopped by a limit: its hard
 # stop, the spend cap, a stop marker or a timeout) and a failed one (stopped by an error) are frozen so that every
 # attempt is on record. A freeze line without a status was written before statuses and is a finished run.
@@ -229,12 +233,18 @@ def import_manual(company_id: str, source: Path, root: Path | None = None) -> in
         raise FreezeError("the ledger already holds other lines; hand-made records can only start a ledger")
 
 
+def records(path: Path, root: Path | None = None) -> list[dict[str, Any]]:
+    """A ledger's lines in ledger order, after the same checks as `verify`."""
+    return _read(path, root)[1]
+
+
 def is_frozen(company_id: str, tender_id: str, sealed: bool = False, root: Path | None = None) -> bool:
-    """Whether any run of the tender is frozen, whatever its status. A tender whose only runs halted still takes its
-    answers, so that it can be scored as having no prediction rather than not at all."""
+    """Whether any run of the tender is frozen, whatever its status, or an exam attempt of it is on record (`STARTED`).
+    A tender whose only runs halted, or whose attempt never came back, still takes its answers, so that it can be
+    scored as having no prediction rather than not at all; a freeze after its answers is late and never scored."""
     key = f"{_company(company_id)}/{_tender(tender_id)}"
     _, records = _read(ledger_file(company_id, sealed, root), root)
-    return any(r.get("tender") == key and r.get("kind") in FREEZE_KINDS for r in records)
+    return any(r.get("tender") == key and r.get("kind") in (*FREEZE_KINDS, STARTED) for r in records)
 
 
 def frozen_line(company_id: str, run_id: str, sealed: bool = False, root: Path | None = None) -> int | None:
@@ -393,35 +403,105 @@ def status_of(record: dict[str, Any]) -> str:
     return str(record.get("status", FINISHED))
 
 
+def _pair(record: dict[str, Any]) -> tuple[str, str, str] | None:
+    """(tender, engine, input variant) of an exam line: a started line or an exam freeze; None for any other line."""
+    exam = record.get("exam")
+    if record.get("kind") not in (STARTED, "freeze") or not isinstance(exam, dict):
+        return None
+    tender, engine, variant = record.get("tender"), exam.get("engine"), exam.get("variant")
+    if not all(isinstance(x, str) for x in (tender, engine, variant)):
+        return None
+    return str(tender), str(engine), str(variant)
+
+
+def exam_attempts(records: list[dict[str, Any]]) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
+    """The exam's attempts per (tender "<co>/<t>", engine, input variant), in ledger order. An attempt is a started
+    line and the freeze line of the same run, when there is one; a freeze line with no started line before it (an
+    older harness's) is an attempt of its own. Each is {"run_id", "started", "freeze"}, either line None."""
+    found: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    by_run: dict[str, dict[str, Any]] = {}
+    for record in records:
+        pair = _pair(record)
+        if pair is None:
+            continue
+        run_id = str(record.get("run_id"))
+        attempt = by_run.get(run_id)
+        if record.get("kind") == STARTED or attempt is None or attempt["freeze"] is not None:
+            attempt = {"run_id": run_id, "started": None, "freeze": None}
+            by_run[run_id] = attempt
+            found.setdefault(pair, []).append(attempt)
+        attempt["started" if record.get("kind") == STARTED else "freeze"] = record
+    return found
+
+
 def scored_prediction(
     records: list[dict[str, Any]], tender: str, engine: str, variant: str, cutoff: datetime
 ) -> dict[str, Any] | None:
-    """Scoring plan v3's scored prediction for one tender ("<co>/<t>"), engine and input variant: the last finished
-    run frozen before the cut-off, which is the tender's deadline or its answers being added, whichever comes first.
-    `records` are the sealed ledger's lines in ledger order, the order they were frozen in.
+    """Scoring plan v3.1's scored prediction for one tender ("<co>/<t>"), engine and input variant: the pair's one
+    attempt (`exam_attempts`), when that run finished and was frozen before the cut-off, which is the tender's deadline
+    or its answers being added, whichever comes first. `records` are the sealed ledger's lines in ledger order.
 
-    A halted or failed run is never the scored prediction and never stands in for one. None means "no prediction",
-    which counts against the engine. A line without a status is a finished run only when frozen before statuses
-    existed (`STATUSES_SINCE`)."""
+    None means "no prediction", which counts against the engine: an attempt that halted, failed, or was started and
+    never frozen, or was frozen late. A later attempt of the same pair is a second look at a sealed tender and is never
+    scored, even when the first never came back. A line without a status is a finished run only when frozen before
+    statuses existed (`STATUSES_SINCE`)."""
     if cutoff.tzinfo is None:
         raise FreezeError("the cut-off needs a time zone")
-    found: dict[str, Any] | None = None
-    for record in records:
-        exam = record.get("exam") if isinstance(record.get("exam"), dict) else {}
-        if record.get("kind") != "freeze" or record.get("tender") != tender:
-            continue
-        if exam.get("engine") != engine or exam.get("variant") != variant or status_of(record) != FINISHED:
-            continue
-        try:
-            frozen_at = datetime.fromisoformat(str(record.get("frozen_at")))
-        except ValueError:
-            continue
-        if frozen_at.tzinfo is None or frozen_at >= cutoff:
-            continue
-        if "status" not in record and frozen_at >= STATUSES_SINCE:
-            continue  # an older harness's line, frozen after statuses existed
-        found = record
-    return found
+    attempts = exam_attempts(records).get((tender, engine, variant))
+    record = attempts[0]["freeze"] if attempts else None
+    if record is None or status_of(record) != FINISHED:
+        return None
+    try:
+        frozen_at = datetime.fromisoformat(str(record.get("frozen_at")))
+    except ValueError:
+        return None
+    if frozen_at.tzinfo is None or frozen_at >= cutoff:
+        return None
+    if "status" not in record and frozen_at >= STATUSES_SINCE:
+        return None  # an older harness's line, frozen after statuses existed
+    return record
+
+
+def start_run(
+    company_id: str,
+    run_id: str,
+    *,
+    tender_id: str,
+    exam: dict[str, Any],
+    now: datetime | None = None,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Record an exam attempt in the sealed ledger before its paid run is launched: one chained `started` line with
+    the run id, the tender and `exam` (the engine, the input variant and what the exam may charge for it). Refused when
+    the pair already has an attempt, checked under the ledger's lock, so two passes can never both start it. Returns
+    the record with its `line_number`."""
+    _company(company_id)
+    _tender(tender_id)
+    try:
+        check_run_id(run_id)
+    except StoreError as exc:
+        raise FreezeError(str(exc)) from None
+    record: dict[str, Any] = {
+        "v": 1,
+        "kind": STARTED,
+        "tender": f"{company_id}/{tender_id}",
+        "run_id": run_id,
+        "started_at": (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds"),
+        "exam": exam,
+    }
+    pair = _pair(record)
+    if pair is None:
+        raise FreezeError("an exam attempt names its engine and input variant")
+    ledger = ledger_file(company_id, True, root)
+    with _locked(ledger, root):
+        lines, found = _read(ledger, root)
+        for number, old in enumerate(found, start=1):
+            if old.get("run_id") == run_id or _pair(old) == pair:
+                raise FreezeError(f"already attempted at sealed ledger line {number}; an exam pair is run once")
+        if lines:
+            record["prev"] = _sha(lines[-1])
+        _append(ledger, canonical(record) + b"\n")
+    return {**record, "line_number": len(lines) + 1}
 
 
 def _same_freeze(old: dict[str, Any], new: dict[str, Any]) -> bool:
