@@ -577,6 +577,17 @@ def _stops(selection: dict[str, Any]) -> bool:
     return bool(selection.get("stops", selection.get("p1_fits") is False))
 
 
+def _stopped(size: dict[str, Any]) -> bool:
+    """Whether a tender's Granskning run is never started: it stops on the prefix budget, as the $0 check confirmed."""
+    selection = size.get("selection")
+    return isinstance(selection, dict) and _stops(selection) and bool(selection.get("stop_checked"))
+
+
+def _single(n: int) -> bool:
+    """A group a figure must not describe: more than none, fewer than `MIN_GROUP`."""
+    return 0 < n < MIN_GROUP
+
+
 # --- The exam -----------------------------------------------------------------------------------------------------
 
 
@@ -776,6 +787,7 @@ def run_exam(
             "estimate_usd": {},
             "estimate_unknown": 0,
             "worst_usd": 0.0,
+            "worst_by_engine": {},  # engine -> the most its runs may spend: the caps the paid gate uses
             "baseline_runs": 0,
             "tiers": {},  # engine -> the tier its run opens at, or "unknown" (the top tier's stop)
             "above_top": {},  # engine -> whether the size is above the top tier
@@ -806,6 +818,7 @@ def run_exam(
                 usd = min(basis / 1e6 * float(cfg["granskning_usd_per_mtok_prefix"]) * margin, cap)
             size["estimate_usd"]["granskning"] = usd
             size["worst_usd"] += cap
+            size["worst_by_engine"]["granskning"] = cap
         if "kalkyl" in engines:
             high = runner.kalkyl_estimate(roots["kalkyl"], company_id, t, f"estimate-{t}-kalkyl.log")
             cap = caps[t, "kalkyl"] = tender_stop("kalkyl", high)
@@ -813,6 +826,7 @@ def run_exam(
             size["estimate_unknown"] += high is None
             size["estimate_usd"]["kalkyl"] = cap if high is None else min(high * margin, cap)
             size["worst_usd"] += cap
+            size["worst_by_engine"]["kalkyl"] = cap
         variants = ["granskning"] if records[t]["same_input"] else list(VARIANTS)
         plans[t] = variants if "baseline" in engines else []
         for v in plans[t]:
@@ -820,6 +834,7 @@ def run_exam(
             usd = min(pages * float(cfg["baseline_usd_per_page"]) * margin, stops["baseline"])
             size["estimate_usd"]["baseline"] = size["estimate_usd"].get("baseline", 0.0) + usd
             size["worst_usd"] += stops["baseline"]
+            size["worst_by_engine"]["baseline"] = size["worst_by_engine"].get("baseline", 0.0) + stops["baseline"]
             size["baseline_runs"] += 1
         estimate.update(size["estimate_usd"])
         report.estimate_unknown += size["estimate_unknown"]
@@ -941,18 +956,32 @@ def _median(values: list[int]) -> int:
 
 
 def _tier_counts(found: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Per engine, tenders per tier in tier order (unknown last, when any), and how many are above the top tier."""
+    """Per engine, tenders per tier in tier order (unknown last, when any), and how many are above the top tier, over
+    the tenders the engine runs on: a Granskning run that stops on the prefix budget is never started, so its tier
+    isn't counted (it would be a figure for that tender alone when it is the only one)."""
     out: dict[str, dict[str, Any]] = {}
     for engine, names in tier_names().items():
-        got = [one["tiers"][engine] for one in found if engine in (one.get("tiers") or {})]
-        if not got:
+        runs = [one for one in found if engine in (one.get("tiers") or {})]
+        if engine == "granskning":
+            runs = [one for one in runs if not _stopped(one)]
+        if not runs:
             continue
+        got = [one["tiers"][engine] for one in runs]
         counts = {name: got.count(name) for name in names}
         if "unknown" in got:
             counts["unknown"] = got.count("unknown")
-        above = sum(bool((one.get("above_top") or {}).get(engine)) for one in found)
-        out[engine] = {"counts": counts, "above_top": above}
+        above = sum(bool((one.get("above_top") or {}).get(engine)) for one in runs)
+        out[engine] = {"counts": counts, "above_top": above, "tenders": len(runs)}
     return out
+
+
+def _runs_on(found: list[dict[str, Any]]) -> dict[str, int]:
+    """Per engine, the tenders it runs on: a Granskning run that stops on the prefix budget isn't one of them."""
+    return {
+        "granskning": sum("granskning" in (one.get("estimate_usd") or {}) and not _stopped(one) for one in found),
+        "kalkyl": sum("kalkyl" in (one.get("estimate_usd") or {}) for one in found),
+        "baseline": sum(int(one.get("baseline_runs") or 0) > 0 for one in found),
+    }
 
 
 def combine(company_id: str, status: dict[str, str], root: Path | None = None) -> dict[str, Any]:
@@ -980,21 +1009,30 @@ def combine(company_id: str, status: dict[str, str], root: Path | None = None) -
     cfg = exam_config()
     skipped: Counter[str] = Counter()
     estimate: Counter[str] = Counter()
+    worst: Counter[str] = Counter()
     for one in found:
         skipped.update(one.get("skipped_by_type") or {})
         estimate.update(one.get("estimate_usd") or {})
+        worst.update(one.get("worst_by_engine") or {})
+    runners = [one for one in found if not _stopped(one)]  # a run that stops on the prefix budget has no prefix
     out |= {
         "documents": sum(int(one.get("documents") or 0) for one in found),
         "pages": sum(int(one.get("pages") or 0) for one in found),
         "skipped_by_type": dict(sorted(skipped.items())),
         "prefix": prefix_stats(
-            [int(one["prefix_tokens"]) for one in found if one.get("prefix_tokens") is not None],
+            [int(one["prefix_tokens"]) for one in runners if one.get("prefix_tokens") is not None],
             int(cfg["context_tokens"]),
             int(cfg["large_prefix_tokens"]),
         ),
         "estimate_usd": {k: round(v, 2) for k, v in sorted(estimate.items())},
         "estimate_unknown": sum(int(one.get("estimate_unknown") or 0) for one in found),
         "worst_usd": round(sum(float(one.get("worst_usd") or 0) for one in found), 2),
+        # Per engine only when every record has it (a record from before had the total only).
+        "worst_by_engine": {k: round(v, 2) for k, v in sorted(worst.items())}
+        if all("worst_by_engine" in one for one in found)
+        else {},
+        "runs_on": _runs_on(found),
+        "prefix_stopped": len(found) - len(runners),
         "baseline_runs": sum(int(one.get("baseline_runs") or 0) for one in found),
         "tiers": _tier_counts(found),
     }
@@ -1102,11 +1140,13 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
         f"(skipped by type: {_counts(c['skipped_by_type'])}), {c['pages']} pages (granskning input)"
     )
     p = c.get("prefix") or {}
-    if p:
+    if p and _single(p["runs"]):
+        say(f"granskning prefix: {p['runs']} tender runs it, fewer than 2, so no figures")
+    elif p:
         say(
-            "granskning prefix after the selection, before the prefix budget (dry-run estimate, before page cards): "
-            f"median {p['median']:,} tokens, max {p['max']:,}; of {p['runs']} runs {p['over_context']} over the "
-            f"context ({p['context']:,}), {p['over_large']} over {p['large']:,}"
+            "granskning prefix after the selection, before the prefix budget (dry-run estimate, before page cards), "
+            f"over the {p['runs']} tenders it runs on: median {p['median']:,} tokens, max {p['max']:,}; "
+            f"{p['over_context']} over the context ({p['context']:,}), {p['over_large']} over {p['large']:,}"
         )
     sel = c.get("selection")
     if sel:
@@ -1116,12 +1156,15 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
             f"{sel['selected_pages_median']:,}, max {sel['selected_pages_max']:,}"
         )
         if sel["planned"]:
-            fit = (
-                f"planned prefix median {sel['planned_tokens_median']:,} tokens, max {sel['planned_tokens_max']:,} "
-                f"over the {sel['fitting']} that fit"
-                if sel["fitting"]
-                else "none fits"
-            )
+            if _single(sel["fitting"]):
+                fit = f"{sel['fitting']} fits, fewer than 2, so no planned prefix"
+            elif sel["fitting"]:
+                fit = (
+                    f"planned prefix median {sel['planned_tokens_median']:,} tokens, max "
+                    f"{sel['planned_tokens_max']:,} over the {sel['fitting']} that fit"
+                )
+            else:
+                fit = "none fits"
             checked = (
                 f", {sel['stop_checked']} of them checked at $0 to stop before any model call and counted at $0"
                 if sel["would_stop"]
@@ -1133,24 +1176,40 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
                 f"stop (fixed part and priority 1 over the budget{checked}); {fit}; {sel['search_only_documents']} "
                 "documents search-only" + (f", {p1} of them priority 1 read through search" if p1 else "")
             )
+    runs_on = c.get("runs_on") or {}
+    # An engine that runs on one tender: any figure for it is that tender's, and the other engines' tiers with the
+    # worst case would give it too. Then neither tiers nor a per-engine split are printed, only totals.
+    single = [engine for engine in c["estimate_usd"] if _single(int(runs_on.get(engine, 0)))]
     tiers = c.get("tiers") or {}
-    if tiers:
+    stopped = int(c.get("prefix_stopped") or 0)
+    left = f"; {stopped} stopping on the prefix budget not counted" if stopped else ""
+    if single:
+        say(f"hard-stop tiers: not shown, since {', '.join(single)} runs on fewer than 2 tenders{left}")
+    elif tiers or stopped:
         rows = []
         for engine, t in tiers.items():
             counts = ", ".join(f"{name} {n}" for name, n in t["counts"].items())
             above = f" ({t['above_top']} above the top tier)" if t["above_top"] else ""
             rows.append(f"{engine} {counts}{above}")
-        say(f"hard-stop tiers, tenders per tier from the dry runs: {'; '.join(rows)}")
-    parts = ", ".join(f"{k} ${v:.2f}" for k, v in c["estimate_usd"].items()) or "nothing to run"
+        say(
+            "hard-stop tiers, tenders per tier from the dry runs, over the tenders each engine runs on: "
+            f"{'; '.join(rows) or 'none'}{left}"
+        )
     total = round(sum(c["estimate_usd"].values()), 2)
     unknown = (
         f"; {c['estimate_unknown']} engine estimates unknown, counted at their hard stop"
         if c["estimate_unknown"]
         else ""
     )
+    if single:
+        parts, worst = "per engine only when each runs on at least 2 tenders", ""
+    else:
+        parts = ", ".join(f"{k} ${v:.2f}" for k, v in c["estimate_usd"].items()) or "nothing to run"
+        by_engine = c.get("worst_by_engine") or {}
+        worst = ": " + ", ".join(f"{k} ${v:.2f}" for k, v in by_engine.items()) if by_engine else ""
     say(
         f"estimate: ${total:.2f} ({parts}; {c['baseline_runs']} old-engine runs){unknown}; "
-        f"worst case ${c['worst_usd']:.2f} (every hard stop)"
+        f"worst case ${c['worst_usd']:.2f} (every hard stop{worst})"
     )
 
 
