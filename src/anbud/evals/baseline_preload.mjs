@@ -3,8 +3,8 @@
 //
 // - Only https://api.anthropic.com/v1/messages is reachable. Any other request ends the run (exit 87).
 // - Every model call is logged to ANBUD_BASELINE_CALLS as one JSON line: sequence, model, max_tokens, HTTP status,
-//   duration, the id headers of the response (request, organization, workspace), usage and cost. Never a prompt,
-//   a response text or a header value other than those ids.
+//   duration, the id headers of the response (request, organization, workspace), usage and cost, and for an error
+//   response its kind (`errorKind`). Never a prompt, a response text or a header value other than those ids.
 // - The hard stop: a call whose worst case would take settled plus in-flight spend past ANBUD_BASELINE_HARD_STOP is
 //   never sent, and the run ends (exit 86).
 // - With ANBUD_BASELINE_DRY=1 the first model call ends the run before any network (exit 88).
@@ -23,6 +23,19 @@ if (!log || !(hardStop > 0) || !price) {
   process.exit(EXIT.blocked);
 }
 for (const name of Object.keys(env)) if (name.startsWith('ANBUD_BASELINE_')) delete env[name];
+
+// An error response's kind: `credit_balance` when the API says the balance can't pay, else the API's own error type
+// (`authentication_error`, `invalid_request_error`, ...). Never its message. The exam's breaker reads it.
+const errorKind = async response => {
+  try {
+    const body = await response.clone().json();
+    if (/credit balance/i.test(String(body?.error?.message ?? ''))) return 'credit_balance';
+    const type = body?.error?.type;
+    return typeof type === 'string' && /^[a-z_]{1,40}$/.test(type) ? type : null;
+  } catch {
+    return null;
+  }
+};
 
 const write = record => appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), ...record }) + '\n', { mode: 0o600 });
 const end = (code, record) => {
@@ -81,7 +94,7 @@ globalThis.fetch = async (input, init) => {
   }
   const ids = headerIds(response.headers);
   if (!response.ok || !response.body) {
-    settle(null, { status: response.status, ids });
+    settle(null, { status: response.status, ids, ...(response.ok ? {} : { error_kind: await errorKind(response) }) });
     return response;
   }
   const type = response.headers.get('content-type') ?? '';

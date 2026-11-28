@@ -292,6 +292,7 @@ def run_dev_tender(
         "persist_failures": client.persist_failures,
         "replay_misses": client.replay_misses,
         "halted": client.halted,  # calls refused by a limit: the hard stop, the spend cap or a stop marker
+        "failures": dict(sorted(client.failures.items())),  # calls that failed for good, after their retries, by kind
         "output": str(out),
     }
     finished = result.complete and not client.replay_misses and not client.persist_failures and not cards.failed

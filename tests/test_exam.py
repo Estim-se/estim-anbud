@@ -176,7 +176,15 @@ class FakeEngines(exam.Engines):
         bare: frozenset[str] = frozenset(),
         nothing: frozenset[str] = frozenset(),
         budgets: dict[str, dict] | None = None,
+        api: list[str | None] | None = None,
+        failures: dict[tuple[str, str], dict[str, int]] | None = None,
+        codes: dict[tuple[str, str], int] | None = None,
     ) -> None:
+        self.api = list(api or [])  # what each $0 API check finds, in order; it passes once these run out
+        self.api_checks = 0
+        self.failures = failures or {}  # (tender, engine) -> its calls failed for good, by kind
+        self.codes = codes or {}  # (tender, engine) -> the exit code its run ends with, as a failed run
+        self.prepped: list[str] = []
         self.ends = ends or {}  # how each engine's runs end; finished unless given
         self.budgets = budgets or {}  # tender -> the `budget` section its Granskning run's summary reports
         self.bare = bare  # engines whose runs write no outputs folder
@@ -189,6 +197,17 @@ class FakeEngines(exam.Engines):
         self.checked: list[str] = []
         self.calls: list[tuple[str, str]] = []
 
+    def api_check(self) -> str | None:
+        self.api_checks += 1
+        return self.api.pop(0) if self.api else None
+
+    def launch_sha(self) -> str | None:
+        return "f" * 40
+
+    def gate(self, launch_sha: str | None) -> str | None:  # the tree is the fake's own: only the API check is scripted
+        kind = self.api_check()
+        return None if kind is None else f"the API check failed ({kind})"
+
     def granskning_stop_check(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> bool:
         self.checked.append(tender_id)
         return self.prefix_stops
@@ -197,6 +216,7 @@ class FakeEngines(exam.Engines):
         return self.selections.get(tender_id)
 
     def prep(self, vroot: Path, company_id: str, tender_id: str, log_name: str) -> str | None:
+        self.prepped.append(tender_id)
         if tender_id in self.stops:
             return self.stops[tender_id]
         prep = paths.dev_tender_dir(company_id, tender_id, vroot) / "prep"
@@ -224,12 +244,13 @@ class FakeEngines(exam.Engines):
         (out / "record").mkdir(parents=True)
         (out / "record" / "run.json").write_text(json.dumps({"code": {"harness_sha": "x"}}))
         settings = {"basis": "matched"} if engine == "baseline" else None
-        ok = end == freeze.FINISHED
+        code = self.codes.get((tender_id, engine))
+        ok = end == freeze.FINISHED and code is None
         return exam.EngineRun(
             engine,
             variant,
             run_id,
-            0 if ok else 1,
+            0 if ok else code or 1,
             ok,
             self.costs[engine],
             out / "outputs",
@@ -237,6 +258,7 @@ class FakeEngines(exam.Engines):
             settings,
             halted=end == freeze.HALTED,
             budget=self.budgets.get(tender_id) if engine == "granskning" else None,
+            failures=self.failures.get((tender_id, engine)),
         )
 
     def granskning(self, vroot: Path, company_id: str, tender_id: str, run_id: str) -> exam.EngineRun:

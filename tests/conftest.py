@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,32 @@ def _never_the_real_data_root(tmp_path_factory: pytest.TempPathFactory) -> objec
     patch.delenv("ANBUD_EVAL_LANE", raising=False)  # the eval lane's own sessions set it; no test inherits the gate
     yield
     patch.undo()
+
+
+@pytest.fixture(autouse=True)
+def _never_the_real_key(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reads the Keychain or builds a real SDK client, so none can reach the API: it fails closed. Wherever an
+    `anbud` module holds the real `keychain_key` or `make_sdk_client` (imported at the top, like `schema_check`), it
+    is replaced by one that refuses. A test that needs a key or a client patches its own fake after this. A
+    `real_client_parts` test checks those two functions themselves, with `security` faked and no request sent."""
+    from anbud import model_client
+
+    if request.node.get_closest_marker("real_client_parts"):
+        return
+
+    def no_key(*_: object, **__: object) -> str:
+        raise model_client.KeyMissing("tests never read the Keychain")
+
+    def no_client(*_: object, **__: object) -> object:
+        raise RuntimeError("tests never build a real SDK client: patch make_sdk_client with a fake")
+
+    fakes = {model_client.keychain_key: no_key, model_client.make_sdk_client: no_client}
+    for name, module in list(sys.modules.items()):
+        if module is None or not (name == "anbud" or name.startswith("anbud.")):
+            continue
+        for attr in ("keychain_key", "make_sdk_client"):
+            if (fake := fakes.get(getattr(module, attr, None))) is not None:  # type: ignore[arg-type]
+                monkeypatch.setattr(module, attr, fake)
 
 
 @pytest.fixture(autouse=True)

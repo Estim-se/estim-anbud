@@ -204,6 +204,36 @@ def make_sdk_client(config: Config, api_key: str) -> Any:
     return anthropic.Anthropic(api_key=api_key, base_url=config.api_base, max_retries=1, timeout=600.0)
 
 
+CHECK_TIMEOUT_S = 30.0  # the $0 API check's token count
+
+
+def check_api(
+    config: Config,
+    api_key: Callable[[], str],
+    make_sdk: Callable[[Config, str], Any] | None = None,
+    timeout_s: float = CHECK_TIMEOUT_S,
+) -> str | None:
+    """A $0 check that a paid call could be sent: the key reads (`keychain_key` gives up after `KEYCHAIN_TIMEOUT_S`),
+    and the API answers a token count with it within `timeout_s`. None when both hold, else the kind that failed:
+    `key_missing` or `classify`'s. Never the key or the API's message. Its one request is fixed: the map role's model
+    and the message "ok", with nothing of any tender.
+
+    A token count is free, so it may answer while the credit balance can't pay for a call. A paid call's refusal says
+    that, and the engines count it among their failed calls."""
+    try:
+        key = api_key()
+    except KeyMissing:
+        return "key_missing"
+    try:
+        sdk = (make_sdk or make_sdk_client)(config, key)
+        sdk.messages.count_tokens(
+            model=config.model_for("map"), messages=[{"role": "user", "content": "ok"}], timeout=timeout_s
+        )
+    except Exception as exc:  # noqa: BLE001 - any failure is a kind here, and the caller stops on any
+        return classify(exc).kind
+    return None
+
+
 def _digest(*parts: Any) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
