@@ -170,10 +170,24 @@ def verify(path: Path, root: Path | None = None) -> LedgerSummary:
     return _summary(*_read(path, root))
 
 
+SMOKE = "smoke-"
+
+
+def is_smoke(run_id: object) -> bool:
+    """A smoke run tests the harness on a config main doesn't ship (its id starts `smoke-`). It is frozen like any
+    finished run, so its ledger line holds, but no dev aggregate counts it."""
+    return isinstance(run_id, str) and run_id.startswith(SMOKE)
+
+
 def freezes_by_tender(path: Path, root: Path | None = None) -> Counter[str]:
-    """How many frozen runs each tender ("<co>/<t>") has, after the same checks as `verify`."""
+    """How many frozen runs each tender ("<co>/<t>") has, after the same checks as `verify`. Smoke runs aren't
+    counted."""
     _, records = _read(path, root)
-    return Counter(r["tender"] for r in records if r.get("kind") in FREEZE_KINDS and isinstance(r.get("tender"), str))
+    return Counter(
+        r["tender"]
+        for r in records
+        if r.get("kind") in FREEZE_KINDS and isinstance(r.get("tender"), str) and not is_smoke(r.get("run_id"))
+    )
 
 
 @contextmanager

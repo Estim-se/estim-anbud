@@ -13,7 +13,7 @@ from conftest import assert_no_fake_names
 from test_freeze import make_run
 
 from anbud import cli, paths
-from anbud.evals import cards
+from anbud.evals import cards, freeze
 from anbud.evals import split_heldout as sh
 from anbud.evals.freeze import freeze_run
 
@@ -123,3 +123,29 @@ def test_a_linked_notes_folder_is_refused(data_root: Path, tmp_path: Path) -> No
         cards.write("co-002", now=NOW)
     assert cli.main(["cards", "co-002"]) == cli.REFUSED
     assert list(elsewhere.iterdir()) == []
+
+
+def _with_a_smoke_run(data_root: Path) -> str:
+    """t-0001 with one ordinary frozen run and one frozen smoke run; returns its card's runs line."""
+    ledger(data_root, "co-001", {"t-0001": sh.DEV})
+    dev_tender(data_root, "co-001", "t-0001")
+    for run_id in ("r1", "smoke-r2"):
+        outputs, record = make_run(data_root, run_id)
+        freeze_run("co-001", run_id, outputs_dir=outputs, run_record_dir=record, tender_id="t-0001", now=NOW)
+    assert cli.main(["cards", "co-001"]) == 0
+    text = (data_root / "notes" / "co-001" / "case-cards.md").read_text(encoding="utf-8")
+    return next(line for line in text.splitlines() if line.startswith("- Runs: "))
+
+
+def test_a_smoke_run_folder_is_left_out_of_the_run_counts(data_root: Path) -> None:
+    """Mutation: `and freeze.is_smoke(p.name) == smoke` -> `` in `cards._runs`: the smoke run counts as a review run
+    (and as a smoke run besides)."""
+    assert _with_a_smoke_run(data_root).startswith("- Runs: 1 review, 0 Kalkyl; ")
+
+
+def test_a_frozen_smoke_run_is_left_out_of_the_frozen_count_but_named(data_root: Path) -> None:
+    """Mutation: `and not is_smoke(r.get("run_id"))` -> `` in `freeze.freezes_by_tender`: the smoke run's ledger
+    line counts as a frozen dev prediction."""
+    line = _with_a_smoke_run(data_root)
+    assert line.endswith("; 1 frozen in the ledger; 1 smoke runs left out of these counts")
+    assert freeze.is_frozen("co-001", "t-0001")  # its ledger line holds all the same
