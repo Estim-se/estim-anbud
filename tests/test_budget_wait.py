@@ -134,12 +134,12 @@ class _Killed(BaseException):
 
 
 class _TwoCalls:
-    """A fake SDK for two calls whose reservations don't fit together: the first one's stream waits until the second
-    is waiting for room, then ends with `first` (an exception to raise, or None to answer)."""
+    """A fake SDK for calls whose reservations don't fit together: the first one's stream waits until `waiting`
+    others are waiting for room, then ends with `first` (an exception to raise, or None to answer)."""
 
-    def __init__(self, budget: Budget, tokens: int, first: BaseException | None) -> None:
+    def __init__(self, budget: Budget, tokens: int, first: BaseException | None, waiting: int = 1) -> None:
         self.messages = self
-        self.budget, self.tokens, self.first = budget, tokens, first
+        self.budget, self.tokens, self.first, self.waiting = budget, tokens, first, waiting
         self.streams = 0
         self._lock = threading.Lock()
 
@@ -151,7 +151,7 @@ class _TwoCalls:
             self.streams += 1
             n = self.streams
         if n == 1:
-            _until(lambda: len(self.budget._queue) == 1)
+            _until(lambda: len(self.budget._queue) == self.waiting)
             if self.first is not None:
                 raise self.first
         return _Stream(message([text("ok")], stop_reason="end_turn"))
@@ -237,6 +237,56 @@ def test_a_call_that_waited_records_a_wait_event_with_numbers_only(data_root: Pa
         "reserved_usd",
         "in_flight",
     }
+
+
+class _HookFailed(Exception):
+    """An event hook's own failure, not the call's."""
+
+
+def test_an_event_hook_that_fails_on_a_wait_still_releases_the_room_so_no_call_behind_it_hangs() -> None:
+    """Call `a` in flight, `b` and `c` waiting behind it. When `b` gets the room, the hook raises on its wait event:
+    `b` fails before it is sent, its room is released (kept as spent, erring high), and `c` is no longer held.
+    Mutation: `self._waited(step, asked, reserve, waited)` moved back before the guarded `try` in `_send`: `b`'s room
+    is never released, and `c` waits forever."""
+    config = load_config()
+    price = config.price_for(config.model_for(EXTRACT))
+    tokens = 100_000
+    budget = Budget(1.5 * price.max_cost(tokens, 1000), wait=True)  # one call fits, two don't
+
+    def hook(event: Any) -> None:
+        if event.kind == "budget_wait" and event.step == "b":
+            raise _HookFailed
+
+    sdk = _TwoCalls(budget, tokens, None, waiting=2)
+    client = ModelClient(config, sdk, budget, run_id="r-b5", company_id="co-001", on_event=hook)
+    out: dict[str, Any] = {}
+
+    def call(step: str) -> None:
+        try:
+            out[step] = client.call(
+                role=EXTRACT,
+                step=step,
+                system=[{"type": "text", "text": "Synthetic."}],
+                messages=[{"role": "user", "content": step}],
+                max_tokens=1000,
+                effort="low",
+            )
+        except BaseException as exc:  # noqa: BLE001 - the test reads how each call ended
+            out[step] = exc
+
+    threads = []
+    # a's stream holds until b and c both wait (`_TwoCalls`), so c needs no wait here: it may be done by then
+    for step, ready in (("a", lambda: budget.in_flight == 1), ("b", _queued(budget, 1)), ("c", lambda: True)):
+        threads.append(threading.Thread(target=call, args=(step,), daemon=True))
+        threads[-1].start()
+        _until(ready)
+    for thread in threads:
+        thread.join(5)
+    assert not any(t.is_alive() for t in threads), "a call is still waiting for room"
+    assert not isinstance(out["a"], BaseException) and isinstance(out["b"], _HookFailed)
+    assert isinstance(out["c"], BudgetExceeded)  # b's room stays spent, so c can't fit; it isn't left waiting
+    assert sdk.streams == 1  # b was never sent
+    assert (budget.in_flight, budget.reserved) == (0, pytest.approx(0))
 
 
 def _reading(params: dict[str, Any]) -> bool:

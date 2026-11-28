@@ -512,12 +512,12 @@ class ModelClient:
                 self._refuse(step, key, str(exc), retried)
             self._halt()
             raise
-        self._waited(step, asked, reserve, waited)
-        start = self.clock()
         opened = False
         request_id = None
         settled = False
         try:
+            self._waited(step, asked, reserve, waited)  # in here: an event hook that raises still settles the room
+            start = self.clock()
             try:
                 with self.sdk.messages.stream(**params) as stream:  # the request is sent here
                     opened = True
@@ -533,7 +533,9 @@ class ModelClient:
             self.budget.settle(reserved, cost)
             settled = True
         finally:
-            if not settled:  # a kill, an interrupt or a cancelled call: it may have been billed, so it stays spent
+            # A kill, an interrupt or a cancelled call may have been billed; a failed event hook wasn't sent but errs
+            # high. Each stays spent.
+            if not settled:
                 self.budget.settle(reserved, reserved)
         usage = message.usage
         duration = self._ms(start)
