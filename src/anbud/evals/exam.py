@@ -1154,7 +1154,13 @@ def _say_combined(c: dict[str, Any], say: Callable[[str], None]) -> None:
     )
 
 
-def estimate_digest(report: Report) -> str:
-    """A short hash of the estimate, so a paid run can say which estimate it was approved on."""
-    payload = json.dumps({"estimate": report.estimate_usd, "worst": report.worst_case_usd}, sort_keys=True)
+def estimate_digest(report: Report) -> str | None:
+    """A short hash of the estimate, so a paid run can say which estimate it was approved on. It hashes the one total
+    over both splits (`combine`), never a split's own estimate: for a split of fewer than `MIN_GROUP` tenders that
+    would be a hash of a figure for one tender, and comparing it across passes would show when that figure changed.
+    None when the total covers fewer than `MIN_GROUP` tenders."""
+    total = report.combined
+    if int(total.get("tenders") or 0) < MIN_GROUP:
+        return None
+    payload = json.dumps({"estimate": total.get("estimate_usd"), "worst": total.get("worst_usd")}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]

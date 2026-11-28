@@ -573,9 +573,12 @@ def test_no_figure_for_a_group_of_fewer_than_two_tenders(data_root: Path) -> Non
     sealed_store(data_root)
     runner = FakeEngines({"granskning": 0.0, "kalkyl": 0.0, "baseline": 0.0})
 
+    ids: list[str | None] = []
+
     def exam_pass(kind: str, now: datetime) -> list[str]:
         lines: list[str] = []
-        exam.run_exam("co-002", kind, runner=runner, now=now, local_now=LOCAL_NOW, say=lines.append)
+        report = exam.run_exam("co-002", kind, runner=runner, now=now, local_now=LOCAL_NOW, say=lines.append)
+        ids.append(exam.estimate_digest(report))
         return lines
 
     alone = [
@@ -604,6 +607,26 @@ def test_no_figure_for_a_group_of_fewer_than_two_tenders(data_root: Path) -> Non
     again = exam_pass("heldout", datetime(2026, 12, 1, 10, 0, tzinfo=UTC))
     assert again[:3] == alone and again[3:] == combined  # the same total, from each split's last pass
     assert not any("$" in line or "pages" in line or "held in" in line for line in again[:3])
+    # The estimate id is a hash of that one total too: none for the held-out tender alone, then the same from both
+    # splits, so it never tells whether the held-out tender's own estimate changed.
+    assert ids[0] is None and ids[1] is not None and ids[2] == ids[1]
+
+
+def test_the_cli_prints_an_estimate_id_only_for_a_total_of_two_or_more(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "held_out_refusal", lambda: None)
+    one = exam.Report(kind="heldout", tenders=1, combined={"tenders": 1, "estimate_usd": {"kalkyl": 3.0}})
+    monkeypatch.setattr(exam, "run_exam", lambda *a, **kw: one)
+    assert cli.main(["eval", "heldout", "co-002"]) == 0
+    assert "estimate id" not in capsys.readouterr().out
+    one.combined = {"tenders": 2, "estimate_usd": {"kalkyl": 3.0}, "worst_usd": 6.0}
+    assert cli.main(["eval", "heldout", "co-002"]) == 0
+    assert f"estimate id: {exam.estimate_digest(one)}" in capsys.readouterr().out
+    one.estimate_usd = {"kalkyl": 1.0}  # the split's own estimate doesn't enter the id
+    assert cli.main(["eval", "heldout", "co-002"]) == 0
+    assert f"estimate id: {exam.estimate_digest(one)}" in capsys.readouterr().out
+    assert exam.estimate_digest(one) == exam.estimate_digest(exam.Report(kind="prospective", combined=one.combined))
 
 
 def test_the_selection_and_the_prefix_budget_are_one_total_over_the_tenders(data_root: Path) -> None:
