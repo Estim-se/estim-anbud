@@ -96,9 +96,9 @@ def test_one_invocation_runs_both_splits_in_order_and_its_total_matches_the_seal
     assert total["charged_usd"] == pytest.approx(sum(r.spent_usd for r in reports))
     assert [x for x in lines if "charged" in x] == [lines[-1]]  # printed once, last
     assert f"charged ${total['charged_usd']:.2f}" in lines[-1]
-    # Held-out runs come after their deadline by design, so only prospective ones count as late.
-    assert total["late"] == reports[0].runs_after_deadline > 0
-    assert f"; {total['late']} prospective runs finished after their tender's deadline;" in lines[-1]
+    # Some prospective runs came after their deadline. That is on their freeze lines, for scoring, and never in the
+    # total: a count over one split's runs beside it would give the other's by subtraction.
+    assert reports[0].runs_after_deadline > 0 and "late" not in total and "deadline" not in lines[-1]
 
 
 def test_an_invocation_that_leaves_runs_for_the_budget_prints_no_figure_of_its_runs(data_root: Path) -> None:

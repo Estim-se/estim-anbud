@@ -1369,13 +1369,15 @@ NEVER_FROZEN = "never_frozen"  # an attempt started and never frozen: no predict
 def paid_summary(company_id: str, root: Path | None = None) -> dict[str, Any]:
     """The paid exam so far, over both splits and every pass, from the sealed ledger: tenders attempted, attempts, how
     each pair's attempt ended by engine (`NEVER_FROZEN` for one that never came back), the finished ones with less than
-    a full review, and what was charged. Never per tender or per split."""
+    a full review, and what was charged. Never per tender or per split, and no count of one split's runs: beside the
+    rest, a count over prospective runs only (those after their deadline, say) would give the held-out split's by
+    subtraction. Whether a run came after its deadline is on its freeze line, for scoring."""
     try:
         attempts = freeze.exam_attempts(freeze.records(freeze.ledger_file(company_id, True, root), root))
     except freeze.FreezeError as exc:
         raise ExamError(f"the sealed ledger: {exc}") from None
     ended: dict[str, Counter[str]] = {}
-    degraded = late = 0
+    degraded = 0
     for (_, engine, _), found in sorted(attempts.items()):
         line = found[0]["freeze"]
         status = freeze.status_of(line) if line is not None else NEVER_FROZEN
@@ -1383,14 +1385,12 @@ def paid_summary(company_id: str, root: Path | None = None) -> dict[str, Any]:
         exam = (line or {}).get("exam") or {}
         finished = status == freeze.FINISHED
         degraded += finished and bool(_section(exam.get("degraded")).get("any"))
-        late += finished and exam.get("kind") == "prospective" and bool(exam.get("after_deadline"))
     return {
         "tenders": len({tender for tender, _, _ in attempts}),
         "attempts": sum(len(found) for found in attempts.values()),
         "pairs": len(attempts),
         "ended": {k: dict(sorted(v.items())) for k, v in sorted(ended.items())},
         "degraded": degraded,
-        "late": late,  # prospective runs that finished after their tender's deadline: not a prospective prediction
         "charged_usd": round(sum(charged_usd(a) for found in attempts.values() for a in found), 2),
     }
 
@@ -1507,11 +1507,10 @@ def _say_paid(p: dict[str, Any], say: Callable[[str], None]) -> None:
         say("paid exam: complete; fewer than 2 tenders attempted, so no figures")
         return
     ended = "; ".join(f"{status} {_counts(n)}" for status, n in p["ended"].items())
-    late = f"; {p['late']} prospective runs finished after their tender's deadline" if p.get("late") else ""
     say(
         f"paid exam: complete. One total over both splits and every pass (sealed ledger): {p['tenders']} tenders, "
         f"{p['attempts']} attempts of {p['pairs']} engine-input pairs; {ended}; {p['degraded']} finished with less "
-        f"than a full review{late}; charged ${p['charged_usd']:.2f}"
+        f"than a full review; charged ${p['charged_usd']:.2f}"
     )
 
 
