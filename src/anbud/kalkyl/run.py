@@ -49,6 +49,7 @@ from anbud.selection import OVERRIDE_FILE, SELECTION_FILE, Selection, SelectionE
 from anbud.stops import estimate_label, kalkyl_stop
 from anbud.store import RunStore, canonical
 
+READ_STEP = "kalkyl.extract."  # every R2 reading call's step starts so (`extract.extract_chunk`)
 CHARS_PER_TOKEN = 3.0  # Swedish text with block markup; conservative, so the estimate errs high
 OUTPUT_TOKENS_PER_CHUNK = (3000, 8000)  # records plus adaptive thinking at medium effort, low and high
 CARD_USD_PER_TILE = 0.03  # an R1 card that has to be read (plan section 9.1: 10 tiles about $0.17), rounded up
@@ -292,6 +293,8 @@ def run_dev_tender(
         "persist_failures": client.persist_failures,
         "replay_misses": client.replay_misses,
         "halted": client.halted,  # calls refused by a limit: the hard stop, the spend cap or a stop marker
+        "failures": dict(sorted(client.failures.items())),  # calls that failed for good, by kind
+        "unanswered": client.unanswered(READ_STEP),  # calls failed and no reading call was answered
         "output": str(out),
     }
     finished = result.complete and not client.replay_misses and not client.persist_failures and not cards.failed

@@ -161,8 +161,8 @@ def classify(exc: Exception) -> ModelError:
             return ModelError(kind, status, request_id, message)
     if isinstance(exc, anthropic.BadRequestError):
         lowered = message.lower()
-        if "usage limit" in lowered:  # a workspace cap arrives as a 400: pause the run, never retry it
-            kind = "spend_cap"
+        if "usage limit" in lowered or "credit balance" in lowered:  # a workspace cap or an empty balance: a 400
+            kind = "spend_cap"  # pause the run, never retry it
         elif "schema" in lowered:
             kind = "schema_rejected"
         else:
@@ -240,6 +240,7 @@ class ModelClient:
         self.refuse_roles: set[str] = set()  # roles a paid run refuses from now on, as at the hard stop (`refuse_role`)
         self.retries = 0  # attempts made again after a transient error (`TRANSIENT`); a replay counts the recorded ones
         self.failures: dict[str, int] = {}  # calls that failed for good, after their retries, by error kind
+        self.answered: dict[str, int] = {}  # calls answered, by the model or from the step cache, by step
         self.config = config
         self.sdk = sdk
         self.budget = budget
@@ -350,6 +351,7 @@ class ModelClient:
             raise RunStopped(f"run {self.run_id} has a stop marker")
         key = self.store.step_key(self.salt, params, step, sample) if self.store is not None else None
         if key is not None and (hit := self._cached(step, model, key)) is not None:
+            self._answer(step)
             return hit
         if self.sdk is None:
             with self._lock:
@@ -357,7 +359,9 @@ class ModelClient:
             raise ReplayMiss("this request isn't in the step cache, and replay never calls a model")
         for retried, delay in enumerate((*RETRY_DELAYS, None)):
             try:
-                return self._send(role, step, params, key, max_tokens, retried)
+                result = self._send(role, step, params, key, max_tokens, retried)
+                self._answer(step)
+                return result
             except ModelError as error:
                 if error.kind not in TRANSIENT or delay is None:
                     self._count(error.kind, 0)
@@ -438,6 +442,18 @@ class ModelClient:
             **blobs,
         )
         return CallResult(message, model, cost, duration, request_id)
+
+    def _answer(self, step: str) -> None:
+        with self._lock:
+            self.answered[step] = self.answered.get(step, 0) + 1
+
+    def unanswered(self, prefix: str) -> bool:
+        """Calls failed for good, of any kind, and no call whose step starts with `prefix` was answered: the run did
+        none of that work (a dead key, an empty balance, the network or the API down past the retries), and must not
+        count as finished. By step, not role: Granskning's checks share a lens role. A run that failed nothing (a stop
+        marker, the hard stop) is left to its own exit."""
+        with self._lock:
+            return bool(self.failures) and not any(s.startswith(prefix) for s in self.answered)
 
     def _count(self, failed: str | None, retries: int) -> None:
         with self._lock:
