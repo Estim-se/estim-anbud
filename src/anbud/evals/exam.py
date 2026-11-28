@@ -550,7 +550,7 @@ def selection_sizes(prep_dir: Path, calc_dir: Path, budgets: dict[str, Any]) -> 
         corpus, selection = load_selected(prep_dir)
         calc = load_calc(calc_dir)
         budget = PrefixBudget.from_config(budgets)
-        plan = plan_prefix(corpus, calc, budget) if budget is not None else None
+        plan = plan_prefix(corpus, calc, budget, corpus.tiles.values()) if budget is not None else None  # as a run
     except (OSError, ValueError, KeyError, SelectionError):
         return None
     out: dict[str, Any] = {
