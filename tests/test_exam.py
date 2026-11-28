@@ -210,6 +210,13 @@ class FakeEngines(exam.Engines):
     def launch_sha(self) -> str | None:
         return "f" * 40
 
+    def _app_export(self) -> Path:  # the app is the fake's own: nothing to export (`Engines.pin_app` reads the sha)
+        self._app_sha = "a" * 40
+        return Path("/nonexistent/app")
+
+    def baseline_ready(self, vroot: Path) -> str | None:
+        return None
+
     def gate(self, launch_sha: str | None) -> str | None:  # the tree is the fake's own: only the API check is scripted
         kind = self.api_check()
         return None if kind is None else f"the API check failed ({kind})"
