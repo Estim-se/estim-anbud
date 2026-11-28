@@ -4,11 +4,12 @@ any model call. Synthetic documents only."""
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
 import pytest
-from granskning_fakes import ScriptedSDK, png_bytes, write_prep
+from granskning_fakes import DOC_AF, DOC_RIT, ScriptedSDK, png_bytes, reply, write_prep
 from large_tender import DOCS, EL_LINE, TOTAL_PAGES, doc_id, write_large_prep
 from test_granskning_pipeline import CLEAN, _calc, _catalog
 from test_runguard import ledger_with
@@ -17,8 +18,20 @@ from anbud import cli, model_client
 from anbud import config as config_module
 from anbud.evals import split_heldout as sh
 from anbud.granskning import provenance
-from anbud.granskning.budget import PrefixBudget, apply_plan, plan_prefix, priorities
+from anbud.granskning.budget import (
+    DOC_CHARS,
+    PrefixBudget,
+    PrefixOverBudget,
+    _card_tokens_each,
+    apply_plan,
+    fit_prefix,
+    plan_prefix,
+    priorities,
+)
+from anbud.granskning.calc import load_calc
 from anbud.granskning.corpus import Corpus
+from anbud.granskning.page_cards import card_from_message
+from anbud.granskning.pipeline import add_cards
 from anbud.granskning.prefix import SEARCH_ONLY_NOTE, corpus_text, estimate_tokens, system_blocks
 from anbud.granskning.rank import coverage
 from anbud.granskning.toolbox import Toolbox
@@ -134,3 +147,65 @@ def test_the_dry_run_shows_priority_1_on_its_own(
     _budget(monkeypatch, 1000)
     assert cli.main(["run", "co-001", "t-0001", "--dry-run"]) == 0
     assert "priority 1 does not fit: a paid run stops before any model call" in capsys.readouterr().out
+
+
+# An invented card: a dense page of text, larger than the room left in the budget.
+BIG_CARD = "\n\n".join(f"Påhittat stycke {n}: " + "text på en inskannad sida " * 20 for n in range(12))
+
+
+def _tile_on(prep: Path, doc: str, page: int, name: str | None = None) -> None:
+    """Moves the synthetic tender's one tile to `doc`, and renames that document when `name` is given."""
+    tiles = json.loads((prep / "tiles.json").read_text())
+    tiles[0] |= {"doc_id": doc, "page": page}
+    (prep / "tiles.json").write_text(json.dumps(tiles))
+    if name is not None:
+        docs = json.loads((prep / "documents.json").read_text())
+        for d in docs:
+            if d["doc_id"] == doc:
+                d["paths"] = [f"inbox/{name}"]
+        (prep / "documents.json").write_text(json.dumps(docs))
+
+
+def test_page_cards_that_would_take_priority_1_over_the_budget_stop_the_run_before_the_first_card(
+    tender: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tile_on(tender / "prep", DOC_AF, 2)  # a scanned page of the AF: its card's text joins priority 1
+    corpus, _ = load_selected(tender / "prep")
+    calc = load_calc(tender / "calc")
+    without = plan_prefix(corpus, calc, BUDGET)
+    tokens = without.p0 + without.p1 + 1000
+    assert plan_prefix(corpus, calc, PrefixBudget(tokens, 0.1)).p1_fits  # the check before the cards, without them
+    card = card_from_message(next(iter(corpus.tiles.values())), reply(BIG_CARD))
+    with pytest.raises(PrefixOverBudget):  # the check after them stops: by then the card was paid for
+        fit_prefix(add_cards(corpus, card), calc, {"prefix": {"budget_tokens": tokens, "boundary_share": 0.1}})
+
+    _budget(monkeypatch, tokens)
+    sdk = ScriptedSDK(lambda params: reply(BIG_CARD))
+    monkeypatch.setattr(model_client, "keychain_key", lambda **_: "sk-test")
+    monkeypatch.setattr(model_client, "make_sdk_client", lambda config, key: sdk)
+    assert cli.main(["run", "co-001", "t-0001", "--run-id", "t-0001-cards"]) != 0
+    assert sdk.sent == []  # stopped before the first card
+    err = capsys.readouterr().err
+    assert "tokens of their page cards" in err and f"budget of {tokens} tokens" in err
+
+
+def test_the_card_bound_counts_only_cards_that_can_reach_priority_1(tmp_path: Path) -> None:
+    prep = write_prep(tmp_path / "drawing" / "prep")
+    _tile_on(prep, DOC_RIT, 1, "E-63-1-001 Elplan.pdf")  # a numbered electrical drawing: priority 2, never priority 1
+    corpus, _ = load_selected(prep)
+    assert priorities(corpus)[DOC_RIT] == 2
+    assert plan_prefix(corpus, [], BUDGET, corpus.tiles.values()).cards == 0
+
+    prep = write_prep(tmp_path / "scan" / "prep")
+    _tile_on(prep, DOC_RIT, 1, "Underlag 7.pdf")  # a scan under a plain name: its card may classify it as the AF
+    corpus, _ = load_selected(prep)
+    tile = next(iter(corpus.tiles.values()))
+    plan = plan_prefix(corpus, [], BUDGET, corpus.tiles.values())
+    assert priorities(corpus)[DOC_RIT] == 3 and plan.cards == _card_tokens_each(tile) + int(DOC_CHARS / 1.6)
+    assert plan.summary()["p1_card_tokens_max"] == plan.cards
+    assert "p1_card_tokens_max" not in plan_prefix(corpus, [], BUDGET).summary()  # a plan after the cards: unchanged
+
+    _tile_on(prep, DOC_AF, 2)  # a priority-1 document: one full card, its own text is counted already
+    corpus, _ = load_selected(prep)
+    assert plan_prefix(corpus, [], BUDGET, corpus.tiles.values()).cards == _card_tokens_each(tile)
+    assert _card_tokens_each(tile) * 1.6 > len(BIG_CARD)  # the bound holds the invented dense page

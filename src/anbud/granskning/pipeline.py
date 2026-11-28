@@ -255,8 +255,8 @@ def run_pipeline(
     say = on_progress or (lambda _msg: None)
     spent_before = client.budget.spent
     budget = PrefixBudget.from_config(client.config.budgets)
-    if budget is not None and not (early := plan_prefix(corpus, calc, budget)).p1_fits:
-        raise PrefixOverBudget(over_budget(early))  # before the cards: no paid call yet
+    if budget is not None and not (early := plan_prefix(corpus, calc, budget, corpus.tiles.values())).p1_fits:
+        raise PrefixOverBudget(over_budget(early))  # before the cards, with the most their text can add: no paid call
     say(f"page cards: {len(corpus.tiles)} tiles")
     read = read_all_cards(client, store, corpus)
     cards = read.cards
